@@ -117,6 +117,9 @@ class Brain:
         # P1: Track load_llm requests to detect when workers don't pick them up
         self.load_llm_requests: Dict[str, Dict] = {}
 
+        # Verify core/ security before starting
+        self._verify_core_security()
+
         # Load existing brain state
         self._load_brain_state()
 
@@ -132,6 +135,43 @@ class Brain:
             sys.exit(1)
         with open(config_path) as f:
             return json.load(f)
+
+    def _verify_core_security(self):
+        """Verify core/ directory is properly secured before starting.
+
+        Checks: root ownership, no group/world-writable files, not running as root.
+        Exits with error if any check fails — these are hard security requirements.
+        """
+        import stat
+        core_path = self.shared_path / "core"
+        if not core_path.exists():
+            self.logger.warning(f"core/ directory not found at {core_path}")
+            return
+
+        # Agents must never run as root
+        if os.getuid() == 0:
+            self.logger.error("SECURITY: Agents must NOT run as root.")
+            sys.exit(1)
+
+        # core/ must be root-owned
+        st = core_path.stat()
+        if st.st_uid != 0:
+            self.logger.error(
+                f"SECURITY: core/ is not root-owned (uid={st.st_uid}). "
+                f"Run: sudo chown -R root:root {core_path}")
+            sys.exit(1)
+
+        # Files in core/ must not be group/world-writable
+        for f in core_path.iterdir():
+            if f.is_file():
+                mode = f.stat().st_mode
+                if mode & stat.S_IWOTH or mode & stat.S_IWGRP:
+                    self.logger.error(
+                        f"SECURITY: {f} is group/world-writable. "
+                        f"Run: sudo chmod 644 {f}")
+                    sys.exit(1)
+
+        self.logger.info("core/ security check passed")
 
     def _load_brain_state(self):
         """Load brain state from disk."""

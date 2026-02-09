@@ -59,16 +59,23 @@ class PermissionExecutor:
             return json.load(f)
 
     def _match_path(self, path: str, patterns: List[str]) -> bool:
-        """Check if path matches any of the glob patterns."""
+        """Check if path matches any of the glob patterns.
+
+        Security: resolves symlinks via realpath() before checking, and escapes
+        regex metacharacters in patterns to prevent unintended matches.
+        """
         path = os.path.expanduser(path)
-        path = os.path.abspath(path)
+        path = os.path.realpath(path)  # Resolve symlinks before checking
 
         for pattern in patterns:
             pattern = os.path.expanduser(pattern)
             # Handle ** glob
             if "**" in pattern:
-                # Convert to regex
-                regex = pattern.replace("**", ".*").replace("*", "[^/]*")
+                # Escape regex metacharacters while preserving glob wildcards.
+                # Use alphanumeric placeholders that re.escape() won't modify.
+                temp = pattern.replace("**", "__DOUBLESTAR__").replace("*", "__STAR__")
+                temp = re.escape(temp)
+                regex = temp.replace("__DOUBLESTAR__", ".*").replace("__STAR__", "[^/]*")
                 if re.match(regex, path):
                     return True
             elif fnmatch.fnmatch(path, pattern):
@@ -114,15 +121,53 @@ class PermissionExecutor:
 
         return ActionResult.BLOCKED, "Path not in allowed list"
 
+    def _extract_command_segments(self, command: str) -> List[str]:
+        """Extract individual command segments from a compound shell command.
+
+        Splits on shell operators (&&, ||, ;, |) and extracts subshell
+        contents ($() and backticks) for independent blocked-pattern checking.
+        This ensures dangerous commands embedded after operators or inside
+        subshells are caught even if blocked patterns use anchors.
+        """
+        segments = []
+
+        # Split on shell operators: &&, ||, ;, |
+        # Note: simple regex split doesn't handle operators inside quotes,
+        # but the full-command check below catches those cases.
+        parts = re.split(r'\s*(?:&&|\|\||;|\|)\s*', command)
+        segments.extend(p.strip() for p in parts if p.strip())
+
+        # Extract $() subshell contents
+        for match in re.finditer(r'\$\((.+?)\)', command):
+            segments.append(match.group(1).strip())
+
+        # Extract backtick subshell contents
+        for match in re.finditer(r'`(.+?)`', command):
+            segments.append(match.group(1).strip())
+
+        return segments
+
     def _check_bash_command(self, command: str) -> Tuple[ActionResult, str]:
-        """Check if bash command is allowed."""
+        """Check if bash command is allowed.
+
+        Security: checks blocked patterns against the full command AND each
+        individual segment (split on shell operators and subshells) to catch
+        dangerous commands embedded via operator chaining or subshells.
+        """
         rules = self.permissions.get("bash", {})
 
-        # Check blocked patterns first (these are dangerous)
+        # Check blocked patterns against full command and each segment
         blocked = rules.get("blocked_patterns", [])
+        segments = self._extract_command_segments(command)
+
         for pattern in blocked:
+            # Check full command string
             if re.search(pattern, command):
                 return ActionResult.BLOCKED, f"Matches blocked pattern: {pattern}"
+            # Check each segment independently (catches anchored patterns)
+            for segment in segments:
+                if re.search(pattern, segment):
+                    return ActionResult.BLOCKED, f"Matches blocked pattern: {pattern}"
 
         # Check allowed commands
         allowed = rules.get("allowed_commands", [])
@@ -181,10 +226,11 @@ class PermissionExecutor:
         except Exception as e:
             return ExecutionResult(False, str(e), ActionResult.ALLOWED, f"Write error: {e}")
 
-    def run_bash(self, command: str) -> ExecutionResult:
+    def run_bash(self, command: str, timeout: int = None) -> ExecutionResult:
         """Run a bash command with permission checking.
 
         Uses process groups so child processes can be killed cleanly if needed.
+        Optional timeout overrides the permissions-configured default.
         """
         action, reason = self._check_bash_command(command)
 
@@ -197,7 +243,8 @@ class PermissionExecutor:
             self.pending_approvals.append({"type": "bash", "command": command})
             return ExecutionResult(False, "", action, reason)
 
-        timeout = self.permissions.get("bash", {}).get("timeout_seconds", 30)
+        if timeout is None:
+            timeout = self.permissions.get("bash", {}).get("timeout_seconds", 30)
 
         try:
             # Use Popen with new process group so we can kill all children
