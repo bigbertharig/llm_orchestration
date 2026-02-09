@@ -96,7 +96,7 @@ Workers claim tasks based on:
 3. File order in queue
 
 Priority levels:
-- 10: Urgent (resource tasks like load_llm/unload_llm)
+- 10: Urgent (meta tasks like load_llm/unload_llm)
 - 7: Resource management
 - 5: Normal work (default)
 - 3: Background/batch
@@ -135,12 +135,14 @@ THREE TASK CLASSES (task_class field in plan.md):
 3. llm: Requires Ollama with Qwen loaded
    - Text generation, summarization, parsing
 
-4. resource: Internal only (brain-inserted)
+4. meta: Internal only (brain-inserted)
    - load_llm, unload_llm commands
+   - Worker management and resource control
    - Plans should NOT use this class
 
 Key difference: Script tasks can run while LLM is unloaded,
-enabling better GPU utilization across task types.
+enabling better GPU utilization across task types. Meta tasks
+let the brain manage worker resources dynamically.
 ```
 
 ---

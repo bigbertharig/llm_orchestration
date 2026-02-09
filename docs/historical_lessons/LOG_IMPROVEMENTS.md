@@ -1,14 +1,16 @@
-# Logging Improvements - Debug Worker Claiming Issues
+# Logging Improvements - Debug Task Claiming Issues
 
 ## Problem Summary
 
-During the video_zim_batch run on 2026-02-07, workers 1 and 3 stopped claiming tasks after transcription completed, but logs didn't show why. Only worker-2 claimed load_llm tasks and processed all topic generation alone.
+During the video_zim_batch run on 2026-02-07, GPU agents 1 and 4 stopped claiming tasks after transcription completed, but logs didn't show why. Only gpu-2 claimed load_llm tasks and processed all topic generation alone.
 
 **What we couldn't see:**
-- Whether workers 1 and 3 were still running their claim loop
+- Whether GPU agents 1 and 4 were still running their claim loop
 - Why they didn't claim load_llm or llm tasks
 - If they crashed, exited normally, or got stuck
 - Which tasks were in "processing" state (stuck tasks)
+
+**Note:** This analysis was written before the GPU agent refactor. The architecture has since changed from multi-worker-per-GPU to one GPU agent per GPU that spawns worker subprocesses. Many of the proposed improvements below are now handled differently in the GPU agent model.
 
 ## Priority Levels
 
@@ -18,46 +20,31 @@ During the video_zim_batch run on 2026-02-07, workers 1 and 3 stopped claiming t
 
 ---
 
-## Worker Improvements
+## GPU Agent Improvements
 
-### P0: Worker Lifecycle Events
+### P0: GPU Agent Lifecycle Events (IMPLEMENTED)
 
-Add clear entry/exit logging to see when workers start, stop, or crash.
-
-**Location:** `shared/agents/worker.py` - `__init__()`, `run()`, `cleanup()`
+GPU agents now have clear lifecycle logging in `shared/agents/gpu.py`:
 
 ```python
-def __init__(self, ...):
-    # Existing init code...
-    self.logger.info(f"Worker initialized: {self.name} on GPU {self.gpu}, Ollama port {self.ollama_port}")
+# GPUAgent.__init__()
+self.logger.info(f"GPU agent initialized: {self.name} (GPU {self.gpu_id}), port {self.port}, model {self.model}")
 
-def run(self):
-    """Main worker loop."""
-    self.logger.info(f"Worker {self.name} starting main loop")
-    self.running = True
+# GPUAgent.run()
+self.logger.info(f"GPU agent {self.name} starting")
+# ... on crash:
+self.logger.error(f"GPU agent crashed: {e}", exc_info=True)
 
-    try:
-        while self.running:
-            # Existing claim loop...
-    except KeyboardInterrupt:
-        self.logger.info(f"Worker {self.name} received shutdown signal")
-    except Exception as e:
-        self.logger.error(f"Worker {self.name} crashed in main loop: {e}", exc_info=True)
-    finally:
-        self.cleanup()
-
-def cleanup(self):
-    """Clean up resources on shutdown."""
-    self.logger.info(f"Worker {self.name} shutting down - completed {self.stats.get('tasks_completed', 0)} tasks")
-    # Existing cleanup...
+# GPUAgent.cleanup()
+self.logger.info(f"GPU {self.name} shutting down - completed {stats['tasks_completed']}, failed {stats['tasks_failed']}")
 ```
 
 **Example output:**
 ```
-[2026-02-07 21:05:50] [worker-gpu1] Worker initialized: worker-1 on GPU 1, Ollama port 11437
-[2026-02-07 21:05:51] [worker-gpu1] Worker starting main loop
-[2026-02-07 21:45:26] [worker-gpu1] Worker crashed in main loop: KeyError('model_name')
-[2026-02-07 21:45:26] [worker-gpu1] Worker shutting down - completed 42 tasks
+[21:05:50] [gpu-1] GPU agent initialized: gpu-1 (GPU 1), port 11435, model qwen2.5:7b
+[21:05:51] [gpu-1] GPU agent gpu-1 starting
+[21:45:26] [gpu-1] GPU agent crashed: KeyError('model_name')
+[21:45:26] [gpu-1] GPU gpu-1 shutting down - completed 42, failed 1
 ```
 
 ---
@@ -130,7 +117,7 @@ for task_file in candidates:
 [2026-02-07 21:45:28] [worker-gpu1] Attempting claim: d5de16d7
 [2026-02-07 21:45:28] [worker-gpu1] Lost race: d5de16d7 (claimed by another worker)
 [2026-02-07 21:45:28] [worker-gpu2] Attempting claim: d5de16d7
-[2026-02-07 21:45:28] [worker-gpu2] Claimed resource task: d5de16d7 (load_llm)
+[2026-02-07 21:45:28] [worker-gpu2] Claimed meta task: d5de16d7 (load_llm)
 ```
 
 ---
@@ -309,7 +296,7 @@ details['queue_stats'] = {
 [brain] LLM tasks waiting (125) but no models loaded - inserting load_llm task
 [worker-1] Attempting claim: d5de16d7
 [worker-1] Lost race: d5de16d7 (claimed by another worker)
-[worker-2] Claimed resource task: d5de16d7 (load_llm)
+[worker-2] Claimed meta task: d5de16d7 (load_llm)
 ```
 
 ### Test Case 3: All Workers Busy
@@ -340,9 +327,67 @@ details['queue_stats'] = {
 
 ---
 
+## Implemented: Independent Component Logging
+
+**Status:** COMPLETE (2026-02-08)
+
+Each component now has independent logging level control via environment variables:
+
+### Environment Variables
+
+- **EXECUTOR_LOG_LEVEL** - Controls executor (permission checking) logs
+- **WORKER_LOG_LEVEL** - Controls worker (task execution, claiming) logs
+- **BRAIN_LOG_LEVEL** - Controls brain (coordination, decision-making) logs
+
+### Usage Examples
+
+```bash
+# Debug only executor permission checks
+EXECUTOR_LOG_LEVEL=DEBUG python shared/agents/worker.py worker-1
+
+# Debug worker task claiming and queue visibility
+WORKER_LOG_LEVEL=DEBUG python shared/agents/worker.py worker-1
+
+# Debug brain decisions and task routing
+BRAIN_LOG_LEVEL=DEBUG python shared/agents/brain.py
+
+# Mix different levels for targeted debugging
+WORKER_LOG_LEVEL=DEBUG EXECUTOR_LOG_LEVEL=WARNING python shared/agents/worker.py worker-1
+
+# Everything at DEBUG (maximum verbosity)
+BRAIN_LOG_LEVEL=DEBUG WORKER_LOG_LEVEL=DEBUG EXECUTOR_LOG_LEVEL=DEBUG python shared/agents/brain.py
+```
+
+### What Each Level Shows
+
+**EXECUTOR_LOG_LEVEL=DEBUG:**
+- All ALLOWED file reads/writes and bash commands (usually excessive)
+- Useful for debugging permission system issues
+
+**WORKER_LOG_LEVEL=DEBUG:**
+- Task claiming attempts and lost races
+- Queue visibility (what tasks the worker sees)
+- Heartbeat details (idle time, GPU stats)
+- GPU monitoring failures
+
+**BRAIN_LOG_LEVEL=DEBUG:**
+- Task dependency tracking
+- Resource task deduplication
+- Task analysis errors
+- Training sample logging
+
+### Benefits
+
+1. **Focused debugging** - Only enable verbose logging for the component you're investigating
+2. **Reduced noise** - Other components stay at INFO level while debugging one
+3. **Performance** - Less I/O overhead when not logging everything at DEBUG
+4. **Flexibility** - Different log levels per-component in the same run
+
+---
+
 ## Notes
 
 - Keep debug logs at debug level to avoid log spam
-- Consider adding a `--verbose` flag to enable debug logging
-- All timestamps should be ISO format with milliseconds for precise ordering
+- All timestamps are ISO format with milliseconds for precise ordering
 - Consider log rotation if files get too large (>100MB)
+- Default level for all components is INFO if env var not set

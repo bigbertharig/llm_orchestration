@@ -38,6 +38,17 @@ class PermissionExecutor:
                  heartbeat_callback=None):
         self.agent_name = agent_name
         self.logger = logging.getLogger(f"{agent_name}.executor")
+
+        # Set independent logging level for executor
+        # Use EXECUTOR_LOG_LEVEL env var, default to INFO
+        executor_log_level = os.environ.get("EXECUTOR_LOG_LEVEL", "INFO").upper()
+        try:
+            level = getattr(logging, executor_log_level)
+            self.logger.setLevel(level)
+        except AttributeError:
+            self.logger.setLevel(logging.INFO)
+            self.logger.warning(f"Invalid EXECUTOR_LOG_LEVEL '{executor_log_level}', defaulting to INFO")
+
         self.permissions = self._load_permissions(permissions_file)
         self.pending_approvals: List[Dict] = []
         self.active_process: Optional[subprocess.Popen] = None  # Track running subprocess

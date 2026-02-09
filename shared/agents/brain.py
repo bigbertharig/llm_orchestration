@@ -41,9 +41,9 @@ logging.basicConfig(
 #   - cpu: Any worker (including RPi)
 #   - script: GPU workers only (no LLM needed, uses GPU for compute)
 #   - llm: GPU workers only (needs LLM model loaded)
-#   - resource: Model load/unload tasks (inserted by brain, claimed by GPU workers)
+#   - meta: Model load/unload tasks (inserted by brain, claimed by GPU workers)
 # =============================================================================
-VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'resource']
+VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'meta']
 
 
 class Brain:
@@ -53,6 +53,16 @@ class Brain:
         self.brain_config = self.config["brain"]
         self.name = self.brain_config["name"]
         self.logger = logging.getLogger(self.name)
+
+        # Set independent logging level for brain
+        # Use BRAIN_LOG_LEVEL env var, default to INFO
+        brain_log_level = os.environ.get("BRAIN_LOG_LEVEL", "INFO").upper()
+        try:
+            level = getattr(logging, brain_log_level)
+            self.logger.setLevel(level)
+        except AttributeError:
+            self.logger.setLevel(logging.INFO)
+            self.logger.warning(f"Invalid BRAIN_LOG_LEVEL '{brain_log_level}', defaulting to INFO")
 
         # Resolve paths relative to config file location
         config_dir = self.config_path.parent
@@ -84,7 +94,7 @@ class Brain:
         self.poll_interval = self.config["timeouts"]["poll_interval_seconds"]
         self.think_timeout = self.config["timeouts"]["brain_think_seconds"]
 
-        self.workers = {w["name"]: w for w in self.config["workers"]}
+        self.gpu_agents = {g["name"]: g for g in self.config["gpus"]}
         self.ollama_process: Optional[subprocess.Popen] = None
         self.running = True
 
@@ -99,8 +109,8 @@ class Brain:
         # Resource monitoring
         self.last_monitor_check = 0
         self.monitor_interval = 30  # seconds
-        self.worker_pids: Dict[str, int] = {}
-        self.worker_miss_count: Dict[str, int] = {}  # Track consecutive misses for 3-miss tolerance
+        self.gpu_pids: Dict[str, int] = {}
+        self.gpu_miss_count: Dict[str, int] = {}  # Track consecutive misses for 3-miss tolerance
         self.signals_path = self.shared_path / "signals"
         self.signals_path.mkdir(parents=True, exist_ok=True)
 
@@ -633,9 +643,9 @@ class Brain:
         with open(plan_file) as f:
             plan_content = f.read()
 
-        # Generate batch ID and create directories
-        batch_id = uuid.uuid4().hex[:8]
-        batch_dir = plan_dir / "batches" / batch_id
+        # Generate timestamp-based batch ID for chronological ordering
+        batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        batch_dir = plan_dir / "history" / batch_id
         batch_dir.mkdir(parents=True, exist_ok=True)
         (batch_dir / "results").mkdir(exist_ok=True)
         (batch_dir / "output").mkdir(exist_ok=True)
@@ -737,6 +747,27 @@ class Brain:
                 if not task_def.get("depends_on"):
                     tasks_with_no_deps.append(task)
 
+        # Auto-insert execution summary task (depends on all other tasks)
+        all_task_ids = [t["id"] for t in task_defs]
+        summary_command = f"python {self.shared_path}/scripts/generate_batch_summary.py --batch-id {batch_id} --plan-name {plan_dir.name} --plan-dir {plan_dir.resolve()}"
+
+        summary_task = self.create_task(
+            task_type="shell",
+            command=summary_command,
+            batch_id=batch_id,
+            task_name="batch_summary",
+            priority=1,  # Low priority - runs at very end
+            depends_on=all_task_ids,  # Depends on everything
+            executor="worker",
+            task_class="cpu"
+        )
+
+        self.save_to_private(summary_task)
+        self.log_decision("TASK_CREATED", "Created automatic summary task (depends on all tasks)", {
+            "task_id": summary_task["task_id"][:8],
+            "depends_on_count": len(all_task_ids)
+        })
+
         # Track this batch (include paths for foreach expansion)
         self.active_batches[batch_id] = {
             "plan": plan_dir.name,
@@ -744,7 +775,7 @@ class Brain:
             "batch_dir": str(batch_dir.resolve()),
             "started_at": datetime.now().isoformat(),
             "config": config,
-            "total_tasks": len(task_defs)
+            "total_tasks": len(task_defs) + 1  # +1 for automatic summary task
         }
         self._save_brain_state()
 
@@ -958,10 +989,10 @@ JSON only:"""
     def handle_failed_tasks(self):
         """Check for failed tasks and handle based on error type.
 
-        - Worker failures: Retry up to max_retries times
+        - Worker failures: Retry up to max_attempts times (uses task memory)
         - Definition errors: Attempt to fix (e.g., infer missing task_class)
         """
-        max_retries = 3
+        max_attempts = self.config.get("retry_policy", {}).get("max_attempts", 3)
 
         for task_file in self.failed_path.glob("*.json"):
             try:
@@ -970,7 +1001,10 @@ JSON only:"""
 
                 result = task.get("result", {})
                 error_type = result.get("error_type", "worker")  # Default to worker failure
-                retry_count = task.get("retry_count", 0)
+
+                # Use task memory fields (attempts, workers_attempted)
+                attempts = task.get("attempts", 0)
+                workers = task.get("workers_attempted", [])
 
                 if error_type == "definition":
                     # Definition error - try to fix the task
@@ -987,19 +1021,23 @@ JSON only:"""
                             {"task_id": task["task_id"][:8]})
                         # Leave in failed/ for manual intervention
 
-                elif retry_count < max_retries:
+                elif attempts < max_attempts:
                     # Worker failure - retry
-                    task["retry_count"] = retry_count + 1
                     task["status"] = "pending"
 
                     task_file.unlink()
                     self.save_to_public(task)
 
-                    self.log_decision("RETRY", f"Retrying task (attempt {retry_count + 1}/{max_retries})",
-                                      {"task_id": task["task_id"][:8], "name": task.get("name", "")})
+                    workers_str = ", ".join(workers) if workers else "unknown"
+                    self.log_decision("RETRY",
+                        f"Retrying task (attempt {attempts}/{max_attempts}) - previous workers: {workers_str}",
+                        {"task_id": task["task_id"][:8], "name": task.get("name", ""), "workers_attempted": workers})
                 else:
-                    self.log_decision("ABANDON", f"Task abandoned after {max_retries} retries",
-                                      {"task_id": task["task_id"][:8], "name": task.get("name", "")})
+                    workers_str = ", ".join(workers) if workers else "unknown"
+                    self.log_decision("ABANDON",
+                        f"Task abandoned after {attempts} attempts by workers [{workers_str}]",
+                        {"task_id": task["task_id"][:8], "name": task.get("name", ""),
+                         "workers_attempted": workers, "attempts": attempts})
 
             except Exception as e:
                 self.logger.error(f"Error handling failed task: {e}")
@@ -1154,7 +1192,7 @@ JSON only:"""
                 self._send_abort_signal(worker_name, task_id, f"task_timeout_{elapsed_min}min")
 
     def monitor_system(self):
-        """Monitor GPU and worker status, make resource allocation decisions."""
+        """Monitor GPU agent status, make resource allocation decisions."""
         now = time.time()
         if now - self.last_monitor_check < self.monitor_interval:
             return
@@ -1162,7 +1200,7 @@ JSON only:"""
 
         try:
             gpu_status = self._get_gpu_status()
-            running_workers = self._get_running_workers()
+            running_gpus = self._get_running_gpus()
             queue_stats = self._analyze_task_queue()
 
             # P0: Check for stuck tasks (processing > 20 minutes)
@@ -1174,7 +1212,7 @@ JSON only:"""
             if stuck_tasks:
                 self._handle_stuck_tasks(stuck_tasks)
 
-            self._make_resource_decisions(gpu_status, running_workers, queue_stats)
+            self._make_resource_decisions(gpu_status, running_gpus, queue_stats)
 
         except Exception as e:
             self.logger.warning(f"Monitor check failed: {e}")
@@ -1201,47 +1239,49 @@ JSON only:"""
                     })
         return gpu_status
 
-    def _get_running_workers(self) -> Dict[str, Dict]:
-        """Check which worker processes are actually running.
+    def _get_running_gpus(self) -> Dict[str, Dict]:
+        """Check which GPU agent processes are actually running.
 
         Uses both pgrep (process detection) and heartbeat freshness.
-        A worker is considered running if:
+        A GPU agent is considered running if:
         1. Its process exists (pgrep), OR
-        2. Its heartbeat was updated within the last 30 seconds
+        2. Its heartbeat was updated within the last 60 seconds
         """
         running = {}
 
-        for worker_name, worker_config in self.workers.items():
-            gpu = worker_config["gpu"]
-            port = worker_config["port"]
+        for gpu_name, gpu_config in self.gpu_agents.items():
+            gpu_id = gpu_config["id"]
+            port = gpu_config.get("port")
 
-            # Check process with regex pattern (handles --config args between worker.py and name)
+            # Check process with regex pattern
             result = subprocess.run(
-                ["pgrep", "-f", f"worker.py.*{worker_name}"],
+                ["pgrep", "-f", f"gpu.py.*{gpu_name}"],
                 capture_output=True, text=True, timeout=5
             )
 
             if result.stdout.strip():
                 pid = int(result.stdout.strip().split('\n')[0])
-                running[worker_name] = {"pid": pid, "gpu": gpu, "port": port}
-                self.worker_pids[worker_name] = pid
+                running[gpu_name] = {"pid": pid, "gpu": gpu_id, "port": port}
+                self.gpu_pids[gpu_name] = pid
             else:
-                # Fallback: check heartbeat freshness (worker might be in a long task)
-                heartbeat_file = self.shared_path / "workers" / worker_name / "heartbeat.json"
+                # Fallback: check GPU heartbeat freshness
+                heartbeat_file = self.shared_path / "gpus" / f"gpu_{gpu_id}" / "heartbeat.json"
                 if heartbeat_file.exists():
                     try:
                         with open(heartbeat_file) as f:
-                            heartbeat = json.load(f)
-                        timestamp = datetime.fromisoformat(heartbeat["timestamp"])
-                        age = (datetime.now() - timestamp).total_seconds()
-                        if age < 30:  # Fresh heartbeat within 30 seconds
-                            running[worker_name] = {"pid": self.worker_pids.get(worker_name, 0),
-                                                    "gpu": gpu, "port": port, "via_heartbeat": True}
+                            gpu_state = json.load(f)
+                        last_updated = gpu_state.get("last_updated")
+                        if last_updated:
+                            timestamp = datetime.fromisoformat(last_updated)
+                            age = (datetime.now() - timestamp).total_seconds()
+                            if age < 60:
+                                running[gpu_name] = {"pid": self.gpu_pids.get(gpu_name, 0),
+                                                     "gpu": gpu_id, "port": port, "via_heartbeat": True}
                     except Exception:
                         pass
 
-                if worker_name not in running and worker_name in self.worker_pids:
-                    del self.worker_pids[worker_name]
+                if gpu_name not in running and gpu_name in self.gpu_pids:
+                    del self.gpu_pids[gpu_name]
 
         return running
 
@@ -1252,7 +1292,7 @@ JSON only:"""
             "cpu": 0,
             "script": 0,
             "llm": 0,
-            "resource": 0,
+            "meta": 0,
             "brain_tasks": 0,
             "worker_tasks": 0
         }
@@ -1281,17 +1321,19 @@ JSON only:"""
 
         return stats
 
-    def _get_worker_states(self) -> Dict[str, Dict]:
-        """Read worker heartbeats to get current state including model_loaded."""
-        workers_path = self.shared_path / "workers"
+    def _get_gpu_states(self) -> Dict[str, Dict]:
+        """Read GPU heartbeats to get current GPU agent states including model_loaded."""
+        gpus_path = self.shared_path / "gpus"
         states = {}
 
-        for worker_name in self.workers.keys():
-            heartbeat_file = workers_path / worker_name / "heartbeat.json"
+        for gpu_name, gpu_config in self.gpu_agents.items():
+            gpu_id = gpu_config["id"]
+            heartbeat_file = gpus_path / f"gpu_{gpu_id}" / "heartbeat.json"
             if heartbeat_file.exists():
                 try:
                     with open(heartbeat_file) as f:
-                        states[worker_name] = json.load(f)
+                        gpu_state = json.load(f)
+                    states[gpu_name] = gpu_state
                 except Exception:
                     pass
 
@@ -1301,12 +1343,12 @@ JSON only:"""
         """Insert a resource task (load_llm or unload_llm) for workers to claim."""
         task = {
             "task_id": str(uuid.uuid4()),
-            "type": "resource",
+            "type": "meta",
             "command": command,
             "batch_id": "system",
             "name": command,
             "priority": 10,  # High priority
-            "task_class": "resource",
+            "task_class": "meta",
             "depends_on": [],
             "executor": "worker",
             "status": "pending",
@@ -1317,141 +1359,107 @@ JSON only:"""
         self.save_to_public(task)
         self.log_decision("RESOURCE_TASK", f"Inserted {command} task", {"task_id": task["task_id"][:8]})
 
-        # P1: Track load_llm requests to detect when workers don't pick them up
+        # Track load_llm requests to detect when GPUs don't pick them up
         if command == "load_llm":
-            worker_states = self._get_worker_states()
-            workers_without_model = [w for w, s in worker_states.items() if not s.get("model_loaded", False)]
+            gpu_states = self._get_gpu_states()
+            cold_gpus = [g for g, s in gpu_states.items() if not s.get("model_loaded", False)]
             self.load_llm_requests[task["task_id"]] = {
                 'created_at': datetime.now(),
-                'workers_needed': workers_without_model.copy()
+                'gpus_needed': cold_gpus.copy()
             }
 
-    def _make_resource_decisions(self, gpu_status: List[Dict], running_workers: Dict, queue_stats: Dict):
-        """Make decisions about worker allocation based on current state."""
+    def _make_resource_decisions(self, gpu_status: List[Dict], running_gpus: Dict, queue_stats: Dict):
+        """Make decisions about GPU resource allocation based on current state."""
         active_gpus = [g for g in gpu_status if g["util_pct"] > 10 or g["mem_used_mb"] > 1000]
         total_power = sum(g["power_w"] for g in gpu_status)
 
-        # Get worker model states
-        worker_states = self._get_worker_states()
-        workers_with_model = [w for w, s in worker_states.items() if s.get("model_loaded", False)]
-        workers_without_model = [w for w, s in worker_states.items() if not s.get("model_loaded", False)]
+        # Get GPU agent states from heartbeats
+        gpu_states = self._get_gpu_states()
+        gpus_with_model = [g for g, s in gpu_states.items() if s.get("model_loaded", False)]
+        gpus_without_model = [g for g, s in gpu_states.items() if not s.get("model_loaded", False)]
 
-        # P0: Include stuck tasks and processing count in monitor output
         self.log_decision("MONITOR",
-            f"GPUs active: {len(active_gpus)}/{len(gpu_status)}, Workers: {len(running_workers)}/{len(self.workers)}, "
+            f"GPUs active: {len(active_gpus)}/{len(gpu_status)}, "
+            f"Agents: {len(running_gpus)}/{len(self.gpu_agents)}, "
             f"Queue: {queue_stats['total_pending']} (cpu:{queue_stats['cpu']}, script:{queue_stats['script']}, llm:{queue_stats['llm']}), "
             f"Processing: {queue_stats['processing_count']}, Stuck: {queue_stats['stuck_tasks']}, "
-            f"Models loaded: {len(workers_with_model)}",
+            f"Hot GPUs: {len(gpus_with_model)}",
             {
                 "total_power_w": round(total_power, 1),
-                "running_workers": list(running_workers.keys()),
-                "workers_with_model": workers_with_model,
+                "running_gpus": list(running_gpus.keys()),
+                "hot_gpus": gpus_with_model,
                 "queue_stats": queue_stats
             })
 
-        # Track missing workers with 3-miss tolerance
-        missing_workers = set(self.workers.keys()) - set(running_workers.keys())
+        # Track missing GPU agents with 3-miss tolerance
+        missing_gpus = set(self.gpu_agents.keys()) - set(running_gpus.keys())
 
-        # Update miss counts
-        for worker_name in self.workers.keys():
-            if worker_name in missing_workers:
-                self.worker_miss_count[worker_name] = self.worker_miss_count.get(worker_name, 0) + 1
+        for gpu_name in self.gpu_agents.keys():
+            if gpu_name in missing_gpus:
+                self.gpu_miss_count[gpu_name] = self.gpu_miss_count.get(gpu_name, 0) + 1
             else:
-                # Reset count when worker is detected
-                self.worker_miss_count[worker_name] = 0
+                self.gpu_miss_count[gpu_name] = 0
 
-        # Only warn after 3 consecutive misses
-        truly_missing = [w for w in missing_workers if self.worker_miss_count.get(w, 0) >= 3]
+        truly_missing = [g for g in missing_gpus if self.gpu_miss_count.get(g, 0) >= 3]
         if truly_missing and queue_stats["worker_tasks"] > 0:
-            self.log_decision("WORKER_MISSING",
-                f"Workers not running: {truly_missing} ({queue_stats['worker_tasks']} tasks pending)",
-                {"missing": truly_missing, "miss_counts": {w: self.worker_miss_count.get(w, 0) for w in missing_workers}})
+            self.log_decision("GPU_MISSING",
+                f"GPU agents not running: {truly_missing} ({queue_stats['worker_tasks']} tasks pending)",
+                {"missing": truly_missing, "miss_counts": {g: self.gpu_miss_count.get(g, 0) for g in missing_gpus}})
 
-        # P1: Check for stale load_llm requests
+        # Check for stale load_llm requests
         for task_id, request in list(self.load_llm_requests.items()):
             age = (datetime.now() - request['created_at']).total_seconds()
-            if age > 60:  # Request has been pending for more than 60 seconds
-                workers_still_waiting = [w for w in request['workers_needed'] if w in workers_without_model]
-                if workers_still_waiting:
+            if age > 60:
+                gpus_still_waiting = [g for g in request['gpus_needed'] if g in gpus_without_model]
+                if gpus_still_waiting:
                     self.logger.warning(
-                        f"load_llm task available for {age:.0f}s but workers {workers_still_waiting} still have no model"
+                        f"load_llm task available for {age:.0f}s but GPUs {gpus_still_waiting} still cold"
                     )
                 else:
-                    # All workers that needed models now have them, remove from tracking
                     del self.load_llm_requests[task_id]
 
-        # Clean up completed load_llm requests (check if task is no longer in queue/processing)
+        # Clean up completed load_llm requests
         for task_id in list(self.load_llm_requests.keys()):
             task_in_queue = (self.queue_path / f"{task_id}.json").exists()
             task_in_processing = (self.processing_path / f"{task_id}.json").exists()
             if not task_in_queue and not task_in_processing:
-                # Task has been claimed/completed, remove from tracking
                 del self.load_llm_requests[task_id]
 
-        # Check if there's already a resource task in queue OR processing (blocker)
-        # This ensures only 1 load_llm runs at a time
-        has_pending_resource = queue_stats.get("resource", 0) > 0
+        # Check if there's already a meta task in queue OR processing
+        has_pending_resource = queue_stats.get("meta", 0) > 0
 
-        # Also check processing tasks (critical for sequential load_llm)
         if not has_pending_resource:
             for task_file in self.processing_path.glob("*.json"):
                 try:
                     with open(task_file) as f:
                         task = json.load(f)
-                    if task.get("task_class") == "resource":
+                    if task.get("task_class") == "meta":
                         has_pending_resource = True
-                        self.logger.debug(f"Resource task already in processing: {task.get('command')}")
+                        self.logger.debug(f"Meta task already in processing: {task.get('command')}")
                         break
                 except Exception:
                     pass
 
         if not has_pending_resource:
-            # Decision: Need to load LLM?
-            # If we have llm tasks waiting AND no workers have models loaded
-            if queue_stats["llm"] > 0 and len(workers_with_model) == 0 and len(workers_without_model) > 0:
+            # Need to load LLM? LLM tasks waiting but no GPUs are hot
+            if queue_stats["llm"] > 0 and len(gpus_with_model) == 0 and len(gpus_without_model) > 0:
                 self.log_decision("RESOURCE_DECISION",
-                    f"LLM tasks waiting ({queue_stats['llm']}) but no models loaded - inserting load_llm task",
-                    {"llm_tasks": queue_stats["llm"], "workers_without_model": workers_without_model})
+                    f"LLM tasks waiting ({queue_stats['llm']}) but no GPUs hot - inserting load_llm task",
+                    {"llm_tasks": queue_stats["llm"], "cold_gpus": gpus_without_model})
                 self._insert_resource_task("load_llm")
 
-            # Decision: Need to unload LLM?
-            # If we have ONLY script tasks AND some workers have models loaded
-            elif queue_stats["llm"] == 0 and queue_stats["script"] > 0 and len(workers_with_model) > 0:
+            # Need to unload LLM? Only script tasks but GPUs are hot
+            elif queue_stats["llm"] == 0 and queue_stats["script"] > 0 and len(gpus_with_model) > 0:
                 self.log_decision("RESOURCE_DECISION",
-                    f"Only script tasks waiting ({queue_stats['script']}) but models loaded - inserting unload_llm task",
-                    {"script_tasks": queue_stats["script"], "workers_with_model": workers_with_model})
+                    f"Only script tasks waiting ({queue_stats['script']}) but GPUs hot - inserting unload_llm task",
+                    {"script_tasks": queue_stats["script"], "hot_gpus": gpus_with_model})
                 self._insert_resource_task("unload_llm")
 
-    def _stop_worker(self, worker_name: str, unload_model: bool = True):
-        """Stop a worker process gracefully."""
-        worker_config = self.workers.get(worker_name)
-
-        # Unload the model from Ollama first (frees VRAM immediately)
-        if unload_model and worker_config:
-            try:
-                port = worker_config.get("port", 11434)
-                model = worker_config.get("model", "")
-                ollama_url = f"http://localhost:{port}/api/generate"
-
-                response = requests.post(
-                    ollama_url,
-                    json={"model": model, "prompt": "", "keep_alive": 0},
-                    timeout=10
-                )
-
-                if response.status_code == 200:
-                    self.log_decision("MODEL_UNLOADED",
-                        f"Unloaded {model} from {worker_name} - VRAM freed",
-                        {"worker": worker_name, "port": port})
-
-            except Exception as e:
-                self.logger.warning(f"Could not unload model from {worker_name}: {e}")
-
-        # Signal worker to stop
-        if worker_name in self.worker_pids:
-            signal_file = self.signals_path / f"{worker_name}.stop"
-            signal_file.write_text(datetime.now().isoformat())
-            self.log_decision("WORKER_STOP", f"Signaling {worker_name} to stop", {"worker": worker_name})
+    def _stop_gpu_agent(self, gpu_name: str):
+        """Stop a GPU agent process gracefully via signal file."""
+        signal_file = self.signals_path / f"{gpu_name}.stop"
+        signal_file.write_text(datetime.now().isoformat())
+        self.log_decision("GPU_STOP", f"Signaling {gpu_name} to stop", {"gpu": gpu_name})
 
     # =========================================================================
     # Main Loop
@@ -1464,7 +1472,7 @@ JSON only:"""
 
         self.logger.info(f"Starting brain: {self.name}")
         self.logger.info(f"Model: {self.model}, GPUs: {self.gpus}")
-        self.logger.info(f"Workers: {list(self.workers.keys())}")
+        self.logger.info(f"GPU agents: {list(self.gpu_agents.keys())}")
 
         try:
             self.logger.info("[STARTUP] Phase 1: Connecting to Ollama...")

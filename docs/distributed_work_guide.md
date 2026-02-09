@@ -94,20 +94,35 @@ The brain reads the plan and manages task execution:
 
 ---
 
-## Step 4: Worker Execution
+## Step 4: GPU Agent Execution
 
-Workers are simple - they poll the queue, claim tasks, and execute:
+GPU agents own a physical GPU and manage task execution through worker subprocesses:
 
 ```python
+# Dual-cycle loop
 while running:
-    task = claim_available_task()
-    if task:
-        result = execute(task["command"])
-        report_result(task, result)
-    sleep(poll_interval)
+    # Internal cycle (every 5s): check signals, collect finished workers
+    check_stop_signal()
+    check_abort_signal()
+    check_kill_signal()
+    collect_finished_workers()
+    update_worker_vram()
+
+    # External cycle (every 30s, or when all workers done):
+    if external_due or all_workers_done:
+        flush_outbox()        # Write results to filesystem
+        write_heartbeat()     # Update GPU state file
+        claimed = claim_tasks()  # Claim within VRAM budget
+        for task in claimed:
+            if task.task_class == "meta":
+                handle_meta_task(task)   # Load/unload LLM directly
+            else:
+                spawn_worker(task)       # New subprocess per task
 ```
 
-Workers don't know about plans or dependencies. They just execute shell commands and report results.
+GPU agents don't know about plans or dependencies. They claim tasks from the queue, spawn worker subprocesses, and report results.
+
+Each GPU has one agent. Workers are short-lived subprocesses that execute a single task and exit. The GPU agent tracks VRAM budget internally to limit concurrent workers.
 
 ---
 
@@ -117,7 +132,10 @@ The brain continuously monitors execution:
 
 - **Watches for completions** - Checks `shared/tasks/complete/`
 - **Releases dependent tasks** - When dependencies are met
-- **Handles failures** - Retries up to 3 times, then abandons
+- **Expands foreach tasks** - Template tasks become N tasks from manifest data
+- **Handles failures** - Retries up to 3 times, fixes definition errors, then abandons
+- **Detects stuck tasks** - Sends abort/kill signals to GPU agents after 20 min
+- **Manages resources** - Inserts load_llm/unload_llm meta tasks as needed
 - **Logs decisions** - To `shared/logs/brain_decisions.log`
 
 ---
@@ -127,14 +145,17 @@ The brain continuously monitors execution:
 | Type | Handler | Example |
 |------|---------|---------|
 | `execute_plan` | Brain | Read plan, create tasks |
-| `shell` | Workers | Run a shell command |
+| `shell` | GPU Agents (via worker subprocess) | Run a shell command |
 | `decide` | Brain | Complex reasoning |
-| `generate` | Workers | Text generation |
-| `parse` | Workers | Extract structured data |
+| `generate` | GPU Agents (via worker subprocess) | Text generation |
+| `parse` | GPU Agents (via worker subprocess) | Extract structured data |
+| `meta` | GPU Agents (handled directly) | Load/unload LLM model |
 
-Workers also distinguish between:
-- **Script tasks** - Direct GPU/CPU compute (transcribe, embed, etc.)
-- **LLM tasks** - Need the language model loaded
+GPU agents also distinguish by task class:
+- **script** - GPU compute without LLM (transcribe, embed, etc.)
+- **llm** - Needs the language model loaded
+- **cpu** - CPU-only work (file manipulation, aggregation)
+- **meta** - GPU agent management (load_llm, unload_llm)
 
 ---
 
@@ -158,12 +179,13 @@ cat shared/tasks/failed/<task_id>.json
 
 ### Batch output
 ```
-shared/plans/<plan_name>/batches/<batch_id>/
-  manifest.json   # Created by init task
+shared/plans/<plan_name>/history/<batch_id>/
   results/        # Processing output
   output/         # Final aggregated output
   logs/           # Batch-specific logs
 ```
+
+Batch IDs are timestamp-based (`YYYYMMDD_HHMMSS`). The `{BATCH_PATH}` variable in task commands resolves to this directory.
 
 ---
 
