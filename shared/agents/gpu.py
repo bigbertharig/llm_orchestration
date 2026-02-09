@@ -918,9 +918,25 @@ class GPUAgent:
                     claimed = self.claim_tasks()
 
                     # 4. Handle meta tasks directly, spawn workers for the rest
+                    # Dedup: only handle one meta task per command per cycle
+                    handled_meta_commands = set()
                     for task in claimed:
                         if task.get("task_class") == "meta":
-                            self._handle_meta_task(task)
+                            cmd = task.get("command", "")
+                            if cmd in handled_meta_commands:
+                                self.logger.info(
+                                    f"Dedup: skipping duplicate {cmd} meta task "
+                                    f"{task['task_id'][:8]}")
+                                # Complete it as no-op success
+                                self.outbox.append(WorkerResult(
+                                    task_id=task["task_id"], task=task,
+                                    result={"success": True,
+                                            "output": f"Dedup: {cmd} already handled this cycle",
+                                            "worker": self.name, "max_vram_used_mb": 0},
+                                    peak_vram_mb=0))
+                            else:
+                                handled_meta_commands.add(cmd)
+                                self._handle_meta_task(task)
                         else:
                             self._spawn_worker(task)
 

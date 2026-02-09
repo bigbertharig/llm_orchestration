@@ -180,18 +180,33 @@ class Brain:
                 with open(self.state_file) as f:
                     state = json.load(f)
                     self.active_batches = state.get("active_batches", {})
-                    self.logger.info(f"Loaded state: {len(self.active_batches)} active batches")
+                    # Restore load_llm_requests (convert timestamps back to datetime)
+                    saved_requests = state.get("load_llm_requests", {})
+                    for task_id, req in saved_requests.items():
+                        req['created_at'] = datetime.fromisoformat(req['created_at'])
+                        self.load_llm_requests[task_id] = req
+                    self.logger.info(
+                        f"Loaded state: {len(self.active_batches)} active batches, "
+                        f"{len(self.load_llm_requests)} pending load_llm requests")
             except Exception as e:
                 self.logger.warning(f"Failed to load state: {e}")
                 self.active_batches = {}
 
     def _save_brain_state(self):
         """Persist brain state to disk."""
+        # Serialize load_llm_requests (convert datetime to ISO string)
+        serializable_requests = {}
+        for task_id, req in self.load_llm_requests.items():
+            serializable_requests[task_id] = {
+                'created_at': req['created_at'].isoformat(),
+                'gpus_needed': req['gpus_needed']
+            }
         state = {
             "pid": os.getpid(),
             "started_at": datetime.now().isoformat(),
             "status": "active",
-            "active_batches": self.active_batches
+            "active_batches": self.active_batches,
+            "load_llm_requests": serializable_requests
         }
         with open(self.state_file, 'w') as f:
             json.dump(state, f, indent=2)
@@ -1388,8 +1403,53 @@ JSON only:"""
 
         return states
 
+    def _has_existing_meta_task(self, command: str) -> bool:
+        """Check if a meta task with the given command already exists in queue or processing.
+
+        Prevents duplicate meta tasks when the brain restarts or timing is tight
+        between queue checks and task insertion.
+        """
+        # Check queue
+        for task_file in self.queue_path.glob("*.json"):
+            if str(task_file).endswith('.lock'):
+                continue
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+                if task.get("task_class") == "meta" and task.get("command") == command:
+                    self.logger.debug(f"Dedup: {command} already in queue ({task['task_id'][:8]})")
+                    return True
+            except Exception:
+                continue
+
+        # Check processing
+        for task_file in self.processing_path.glob("*.json"):
+            if str(task_file).endswith('.lock'):
+                continue
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+                if task.get("task_class") == "meta" and task.get("command") == command:
+                    self.logger.debug(f"Dedup: {command} already in processing ({task['task_id'][:8]})")
+                    return True
+            except Exception:
+                continue
+
+        return False
+
     def _insert_resource_task(self, command: str):
-        """Insert a resource task (load_llm or unload_llm) for workers to claim."""
+        """Insert a resource task (load_llm or unload_llm) for workers to claim.
+
+        Performs a dedup scan first — skips insertion if the same command is already
+        queued or in processing, preventing duplicate meta tasks after brain restart
+        or under race conditions.
+        """
+        # Dedup: check if this exact command already exists
+        if self._has_existing_meta_task(command):
+            self.log_decision("RESOURCE_DEDUP",
+                f"Skipping {command} — already exists in queue/processing", {})
+            return
+
         task = {
             "task_id": str(uuid.uuid4()),
             "type": "meta",
