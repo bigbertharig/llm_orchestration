@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+ml-env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Config files (machine-specific)
+config.json
+shared/agents/config.json
+
+# Shared folder - runtime data and plans
+# Exclude everything in shared/ by default
+shared/*
+
+# But include the agents code (the core engine)
+!shared/agents/
+shared/agents/__pycache__/
+shared/agents/*.pyc
+
+# Plans are separate repos (not part of this repo)
+shared/plans/
+
+# Logs and temporary files
+*.log
+*.jsonl
+*.lock
+logs/
+/tmp/
+
+# OS
+.DS_Store
+Thumbs.db

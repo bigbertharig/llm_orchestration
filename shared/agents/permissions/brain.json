@@ -1,0 +1,114 @@
+{
+  "_description": "Brain agent permissions - coordination with free read access",
+
+  "file_access": {
+    "read": {
+      "allowed_paths": [
+        "**"
+      ],
+      "blocked_paths": [
+        "/home/bryan/.ssh/**",
+        "/home/bryan/.gnupg/**",
+        "**/credentials*",
+        "**/*password*",
+        "**/*secret*"
+      ],
+      "max_file_size_mb": 50
+    },
+    "write": {
+      "allowed_paths": [
+        "/home/bryan/Documents/llm_orchestration/shared/**",
+        "/home/bryan/Documents/llm_orchestration/logs/**",
+        "/tmp/agent-*"
+      ],
+      "blocked_paths": [
+        "**/*.py",
+        "**/*.sh",
+        "**/config.json",
+        "**/permissions/**"
+      ],
+      "max_file_size_mb": 10
+    }
+  },
+
+  "bash": {
+    "allowed_commands": [
+      "^ls\\s",
+      "^ls$",
+      "^cat\\s",
+      "^head\\s",
+      "^tail\\s",
+      "^wc\\s",
+      "^grep\\s",
+      "^find\\s",
+      "^echo\\s",
+      "^date",
+      "^pwd$",
+      "^whoami$",
+      "^uname\\s",
+      "^env$",
+      "^printenv\\s",
+      "^nvidia-smi",
+      "^df\\s",
+      "^du\\s",
+      "^stat\\s",
+      "^file\\s",
+      "^jq\\s",
+      "^sort\\s",
+      "^uniq\\s",
+      "^cut\\s",
+      "^tr\\s",
+      "^awk\\s",
+      "^sed\\s.*[^>]$",
+      "^python3?\\s+.*\\.py",
+      "^ollama\\s+(list|ps|show)",
+      "^curl\\s+.*localhost",
+      "^free\\s",
+      "^top\\s+-b",
+      "^ps\\s"
+    ],
+    "blocked_patterns": [
+      "rm\\s+-rf\\s+/",
+      "rm\\s+-rf\\s+~",
+      "rm\\s+-rf\\s+\\*",
+      "sudo\\s",
+      "chmod\\s+777",
+      ">\\s*/etc/",
+      ">\\s*/usr/",
+      "\\|\\s*sh\\s*$",
+      "\\|\\s*bash\\s*$",
+      "eval\\s",
+      "exec\\s",
+      "mkfs",
+      "dd\\s+if=",
+      ":(){ :|:& };:"
+    ],
+    "timeout_seconds": 60,
+    "allow_background": false
+  },
+
+  "network": {
+    "allowed_hosts": [
+      "localhost",
+      "127.0.0.1",
+      "0.0.0.0"
+    ],
+    "allowed_ports": [11434, 11435, 11436, 11437],
+    "block_external": true
+  },
+
+  "capabilities": {
+    "can_spawn_tasks": true,
+    "can_assign_workers": true,
+    "can_read_worker_results": true,
+    "can_aggregate_results": true,
+    "can_escalate_to_cloud": false,
+    "can_modify_config": false,
+    "can_execute_code": true,
+    "can_delete_files": false,
+    "requires_human_approval": [
+      "external_network",
+      "modify_system"
+    ]
+  }
+}

@@ -1,0 +1,86 @@
+[
+  {
+    "gpu": 1,
+    "temp_before": 45,
+    "temp_after": 48,
+    "runs": [
+      {
+        "run": 1,
+        "tokens": 130,
+        "tokens_per_sec": 22.328866008447214,
+        "time_to_first_token": 84.42148780822754,
+        "total_time": 90.49424600601196
+      },
+      {
+        "run": 2,
+        "tokens": 226,
+        "tokens_per_sec": 22.6481444220997,
+        "time_to_first_token": 0.23538708686828613,
+        "total_time": 10.647314071655273
+      },
+      {
+        "run": 3,
+        "tokens": 125,
+        "tokens_per_sec": 22.71830833064155,
+        "time_to_first_token": 0.17368817329406738,
+        "total_time": 5.9005446434021
+      }
+    ]
+  },
+  {
+    "gpu": 2,
+    "temp_before": 54,
+    "temp_after": 62,
+    "runs": [
+      {
+        "run": 1,
+        "tokens": 195,
+        "tokens_per_sec": 22.65978896798392,
+        "time_to_first_token": 0.1691133975982666,
+        "total_time": 9.173946380615234
+      },
+      {
+        "run": 2,
+        "tokens": 170,
+        "tokens_per_sec": 22.660934178490862,
+        "time_to_first_token": 0.1715857982635498,
+        "total_time": 7.986236333847046
+      },
+      {
+        "run": 3,
+        "tokens": 171,
+        "tokens_per_sec": 22.65242951862905,
+        "time_to_first_token": 0.20839452743530273,
+        "total_time": 8.071062803268433
+      }
+    ]
+  },
+  {
+    "gpu": 4,
+    "temp_before": 38,
+    "temp_after": 38,
+    "runs": [
+      {
+        "run": 1,
+        "tokens": 199,
+        "tokens_per_sec": 22.638268765466524,
+        "time_to_first_token": 0.16730356216430664,
+        "total_time": 9.332097291946411
+      },
+      {
+        "run": 2,
+        "tokens": 150,
+        "tokens_per_sec": 22.66253902844456,
+        "time_to_first_token": 0.17664504051208496,
+        "total_time": 7.071727752685547
+      },
+      {
+        "run": 3,
+        "tokens": 270,
+        "tokens_per_sec": 22.516143515749896,
+        "time_to_first_token": 0.1856987476348877,
+        "total_time": 12.669148683547974
+      }
+    ]
+  }
+]

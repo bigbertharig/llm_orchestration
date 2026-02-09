@@ -1,0 +1,122 @@
+[
+  {
+    "gpu_pair": [
+      0,
+      3
+    ],
+    "temps_before": {
+      "0": 44,
+      "3": 43
+    },
+    "temps_after": {
+      "0": 53,
+      "3": 42
+    },
+    "runs": [
+      {
+        "run": 1,
+        "tokens": 734,
+        "tokens_per_sec": 12.249826904726309,
+        "time_to_first_token": 234.50708198547363,
+        "total_time": 287.3321533203125,
+        "prompt_eval_time": 0.975478911
+      },
+      {
+        "run": 2,
+        "tokens": 638,
+        "tokens_per_sec": 12.409216809455,
+        "time_to_first_token": 1.055706262588501,
+        "total_time": 56.07326555252075,
+        "prompt_eval_time": 0.086674395
+      },
+      {
+        "run": 3,
+        "tokens": 642,
+        "tokens_per_sec": 12.436618743400581,
+        "time_to_first_token": 0.25528907775878906,
+        "total_time": 53.87790036201477,
+        "prompt_eval_time": 0.086835435
+      }
+    ]
+  },
+  {
+    "gpu_pair": [
+      0,
+      1
+    ],
+    "temps_before": {
+      "0": 51,
+      "1": 57
+    },
+    "temps_after": {
+      "0": 53,
+      "1": 63
+    },
+    "runs": [
+      {
+        "run": 1,
+        "tokens": 617,
+        "tokens_per_sec": 12.459841498944753,
+        "time_to_first_token": 55.42718029022217,
+        "total_time": 106.01106786727905,
+        "prompt_eval_time": 0.3672273
+      },
+      {
+        "run": 2,
+        "tokens": 751,
+        "tokens_per_sec": 12.432423229754729,
+        "time_to_first_token": 0.27771735191345215,
+        "total_time": 61.99759602546692,
+        "prompt_eval_time": 0.080334588
+      },
+      {
+        "run": 3,
+        "tokens": 634,
+        "tokens_per_sec": 12.448390790201163,
+        "time_to_first_token": 0.340285062789917,
+        "total_time": 52.31707406044006,
+        "prompt_eval_time": 0.080393558
+      }
+    ]
+  },
+  {
+    "gpu_pair": [
+      1,
+      2
+    ],
+    "temps_before": {
+      "1": 58,
+      "2": 44
+    },
+    "temps_after": {
+      "1": 63,
+      "2": 42
+    },
+    "runs": [
+      {
+        "run": 1,
+        "tokens": 598,
+        "tokens_per_sec": 12.461710515556936,
+        "time_to_first_token": 48.2071270942688,
+        "total_time": 97.19738149642944,
+        "prompt_eval_time": 0.367331407
+      },
+      {
+        "run": 2,
+        "tokens": 655,
+        "tokens_per_sec": 12.446087382332106,
+        "time_to_first_token": 0.21924924850463867,
+        "total_time": 53.9976851940155,
+        "prompt_eval_time": 0.080588975
+      },
+      {
+        "run": 3,
+        "tokens": 664,
+        "tokens_per_sec": 12.446253514257343,
+        "time_to_first_token": 0.25530314445495605,
+        "total_time": 54.734086990356445,
+        "prompt_eval_time": 0.081115782
+      }
+    ]
+  }
+]
