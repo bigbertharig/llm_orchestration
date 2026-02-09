@@ -121,6 +121,15 @@ class Brain:
         self._load_brain_state()
 
     def _load_config(self, config_path: str) -> dict:
+        if not Path(config_path).exists():
+            template = Path(config_path).parent / "config.template.json"
+            print(f"ERROR: Config file not found: {config_path}")
+            if template.exists():
+                print(f"  Copy the template and fill in your values:")
+                print(f"  cp {template} {config_path}")
+            else:
+                print(f"  See config.template.json for the required schema.")
+            sys.exit(1)
         with open(config_path) as f:
             return json.load(f)
 

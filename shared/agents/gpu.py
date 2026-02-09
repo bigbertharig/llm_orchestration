@@ -155,6 +155,15 @@ class GPUAgent:
     # =========================================================================
 
     def _load_config(self, config_path: str) -> dict:
+        if not Path(config_path).exists():
+            template = Path(config_path).parent / "config.template.json"
+            print(f"ERROR: Config file not found: {config_path}")
+            if template.exists():
+                print(f"  Copy the template and fill in your values:")
+                print(f"  cp {template} {config_path}")
+            else:
+                print(f"  See config.template.json for the required schema.")
+            sys.exit(1)
         with open(config_path) as f:
             return json.load(f)
 
@@ -356,7 +365,7 @@ class GPUAgent:
         task_class = task.get("task_class", "cpu")
 
         if task_class == "llm":
-            return GPU_TOTAL_VRAM  # LLM uses full GPU
+            return int(GPU_TOTAL_VRAM * VRAM_BUDGET_RATIO)  # LLM uses full budget
         elif task_class == "cpu":
             return DEFAULT_CPU_VRAM_COST
         elif task_class == "script":

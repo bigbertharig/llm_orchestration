@@ -1,0 +1,53 @@
+{
+  "_comment": "Copy this file to config.json and fill in your values. config.json is gitignored (host-specific).",
+
+  "shared_path": "../",
+  "permissions_path": "permissions/",
+  "ollama_host": "http://localhost:11434",
+
+  "brain": {
+    "name": "brain",
+    "model": "qwen2.5:14b",
+    "gpus": [0, 3]
+  },
+
+  "gpus": [
+    {
+      "name": "gpu-1",
+      "id": 1,
+      "model": "qwen2.5:7b",
+      "port": 11435,
+      "permissions": "worker.json"
+    },
+    {
+      "name": "gpu-2",
+      "id": 2,
+      "model": "qwen2.5:7b",
+      "port": 11436,
+      "permissions": "worker.json"
+    },
+    {
+      "name": "gpu-4",
+      "id": 4,
+      "model": "qwen2.5:7b",
+      "port": 11437,
+      "permissions": "worker.json"
+    }
+  ],
+
+  "timeouts": {
+    "poll_interval_seconds": 5,
+    "brain_think_seconds": 120,
+    "worker_task_seconds": 120
+  },
+
+  "resource_limits": {
+    "max_temp_c": 80,
+    "max_vram_percent": 95,
+    "max_power_w": 140
+  },
+
+  "retry_policy": {
+    "max_attempts": 3
+  }
+}
