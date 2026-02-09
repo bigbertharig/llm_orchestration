@@ -32,13 +32,15 @@ A **multi-GPU LLM orchestration system** that coordinates local language models 
 
 ## Documentation Map
 
+All docs live in `shared/workspace/` (on the shared drive, synced to git).
+
 ### Start Here
 
 | Doc | Purpose |
 |-----|---------|
 | **[quickstart.md](quickstart.md)** | Check status, start system, submit plans |
 | **[architecture.md](architecture.md)** | High-level system overview, hardware, file structure |
-| **[PLAN_FORMAT.md](../shared/plans/PLAN_FORMAT.md)** | How to write plans (the authoritative format) |
+| **[PLAN_FORMAT.md](../plans/PLAN_FORMAT.md)** | How to write plans (the authoritative format) |
 
 ### Implementation Details
 
@@ -54,6 +56,14 @@ A **multi-GPU LLM orchestration system** that coordinates local language models 
 | [llm_benchmark_testing_guide.md](llm_benchmark_testing_guide.md) | How to benchmark GPU performance |
 | [systems_analyst_questionnaire.md](systems_analyst_questionnaire.md) | Hardware and config review checklist |
 | [future/resource_manager_design.md](future/resource_manager_design.md) | Future: GPU state management, LLM/script switching |
+
+### Security
+
+| Doc | Purpose |
+|-----|---------|
+| `shared/core/SYSTEM.md` | Agent system prompt (root-owned, read-only) |
+| `shared/core/RULES.md` | Immutable rules that agents cannot override |
+| `shared/core/ESCALATION_POLICY.md` | Worker -> Brain -> Human escalation chain |
 
 ---
 
@@ -76,53 +86,67 @@ A **multi-GPU LLM orchestration system** that coordinates local language models 
 ## File Structure
 
 ```
-llm_orchestration/
-├── config.json                 # RPi config (for submit.py)
+llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
+├── .claude/settings.json          # Claude Code permissions
+├── .gitignore                     # Selective sync rules
+├── requirements.txt               # Python dependencies
 │
-├── scripts/                    # RPi-only utilities (not on GPU rig)
-│   ├── submit.py          # Submit a plan for execution
-│   ├── status.py               # Check system status
-│   ├── watch.py                # Live monitoring
-│   └── gpu-monitor.py          # GPU benchmarking tools
+├── scripts/                       # RPi-only utilities
+│   ├── submit.py                  # Submit a plan for execution
+│   ├── status.py                  # Check system status
+│   ├── watch.py                   # Live monitoring
+│   └── gpu-monitor.py             # GPU benchmarking tools
 │
-├── docs/                       # Documentation (you are here)
-│
-└── shared/                     # Mounted by BOTH machines
+└── shared/                        # ext4 USB drive, bind-mounted here
+    │                              # NFS-shared to GPU rig via ethernet
     │
-    ├── agents/                 # Agent code (GPU rig runs these)
-    │   ├── brain.py            # Brain coordinator
-    │   ├── gpu.py              # GPU agent (one per physical GPU)
-    │   ├── worker.py           # Worker subprocess (spawned by gpu.py)
-    │   ├── executor.py         # Permission-aware command executor
-    │   ├── launch.py           # Launcher script
-    │   └── config.json         # GPU rig config
+    ├── agents/                    # Agent code (GPU rig runs these)
+    │   ├── brain.py               # Brain coordinator
+    │   ├── gpu.py                 # GPU agent (one per physical GPU)
+    │   ├── worker.py              # Worker subprocess (spawned by gpu.py)
+    │   ├── executor.py            # Permission-aware command executor
+    │   ├── launch.py              # Launcher script
+    │   ├── config.json            # GPU rig config (not in git)
+    │   └── permissions/           # Agent permission rules (not in git)
+    │       ├── brain.json
+    │       └── worker.json
     │
-    ├── plans/                  # Plan folders
-    │   ├── PLAN_FORMAT.md      # Plan specification
+    ├── core/                      # PROTECTED - root-owned, read-only
+    │   ├── SYSTEM.md              # Agent system prompt (read on startup)
+    │   ├── RULES.md               # Immutable rules (cannot be overridden)
+    │   └── ESCALATION_POLICY.md   # Worker -> Brain -> Human escalation
+    │
+    ├── workspace/                 # Agent-writable working area
+    │   ├── CONTEXT.md             # Project context (this file)
+    │   ├── architecture.md        # System architecture
+    │   ├── implement/             # Priority tasks (do these first)
+    │   ├── future/                # Ideas parking lot
+    │   ├── human/                 # Stuck items needing human review
+    │   └── archive/               # Completed work and historical lessons
+    │
+    ├── plans/                     # Plan folders
+    │   ├── PLAN_FORMAT.md         # Plan specification
     │   └── <plan_name>/
     │       ├── plan.md
     │       ├── scripts/
-    │       └── batches/
+    │       └── history/           # Batch execution runs
     │
-    ├── tasks/                  # Task queue
-    │   ├── queue/              # Ready for workers
+    ├── tasks/                     # Task queue (runtime, not in git)
+    │   ├── queue/                 # Ready for workers
     │   ├── processing/
     │   ├── complete/
     │   └── failed/
     │
-    ├── brain/                  # Brain state
+    ├── brain/                     # Brain state (runtime, not in git)
     │   ├── state.json
-    │   └── private_tasks/      # Tasks waiting for dependencies
+    │   └── private_tasks/
     │
-    ├── gpus/                   # GPU agent state
-    │   └── gpu_<id>/
-    │       └── heartbeat.json  # GPU agent heartbeat (sole owner, no lock needed)
-    │
-    ├── signals/                # GPU agent control signals (stop, abort, kill)
-    └── logs/                   # Logs
+    ├── gpus/                      # GPU agent heartbeats (runtime)
+    ├── signals/                   # GPU agent control signals (runtime)
+    └── logs/                      # Logs (synced to git for backup)
 ```
 
-**Key insight:** The `shared/` folder is mounted by both RPi and GPU rig. Agent code lives in `shared/agents/` so the air-gapped GPU rig can run it.
+**Key insight:** The `shared/` folder lives on a 4TB ext4 USB drive mounted on the RPi, bind-mounted into the git repo, and NFS-shared to the air-gapped GPU rig over direct ethernet.
 
 ---
 
@@ -160,7 +184,7 @@ Plans are markdown files that tell the brain what to do. They contain:
 - Available scripts with run commands
 - Tasks with explicit dependencies
 
-See [PLAN_FORMAT.md](../shared/plans/PLAN_FORMAT.md).
+See [PLAN_FORMAT.md](../plans/PLAN_FORMAT.md).
 
 ### Dependency-Based Task Release
 
@@ -188,10 +212,11 @@ This keeps workers simple while brain controls all sequencing.
 
 ## What to Read Next
 
-- **Building a new plan?** → [PLAN_FORMAT.md](../shared/plans/PLAN_FORMAT.md)
+- **Building a new plan?** → [PLAN_FORMAT.md](../plans/PLAN_FORMAT.md)
 - **Understanding the system?** → [architecture.md](architecture.md)
 - **Debugging brain behavior?** → [brain-behavior.md](brain-behavior.md)
 - **Following work end-to-end?** → [distributed_work_guide.md](distributed_work_guide.md)
+- **Security model?** → See `shared/core/` (root-owned, read-only agent instructions)
 
 ---
 
@@ -211,12 +236,17 @@ Why: Backwards compatibility creates technical debt, confusing code paths, and d
 
 ## Current Status
 
-**Working:**
-- GPU monitoring and benchmarking
-- Task queue with filesystem state
+**Infrastructure:**
+- RPi 5 as control plane (internet, Claude Code, plan submission)
+- 4TB ext4 USB drive on RPi (`/media/bryan/shared`, bind-mounted into repo)
+- NFS share to air-gapped GPU rig over direct ethernet (10.0.0.1 → 10.0.0.2)
+- Python venv at `~/ml-env` with dependencies
+- GitHub CLI for version control
+
+**Agent System:**
 - Brain + GPU agent architecture in `shared/agents/`
 - GPU agent model: one agent per physical GPU, spawns worker subprocesses
-- Training data collection
+- Task queue with filesystem state
 - Dependency-based task release (private/public lists)
 - GPU agent self-awareness (temp, VRAM, power monitoring via nvidia-smi)
 - Resource-aware task claiming (GPU agents back off when constrained)
@@ -233,7 +263,16 @@ Why: Backwards compatibility creates technical debt, confusing code paths, and d
 - Variable substitution in commands ({BATCH_ID}, {PLAN_PATH}, {BATCH_PATH})
 - Launch singleton lock and model preload detection
 
+**Security:**
+- Protected core/ directory (root-owned, chmod 644) for agent system prompts and rules
+- Executor permission system blocks writes to core/, .ssh, passwords, credentials
+- Bash blocked patterns prevent chmod/chown on core, sudo, fork bombs, etc.
+- Git pre-commit hook rejects commits to shared/core/ (only --no-verify from terminal)
+- Workspace/ as agent-writable area with implement/future/human/archive folders
+- HUMAN escalation pattern: agents write HUMAN_{topic}.md and stop when stuck
+
 **Planned:**
+- NFS mount configuration on GPU rig (pending rig reconnection)
 - RPi gateway for Claude escalation
 
 ---

@@ -1,5 +1,5 @@
 {
-  "_description": "Brain agent permissions - coordination with free read access",
+  "_description": "Brain agent permissions - full access except core/",
 
   "file_access": {
     "read": {
@@ -17,81 +17,47 @@
     },
     "write": {
       "allowed_paths": [
-        "/home/bryan/Documents/llm_orchestration/shared/**",
-        "/home/bryan/Documents/llm_orchestration/logs/**",
-        "/tmp/agent-*"
+        "/media/bryan/shared/**",
+        "/home/bryan/llm_orchestration/**",
+        "/tmp/**"
       ],
       "blocked_paths": [
-        "**/*.py",
-        "**/*.sh",
-        "**/config.json",
-        "**/permissions/**"
+        "**/core/**"
       ],
-      "max_file_size_mb": 10
+      "max_file_size_mb": 50
     }
   },
 
   "bash": {
     "allowed_commands": [
-      "^ls\\s",
-      "^ls$",
-      "^cat\\s",
-      "^head\\s",
-      "^tail\\s",
-      "^wc\\s",
-      "^grep\\s",
-      "^find\\s",
-      "^echo\\s",
-      "^date",
-      "^pwd$",
-      "^whoami$",
-      "^uname\\s",
-      "^env$",
-      "^printenv\\s",
-      "^nvidia-smi",
-      "^df\\s",
-      "^du\\s",
-      "^stat\\s",
-      "^file\\s",
-      "^jq\\s",
-      "^sort\\s",
-      "^uniq\\s",
-      "^cut\\s",
-      "^tr\\s",
-      "^awk\\s",
-      "^sed\\s.*[^>]$",
-      "^python3?\\s+.*\\.py",
-      "^ollama\\s+(list|ps|show)",
-      "^curl\\s+.*localhost",
-      "^free\\s",
-      "^top\\s+-b",
-      "^ps\\s"
+      ".*"
     ],
     "blocked_patterns": [
-      "rm\\s+-rf\\s+/",
-      "rm\\s+-rf\\s+~",
-      "rm\\s+-rf\\s+\\*",
+      "rm\\s+-rf\\s+/$",
       "sudo\\s",
-      "chmod\\s+777",
-      ">\\s*/etc/",
-      ">\\s*/usr/",
-      "\\|\\s*sh\\s*$",
-      "\\|\\s*bash\\s*$",
-      "eval\\s",
-      "exec\\s",
+      "chmod.*core",
+      "chown.*core",
+      ">.*core/",
       "mkfs",
       "dd\\s+if=",
-      ":(){ :|:& };:"
+      ":(){ :|:& };:",
+      "SYSTEM\\.md",
+      "RULES\\.md",
+      "ESCALATION_POLICY\\.md",
+      "passwd",
+      "visudo",
+      "\\.ssh"
     ],
-    "timeout_seconds": 60,
-    "allow_background": false
+    "timeout_seconds": 300,
+    "allow_background": true
   },
 
   "network": {
     "allowed_hosts": [
       "localhost",
       "127.0.0.1",
-      "0.0.0.0"
+      "0.0.0.0",
+      "10.0.0.*"
     ],
     "allowed_ports": [11434, 11435, 11436, 11437],
     "block_external": true
@@ -105,7 +71,7 @@
     "can_escalate_to_cloud": false,
     "can_modify_config": false,
     "can_execute_code": true,
-    "can_delete_files": false,
+    "can_delete_files": true,
     "requires_human_approval": [
       "external_network",
       "modify_system"

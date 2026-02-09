@@ -129,76 +129,91 @@ Each layer handles problems at its level. Unresolvable issues escalate upward.
 
 ```
 ┌──────────────────────────────────┐     ethernet     ┌──────────────────────────────────┐
-│         Manager (RPi)            │◄────────────────►│           GPU Rig                │
-│  • Internet access               │                  │  • Air-gapped (no internet)      │
-│  • Runs Claude Code              │                  │  • 5x GTX 1060 6GB               │
+│       Control Plane (RPi 5)      │  10.0.0.1:NFS    │           GPU Rig                │
+│  • Internet access               │◄────────────────►│  • Air-gapped (no internet)      │
+│  • Runs Claude Code              │  10.0.0.2:mount   │  • 5x GTX 1060 6GB               │
 │  • Prepares plans                │                  │  • Runs brain + workers          │
 │  • Submits to shared folder      │                  │  • Executes plans                │
+│  • GitHub for version control    │                  │  • Ollama for local LLM inference │
 └──────────────────────────────────┘                  └──────────────────────────────────┘
-                    │                                              │
-                    └──────────── shared/ folder ──────────────────┘
-                                 (mounted by both)
+           │                                                      │
+           │  USB                                                 │ NFS mount
+           ▼                                                      │
+┌──────────────────────────────────┐                              │
+│     4TB ext4 USB Drive           │◄─────────────────────────────┘
+│  /media/bryan/shared             │
+│  bind-mounted → ~/llm_orchestration/shared
+│  NFS-exported to 10.0.0.0/24    │
+└──────────────────────────────────┘
 ```
 
-**Communication is file-based only.** No network APIs between machines.
+**Communication is file-based only.** No network APIs between machines. The shared drive is the sole communication channel.
 
 ---
 
 ## File Structure
 
-**Key insight:** The `shared/` folder is mounted by both RPi and GPU rig. Agent code lives in `shared/agents/` so the GPU rig can run it.
+**Key insight:** The `shared/` folder lives on a 4TB ext4 USB drive, bind-mounted into the git repo on the RPi, and NFS-exported to the air-gapped GPU rig.
 
 ```
-llm_orchestration/
-├── config.json                 # RPi config (for submit.py)
+llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
+├── .claude/settings.json          # Claude Code permissions (full access, core/ denied)
+├── .gitignore                     # Selective sync rules
+├── requirements.txt               # Python dependencies
 │
-├── scripts/                    # RPi-only utilities (not on GPU rig)
-│   ├── submit.py          # Submit a plan for execution
-│   ├── status.py               # Check system status
-│   ├── watch.py                # Live monitoring
-│   └── gpu-monitor.py          # GPU benchmarking tools
+├── scripts/                       # RPi-only utilities
+│   ├── submit.py                  # Submit a plan for execution
+│   ├── status.py                  # Check system status
+│   ├── watch.py                   # Live monitoring
+│   └── gpu-monitor.py             # GPU benchmarking tools
 │
-├── docs/                       # Documentation
-│   ├── CONTEXT.md              # Start here
-│   ├── architecture.md         # This file
-│   └── ...
-│
-└── shared/                     # Mounted by BOTH machines
+└── shared/                        # ext4 USB drive, bind-mounted here
+    │                              # NFS-shared to GPU rig via ethernet
     │
-    ├── agents/                 # Agent code (GPU rig runs these)
-    │   ├── brain.py            # Brain coordinator
-    │   ├── gpu.py              # GPU agent (one per physical GPU)
-    │   ├── worker.py           # Worker subprocess (spawned by gpu.py)
-    │   ├── executor.py         # Permission-aware command executor
-    │   ├── launch.py           # Launcher script (brain + GPU agents)
-    │   └── config.json         # GPU rig config
+    ├── agents/                    # Agent code (GPU rig runs these)
+    │   ├── brain.py               # Brain coordinator
+    │   ├── gpu.py                 # GPU agent (one per physical GPU)
+    │   ├── worker.py              # Worker subprocess (spawned by gpu.py)
+    │   ├── executor.py            # Permission-aware command executor
+    │   ├── launch.py              # Launcher script (brain + GPU agents)
+    │   ├── config.json            # GPU rig config (not in git)
+    │   └── permissions/           # Agent permission rules (not in git)
+    │       ├── brain.json         # Brain: full access except core/
+    │       └── worker.json        # Worker: full access except core/
     │
-    ├── plans/                  # Plan folders
-    │   ├── PLAN_FORMAT.md      # Plan specification
+    ├── core/                      # PROTECTED - root-owned, read-only (not in git)
+    │   ├── SYSTEM.md              # Agent system prompt (read on startup)
+    │   ├── RULES.md               # 13 immutable rules
+    │   └── ESCALATION_POLICY.md   # Worker -> Brain -> Human escalation
+    │
+    ├── workspace/                 # Agent-writable working area (synced to git)
+    │   ├── CONTEXT.md             # Project context (read this first)
+    │   ├── architecture.md        # This file
+    │   ├── implement/             # Priority tasks (do these first)
+    │   ├── future/                # Ideas parking lot
+    │   ├── human/                 # Stuck items needing human review
+    │   └── archive/               # Completed work and historical lessons
+    │
+    ├── plans/                     # Plan folders (synced to git)
+    │   ├── PLAN_FORMAT.md         # Plan specification
     │   └── <plan_name>/
-    │       ├── plan.md         # Plan definition
-    │       ├── scripts/        # Plan scripts
-    │       └── batches/        # Execution runs (logs per batch)
+    │       ├── plan.md            # Plan definition
+    │       ├── scripts/           # Plan scripts
+    │       └── history/           # Batch execution runs
     │
-    ├── tasks/                  # Task queue (file-based)
-    │   ├── queue/              # Ready for workers to claim
-    │   ├── processing/         # Being worked on
-    │   ├── complete/           # Finished (with result)
-    │   └── failed/             # Failed (for retry logic)
+    ├── tasks/                     # Task queue - runtime only (not in git)
+    │   ├── queue/                 # Ready for workers to claim
+    │   ├── processing/            # Being worked on
+    │   ├── complete/              # Finished (with result)
+    │   └── failed/                # Failed (for retry logic)
     │
-    ├── brain/                  # Brain state
-    │   ├── state.json          # Active batches, status
-    │   └── private_tasks/      # Tasks waiting for dependencies
+    ├── brain/                     # Brain state - runtime only (not in git)
+    │   ├── state.json             # Active batches, status
+    │   └── private_tasks/         # Tasks waiting for dependencies
     │
-    ├── gpus/                   # GPU agent state
-    │   └── gpu_<id>/
-    │       └── heartbeat.json  # GPU agent heartbeat (sole owner, no lock)
-    │
-    ├── signals/                # GPU agent control signals (stop, abort, kill)
-    │
-    └── logs/                   # Logs
-        ├── brain_decisions.log
-        └── training_samples.jsonl
+    ├── gpus/                      # GPU agent heartbeats (not in git)
+    ├── signals/                   # GPU agent control signals (not in git)
+    └── logs/                      # Logs (synced to git for backup)
 ```
 
 ---
@@ -225,7 +240,7 @@ llm_orchestration/
 
 ## Plan Format
 
-Plans are markdown files that tell the brain what to do. See [PLAN_FORMAT.md](../shared/plans/PLAN_FORMAT.md) for the complete specification.
+Plans are markdown files that tell the brain what to do. See [PLAN_FORMAT.md](../plans/PLAN_FORMAT.md) for the complete specification.
 
 Key sections:
 - **Goal** - What success looks like
@@ -499,7 +514,7 @@ BRAIN_LOG_LEVEL=DEBUG python shared/agents/brain.py
 EXECUTOR_LOG_LEVEL=DEBUG python shared/agents/gpu.py gpu-1
 ```
 
-See [LOG_IMPROVEMENTS.md](LOG_IMPROVEMENTS.md) for detailed logging documentation.
+See [archive/LOG_IMPROVEMENTS.md](archive/LOG_IMPROVEMENTS.md) for detailed logging documentation.
 
 ---
 
@@ -630,8 +645,24 @@ The *work* on that specific task run is lost, but the task naturally retries. Th
 |-----|---------|
 | [CONTEXT.md](CONTEXT.md) | Project entry point, quick orientation |
 | [brain-behavior.md](brain-behavior.md) | Brain loop, task handling, failure recovery |
-| [PLAN_FORMAT.md](../shared/plans/PLAN_FORMAT.md) | How to write plans |
+| [PLAN_FORMAT.md](../plans/PLAN_FORMAT.md) | How to write plans |
 | [future/resource_manager_design.md](future/resource_manager_design.md) | Future: GPU resource management design |
+
+---
+
+## Security Model
+
+The system uses defense-in-depth to protect core agent instructions:
+
+| Layer | Protection |
+|-------|-----------|
+| **Filesystem** | `core/` is root-owned (chmod 644) - agent process can read but not write |
+| **Executor** | Permission system blocks writes to `**/core/**` in both brain.json and worker.json |
+| **Bash patterns** | Blocked: chmod/chown on core, sudo, SYSTEM.md/RULES.md references, .ssh, passwd |
+| **Git hook** | Pre-commit rejects changes to `shared/core/` (only `--no-verify` from terminal) |
+| **Workspace isolation** | Agents write freely to workspace/ but cannot touch core/ or permissions/ |
+
+**Escalation pattern:** When agents encounter problems they can't solve after 3+ attempts, they write a `HUMAN_{topic}.md` file to `workspace/human/` and stop working on that issue.
 
 ---
 

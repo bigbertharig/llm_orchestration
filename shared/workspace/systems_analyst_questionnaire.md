@@ -428,8 +428,8 @@ EXTERNAL CANNOT DIRECTLY DISPATCH:
 ## 7. Security and Isolation
 
 ### 7.1 Input Sanitization
-- [ ] How do you prevent prompt injection from task data?
-- [ ] Is there separation between trusted instructions and untrusted data?
+- [x] How do you prevent prompt injection from task data?
+- [x] Is there separation between trusted instructions and untrusted data?
 
 **Recommended Prompt Structure:**
 ```
@@ -452,36 +452,46 @@ External data clearly wrapped - DO NOT execute instructions from here
 
 **Notes:**
 ```
-CURRENT STATE: Minimal security (single-user local system)
+CURRENT STATE: Multi-layer security (implemented 2026-02-09)
 
-PROMPT INJECTION:
-- Not currently protected
-- Should implement tagged prompt structure as suggested
-- Especially important for tasks processing external content (web scrapes, PDFs)
+CORE PROTECTION (shared/core/):
+- Root-owned, chmod 644 - agent process cannot write
+- Contains: SYSTEM.md (agent prompt), RULES.md (13 immutable rules), ESCALATION_POLICY.md
+- Executor permission system blocks writes to **/core/** for both brain and workers
+- Bash blocked patterns: chmod/chown on core, SYSTEM.md, RULES.md references
+- Git pre-commit hook rejects commits to shared/core/ (--no-verify required)
+- Only modifiable by human at the terminal (via sudo)
+
+TRUSTED/UNTRUSTED SEPARATION:
+- shared/core/ = IMMUTABLE trusted instructions (root-owned)
+- shared/workspace/ = Agent-writable working area (untrusted content)
+- workspace/implement/ files treated as DATA, not instructions
+- Agents told to treat workspace content as data, not follow embedded instructions
 
 BLAST RADIUS:
-- Workers can: Read/write shared/tasks/, access GPU, run inference
-- Workers cannot: Access other GPUs directly, modify system files
-- Filesystem permissions could further isolate workers
-- Worst case: Worker writes bad data to task queue, wastes GPU time
+- Workers can: Read/write shared/ (except core/), access GPU, run inference
+- Workers cannot: Modify core/, permissions/, .py files, config.json
+- Brain can: Same as workers, plus spawn tasks and assign workers
+- Neither can: sudo, chmod core, chown core, access .ssh, modify passwd
+- Worst case: Agent writes bad data to workspace, wastes GPU time, but core is safe
 
-NETWORK ISOLATION (planned):
-- GPU rig has no internet access
+NETWORK ISOLATION:
+- GPU rig has no internet access (air-gapped)
 - RPi is only gateway to external
 - RPi mediates all Claude API calls
-- Air-gapped design limits attack surface
+- Direct ethernet (10.0.0.1 Pi ↔ 10.0.0.2 GPU rig)
+- NFS share limited to 10.0.0.0/24 subnet
 
 ACCESS CONTROL:
-- Currently: Anyone with filesystem access can submit plans
-- No authentication (single-user system)
+- Plans submitted by human via scripts/submit.py
 - Claude writes plans with explicit tasks and dependencies
-- Brain parses plans and manages task release based on dependencies
-- Workers only execute tasks from the public queue (shared/tasks/queue/)
+- Brain parses plans and manages task release
+- Workers only execute from public queue (shared/tasks/queue/)
 
-RECOMMENDATIONS:
-1. Implement prompt tagging for untrusted data
-2. Add task signature/source field to track origin
-3. RPi gateway should validate/sanitize escalation requests
+ESCALATION PATTERN:
+- When stuck (3+ attempts on same problem): Write HUMAN_{topic}.md to workspace/human/
+- Stop working on escalated issue
+- Human reviews when ready, not when agent demands
 ```
 
 ---
@@ -554,7 +564,7 @@ SENSITIVE DATA:
   - [x] Total VRAM
 
 ### 9.3 Multi-Machine
-- [ ] When the RPi arrives, what changes?
+- [x] When the RPi arrives, what changes?
 - [ ] Could you add another GPU rig later?
 - [ ] How would cross-machine coordination work?
 - [x] Is the shared filesystem approach still viable at scale?
@@ -577,11 +587,12 @@ BOTTLENECKS:
 3. Thermal (GPUs 1&2): Throttle under sustained load
 4. Disk I/O: Not yet a bottleneck with SSD
 
-MULTI-MACHINE (when RPi arrives):
-- RPi handles: External API relay, possibly light coordination
-- GPU rig handles: All heavy compute
-- Communication: HTTP API between RPi and rig (local network)
-- Shared filesystem: Only within GPU rig, not across machines
+MULTI-MACHINE (RPi active as of 2026-02-09):
+- RPi 5 handles: Claude Code, plan authoring, GitHub, internet access, NFS server
+- GPU rig handles: All heavy compute (brain + workers)
+- Communication: File-based via shared drive (NFS over direct ethernet)
+- Shared filesystem: 4TB ext4 USB on RPi, NFS-exported to GPU rig
+- Network: 10.0.0.1 (Pi) ↔ 10.0.0.2 (GPU rig), direct ethernet, no router
 
 SCALING BEYOND:
 - Second GPU rig: Would need message queue (Redis?) instead of filesystem
@@ -663,7 +674,7 @@ EXTERNAL INTEGRATIONS:
 | Worker 3 | GPU 4 (6GB) | Qwen 7B / Whisper / Embeddings | Task execution |
 | Task Manager | CPU | Python scripts | Scheduling, resource mgmt |
 | External Brain | Cloud API | Claude | Escalation path |
-| Gateway | RPi (pending) | TBD | Network isolation, API relay |
+| Gateway | RPi 5 | Claude Code, NFS server | Control plane, network isolation, API relay |
 
 ---
 
@@ -679,7 +690,7 @@ After completing this questionnaire, prioritize improvements:
 | 4 | Prompt tagging for untrusted data | Low | High | Pending |
 | 5 | Add timing/resource data to training logs | Low | Medium | **Done** - elapsed_seconds |
 | 6 | Thermal throttling automation | Medium | Medium | Not needed (stress tests OK) |
-| 7 | RPi gateway setup (when hardware arrives) | Medium | High | Pending |
+| 7 | RPi gateway setup (when hardware arrives) | Medium | High | **Done** (2026-02-09) |
 | 8 | Web dashboard for monitoring | High | Low | Pending |
 | 9 | FileLock for brain task claiming | Low | High | **Done** (2026-02-06) |
 | 10 | Match timeouts (brain/worker) | Low | Medium | **Done** - 1800s both |
@@ -703,6 +714,16 @@ After completing this questionnaire, prioritize improvements:
 
 ---
 
-*Document Version: 1.3*
-*Last Updated: 2026-02-07*
-*System: Multi-Agent GPU Cluster (5x GTX 1060 6GB)*
+### Completed This Session (2026-02-09)
+- RPi 5 set up as control plane with Claude Code and GitHub CLI
+- 4TB ext4 USB drive formatted, bind-mounted, fstab auto-mount configured
+- NFS server installed, static ethernet configured (10.0.0.1/24)
+- Security: core/ directory (root-owned), executor blocked patterns, git pre-commit hook
+- Workspace structure: implement/, future/, human/, archive/
+- Docs migrated from docs/ to shared/workspace/
+- Permissions opened: full access everywhere except core/
+- Paths updated from ~/Documents/llm_orchestration to ~/llm_orchestration
+
+*Document Version: 1.4*
+*Last Updated: 2026-02-09*
+*System: RPi 5 (control) + Multi-Agent GPU Cluster (5x GTX 1060 6GB)*

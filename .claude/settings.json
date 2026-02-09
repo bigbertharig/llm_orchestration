@@ -4,32 +4,19 @@
       "Read(**)",
       "Glob(**)",
       "Grep(**)",
-      "Bash(ls *)",
-      "Bash(find *)",
-      "Bash(cat *)",
-      "Bash(head *)",
-      "Bash(tail *)",
-      "Bash(wc *)",
-      "Bash(tree *)",
-      "Bash(python *)",
-      "Bash(python3 *)",
-      "Bash(source ~/ml-env/bin/activate*)",
-      "Bash(chmod +x *)",
-      "Bash(mkdir -p *)",
-      "Bash(pkill *)",
-      "Bash(ollama *)",
-      "Bash(nvidia-smi *)",
-      "Bash(free *)",
-      "Bash(ps *)",
-      "Bash(curl *localhost*)",
-      "Edit(~/Documents/llm_orchestration/**)",
-      "Write(~/Documents/llm_orchestration/**)"
+      "Bash(*)",
+      "Edit(**)",
+      "Write(**)"
     ],
     "deny": [
       "Read(~/.ssh/**)",
       "Read(~/.gnupg/**)",
       "Read(**/.env)",
-      "Read(**/credentials*)"
+      "Read(**/credentials*)",
+      "Edit(/media/bryan/shared/core/**)",
+      "Write(/media/bryan/shared/core/**)",
+      "Edit(~/llm_orchestration/shared/core/**)",
+      "Write(~/llm_orchestration/shared/core/**)"
     ]
   }
 }

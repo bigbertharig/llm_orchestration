@@ -1,5 +1,5 @@
 {
-  "_description": "Worker agent permissions - task execution with free read access",
+  "_description": "Worker agent permissions - full access except core/",
 
   "file_access": {
     "read": {
@@ -17,77 +17,46 @@
     },
     "write": {
       "allowed_paths": [
-        "/home/bryan/Documents/llm_orchestration/shared/**",
-        "/tmp/agent-*"
+        "/media/bryan/shared/**",
+        "/home/bryan/llm_orchestration/**",
+        "/tmp/**"
       ],
       "blocked_paths": [
-        "**/*.py",
-        "**/*.sh",
-        "**/config.json",
-        "**/permissions/**"
+        "**/core/**"
       ],
-      "max_file_size_mb": 5
+      "max_file_size_mb": 50
     }
   },
 
   "bash": {
     "allowed_commands": [
-      "^ls\\s",
-      "^ls$",
-      "^cat\\s",
-      "^head\\s",
-      "^tail\\s",
-      "^wc\\s",
-      "^grep\\s",
-      "^find\\s",
-      "^echo\\s",
-      "^date",
-      "^pwd$",
-      "^whoami$",
-      "^uname\\s",
-      "^env$",
-      "^printenv\\s",
-      "^nvidia-smi",
-      "^df\\s",
-      "^du\\s",
-      "^stat\\s",
-      "^file\\s",
-      "^jq\\s",
-      "^sort\\s",
-      "^uniq\\s",
-      "^cut\\s",
-      "^tr\\s",
-      "^awk\\s",
-      "^sed\\s.*[^>]$",
-      "^python\\s+/home/bryan/Documents/llm_orchestration/shared/plans/",
-      "^python3\\s+/home/bryan/Documents/llm_orchestration/shared/plans/",
-      "^source\\s+.*/ml-env/bin/activate\\s*&&\\s*python\\s+/home/bryan/Documents/llm_orchestration/shared/plans/",
-      "^export\\s+LD_LIBRARY_PATH=.*&&\\s*source\\s+.*/ml-env/bin/activate\\s*&&\\s*python\\s+/home/bryan/Documents/llm_orchestration/shared/plans/"
+      ".*"
     ],
     "blocked_patterns": [
-      "rm\\s+-rf\\s+/",
-      "rm\\s+-rf\\s+~",
-      "rm\\s+-rf\\s+\\*",
+      "rm\\s+-rf\\s+/$",
       "sudo\\s",
-      "chmod\\s+777",
-      ">\\s*/etc/",
-      ">\\s*/usr/",
-      "\\|\\s*sh\\s*$",
-      "\\|\\s*bash\\s*$",
-      "eval\\s",
-      "exec\\s",
+      "chmod.*core",
+      "chown.*core",
+      ">.*core/",
       "mkfs",
       "dd\\s+if=",
-      ":(){ :|:& };:"
+      ":(){ :|:& };:",
+      "SYSTEM\\.md",
+      "RULES\\.md",
+      "ESCALATION_POLICY\\.md",
+      "passwd",
+      "visudo",
+      "\\.ssh"
     ],
     "timeout_seconds": 1800,
-    "allow_background": false
+    "allow_background": true
   },
 
   "network": {
     "allowed_hosts": [
       "localhost",
-      "127.0.0.1"
+      "127.0.0.1",
+      "10.0.0.*"
     ],
     "allowed_ports": [11434, 11435, 11436, 11437],
     "block_external": true
@@ -100,8 +69,8 @@
     "can_aggregate_results": false,
     "can_escalate_to_cloud": false,
     "can_modify_config": false,
-    "can_execute_code": false,
-    "can_delete_files": false,
+    "can_execute_code": true,
+    "can_delete_files": true,
     "requires_human_approval": []
   }
 }

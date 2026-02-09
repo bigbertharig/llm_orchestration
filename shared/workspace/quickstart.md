@@ -8,7 +8,9 @@ This document tells you how to interact with the LLM orchestration system. Read 
 
 ## System Overview
 
-A multi-GPU LLM orchestration system running on 5x GTX 1060 GPUs:
+A distributed multi-GPU LLM orchestration system:
+- **RPi 5** (control plane) - internet access, Claude Code, plan submission
+- **Shared drive** (4TB ext4 USB) - mounted on RPi, NFS-shared to GPU rig
 - **Brain** (Qwen 14B on GPUs 0+3) - coordinates tasks, monitors workers
 - **Workers** (Qwen 7B on GPUs 1, 2, 4) - execute tasks in parallel
 - **Plans** - markdown files defining goals, scripts, and task dependencies
@@ -28,7 +30,7 @@ curl -s http://localhost:11434/api/ps | jq -r '.models[].name'
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
 
 # Task queue status
-ls ~/Documents/llm_orchestration/shared/tasks/{queue,processing,complete}/ 2>/dev/null | head -20
+ls ~/llm_orchestration/shared/tasks/{queue,processing,complete}/ 2>/dev/null | head -20
 ```
 
 ---
@@ -38,7 +40,7 @@ ls ~/Documents/llm_orchestration/shared/tasks/{queue,processing,complete}/ 2>/de
 If agents aren't running:
 
 ```bash
-cd ~/Documents/llm_orchestration/shared/agents
+cd ~/llm_orchestration/shared/agents
 source ~/ml-env/bin/activate
 python launch.py
 ```
@@ -56,7 +58,7 @@ python launch.py
 ## Submitting a Plan
 
 ```bash
-cd ~/Documents/llm_orchestration
+cd ~/llm_orchestration
 source ~/ml-env/bin/activate
 
 python scripts/submit.py shared/plans/<plan_name> \
@@ -73,7 +75,7 @@ python scripts/submit.py shared/plans/video_zim_batch \
   }'
 ```
 
-Plans live in `shared/plans/`. Each has a `plan.md` defining the workflow. See [PLAN_FORMAT.md](../shared/plans/PLAN_FORMAT.md) for how to write plans.
+Plans live in `shared/plans/`. Each has a `plan.md` defining the workflow. See [PLAN_FORMAT.md](../plans/PLAN_FORMAT.md) for how to write plans.
 
 ---
 
@@ -81,7 +83,7 @@ Plans live in `shared/plans/`. Each has a `plan.md` defining the workflow. See [
 
 ```bash
 # Main log - brain decisions and task flow
-tail -f ~/Documents/llm_orchestration/shared/logs/brain_decisions.log
+tail -f ~/llm_orchestration/shared/logs/brain_decisions.log
 
 # Task queues
 ls shared/tasks/queue/       # waiting for workers
@@ -96,7 +98,7 @@ ls shared/tasks/complete/    # finished
 To stop a plan mid-execution and clean up:
 
 ```bash
-cd ~/Documents/llm_orchestration
+cd ~/llm_orchestration
 source ~/ml-env/bin/activate
 python scripts/kill_plan.py [batch_id]
 ```
@@ -130,10 +132,11 @@ pkill -f "brain.py|worker.py"
 | Path | Purpose |
 |------|---------|
 | `shared/agents/` | Brain and worker code, config.json |
+| `shared/core/` | Protected agent instructions (root-owned, read-only) |
+| `shared/workspace/` | Documentation, ideas, human escalations |
 | `shared/plans/` | Plan definitions |
 | `shared/tasks/` | Task queue (queue/, processing/, complete/, failed/) |
 | `shared/logs/` | Logs including brain_decisions.log |
-| `docs/` | Documentation |
 
 ---
 
@@ -151,7 +154,7 @@ pkill -f "brain.py|worker.py"
 ## Next Steps
 
 - **Understand the system:** [architecture.md](architecture.md)
-- **Write a plan:** [PLAN_FORMAT.md](../shared/plans/PLAN_FORMAT.md)
+- **Write a plan:** [PLAN_FORMAT.md](../plans/PLAN_FORMAT.md)
 - **Debug brain behavior:** [brain-behavior.md](brain-behavior.md)
 
 ---

@@ -25,23 +25,37 @@ ml-env/
 config.json
 shared/agents/config.json
 
-# Shared folder - runtime data and plans
-# Exclude everything in shared/ by default
+# =============================================================================
+# Shared folder - selective sync
+# =============================================================================
+# Default: exclude everything in shared/
 shared/*
 
-# But include the agents code (the core engine)
+# SYNC: Agent code (the core engine, minus permissions)
 !shared/agents/
 shared/agents/__pycache__/
 shared/agents/*.pyc
+shared/agents/permissions/
 
-# Plans are separate repos (not part of this repo)
-shared/plans/
+# SYNC: Logs (backup value)
+!shared/logs/
 
-# Logs and temporary files
-*.log
-*.jsonl
+# SYNC: Plans (plan definitions and history)
+!shared/plans/
+
+# SYNC: Workspace (docs, ideas, human escalations)
+!shared/workspace/
+
+# NO SYNC: Runtime state
+# shared/brain/         - runtime state, private tasks
+# shared/core/          - root-owned, protected, only changed at terminal
+# shared/gpus/          - runtime heartbeats
+# shared/signals/       - ephemeral control signals
+# shared/tasks/         - runtime queue (results go in plan batch history)
+# shared/lost+found/    - ext4 system directory
+
+# Temporary and lock files
 *.lock
-logs/
 /tmp/
 
 # OS
