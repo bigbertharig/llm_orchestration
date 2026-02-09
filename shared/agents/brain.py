@@ -1487,6 +1487,17 @@ JSON only:"""
         gpus_with_model = [g for g, s in gpu_states.items() if s.get("model_loaded", False)]
         gpus_without_model = [g for g, s in gpu_states.items() if not s.get("model_loaded", False)]
 
+        # Track unhealthy GPUs (Ollama circuit breaker tripped)
+        unhealthy_gpus = [g for g, s in gpu_states.items()
+                          if not s.get("ollama_healthy", True)]
+        if unhealthy_gpus:
+            self.log_decision("GPU_UNHEALTHY",
+                f"GPUs with unhealthy Ollama: {unhealthy_gpus}",
+                {"unhealthy": unhealthy_gpus})
+
+        # Only count healthy cold GPUs as candidates for load_llm
+        healthy_cold_gpus = [g for g in gpus_without_model if g not in unhealthy_gpus]
+
         self.log_decision("MONITOR",
             f"GPUs active: {len(active_gpus)}/{len(gpu_status)}, "
             f"Agents: {len(running_gpus)}/{len(self.gpu_agents)}, "
@@ -1551,10 +1562,11 @@ JSON only:"""
 
         if not has_pending_resource:
             # Need to load LLM? LLM tasks waiting but no GPUs are hot
-            if queue_stats["llm"] > 0 and len(gpus_with_model) == 0 and len(gpus_without_model) > 0:
+            # Only consider healthy cold GPUs as candidates
+            if queue_stats["llm"] > 0 and len(gpus_with_model) == 0 and len(healthy_cold_gpus) > 0:
                 self.log_decision("RESOURCE_DECISION",
                     f"LLM tasks waiting ({queue_stats['llm']}) but no GPUs hot - inserting load_llm task",
-                    {"llm_tasks": queue_stats["llm"], "cold_gpus": gpus_without_model})
+                    {"llm_tasks": queue_stats["llm"], "cold_gpus": healthy_cold_gpus})
                 self._insert_resource_task("load_llm")
 
             # Need to unload LLM? Only script tasks but GPUs are hot

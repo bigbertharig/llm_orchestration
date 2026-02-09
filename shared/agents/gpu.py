@@ -142,6 +142,12 @@ class GPUAgent:
         self.stats = {"tasks_completed": 0, "tasks_failed": 0}
         self.last_external_heartbeat = 0
 
+        # Ollama health tracking
+        self.ollama_healthy = True
+        self.ollama_consecutive_failures = 0
+        self.ollama_health_threshold = 3  # Restart after this many consecutive failures
+        self.ollama_circuit_breaker = 5   # Stop claiming LLM tasks after this many
+
         # Set CUDA device for this process and all children
         os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
 
@@ -256,6 +262,82 @@ class GPUAgent:
                 self.ollama_process.kill()
             self.logger.info("Ollama stopped")
 
+    def check_ollama_health(self) -> Dict[str, Any]:
+        """Check Ollama instance health via /api/tags endpoint.
+
+        Returns dict with health status and loaded models. Tracks consecutive
+        failures and triggers restart after threshold. Implements circuit breaker
+        to stop claiming LLM tasks after sustained failures.
+        """
+        health = {
+            "healthy": False,
+            "loaded_models": [],
+            "consecutive_failures": self.ollama_consecutive_failures,
+            "response_ms": None,
+        }
+
+        if not self.port:
+            health["healthy"] = True  # Script-only GPU, no Ollama expected
+            health["note"] = "no_ollama_configured"
+            return health
+
+        try:
+            start = time.time()
+            resp = requests.get(
+                f"http://localhost:{self.port}/api/tags",
+                timeout=5
+            )
+            elapsed_ms = int((time.time() - start) * 1000)
+            health["response_ms"] = elapsed_ms
+
+            if resp.status_code == 200:
+                data = resp.json()
+                models = data.get("models", [])
+                health["loaded_models"] = [m.get("name", "") for m in models]
+                health["healthy"] = True
+                self.ollama_consecutive_failures = 0
+                self.ollama_healthy = True
+            else:
+                self.ollama_consecutive_failures += 1
+                self.logger.warning(
+                    f"Ollama health check returned {resp.status_code} "
+                    f"(failure {self.ollama_consecutive_failures})")
+
+        except Exception as e:
+            self.ollama_consecutive_failures += 1
+            self.logger.warning(
+                f"Ollama health check failed: {e} "
+                f"(failure {self.ollama_consecutive_failures})")
+
+        health["consecutive_failures"] = self.ollama_consecutive_failures
+
+        # Auto-restart after threshold
+        if self.ollama_consecutive_failures >= self.ollama_health_threshold:
+            self.logger.error(
+                f"Ollama failed {self.ollama_consecutive_failures} consecutive health checks, "
+                f"attempting restart")
+            try:
+                self.stop_ollama()
+                time.sleep(2)
+                self.start_ollama()
+                self.ollama_consecutive_failures = 0
+                self.ollama_healthy = True
+                # Model was lost in restart
+                self.model_loaded = False
+                self.state = "cold"
+                self.logger.info("Ollama restarted successfully after health check failures")
+            except Exception as e:
+                self.logger.error(f"Ollama restart failed: {e}")
+
+        # Circuit breaker
+        if self.ollama_consecutive_failures >= self.ollama_circuit_breaker:
+            self.ollama_healthy = False
+            self.logger.error(
+                f"Circuit breaker: Ollama unhealthy after {self.ollama_consecutive_failures} "
+                f"failures, will not claim LLM tasks")
+
+        return health
+
     def load_model(self):
         """Load LLM model into VRAM. Transitions GPU to Hot state."""
         if self.model_loaded:
@@ -285,7 +367,12 @@ class GPUAgent:
             self.logger.error(f"Failed to load model: {e}")
 
     def unload_model(self):
-        """Unload LLM model from VRAM. Transitions GPU to Cold state."""
+        """Unload LLM model from VRAM. Transitions GPU to Cold state.
+
+        Retries up to 3 times with 5s backoff on failure, since a failed unload
+        leaves VRAM in an inconsistent state (agent thinks model is loaded but
+        VRAM may be partially freed).
+        """
         if not self.model_loaded:
             return
 
@@ -294,22 +381,31 @@ class GPUAgent:
 
         self.logger.info(f"Unloading model {self.model} to free VRAM...")
 
-        try:
-            response = requests.post(
-                self.api_url,
-                json={"model": self.model, "prompt": "", "keep_alive": 0},
-                timeout=30
-            )
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.post(
+                    self.api_url,
+                    json={"model": self.model, "prompt": "", "keep_alive": 0},
+                    timeout=30
+                )
 
-            if response.status_code == 200:
-                self.model_loaded = False
-                self.state = "cold"
-                self.logger.info("Model unloaded - GPU is now COLD")
-            else:
-                self.logger.warning(f"Unload returned status {response.status_code}")
+                if response.status_code == 200:
+                    self.model_loaded = False
+                    self.state = "cold"
+                    self.logger.info("Model unloaded - GPU is now COLD")
+                    return
+                else:
+                    self.logger.warning(
+                        f"Unload attempt {attempt}/{max_retries} returned "
+                        f"status {response.status_code}")
 
-        except Exception as e:
-            self.logger.warning(f"Failed to unload model: {e}")
+            except Exception as e:
+                self.logger.warning(
+                    f"Unload attempt {attempt}/{max_retries} failed: {e}")
+
+            if attempt < max_retries:
+                time.sleep(5)
 
     # =========================================================================
     # GPU Stats
@@ -420,7 +516,14 @@ class GPUAgent:
     # =========================================================================
 
     def _get_preferred_classes(self) -> List[str]:
-        """Get task classes this GPU should claim based on current state."""
+        """Get task classes this GPU should claim based on current state.
+
+        Circuit breaker: if Ollama is unhealthy, exclude LLM tasks to prevent
+        burning through timeouts on a broken Ollama instance.
+        """
+        if not self.ollama_healthy:
+            self.logger.debug("Ollama unhealthy - excluding LLM tasks from claim")
+            return ['meta', 'script', 'cpu']
         if self.state == "hot":
             return ['meta', 'llm', 'cpu']
         else:
@@ -685,8 +788,15 @@ class GPUAgent:
         return count
 
     def _write_heartbeat(self):
-        """Write GPU-level heartbeat to filesystem. We are sole owner, no lock needed."""
+        """Write GPU-level heartbeat to filesystem. We are sole owner, no lock needed.
+
+        Includes Ollama health check results so the brain can detect unhealthy GPUs
+        and avoid assigning LLM work to them.
+        """
         gpu_stats = self._get_gpu_stats()
+
+        # Run Ollama health check as part of heartbeat cycle
+        ollama_health = self.check_ollama_health()
 
         active_task_info = []
         for worker_id, info in self.active_workers.items():
@@ -706,6 +816,8 @@ class GPUAgent:
             "name": self.name,
             "state": self.state,
             "model_loaded": self.model_loaded,
+            "ollama_healthy": self.ollama_healthy,
+            "ollama": ollama_health,
             "last_updated": datetime.now().isoformat(),
             "temperature_c": gpu_stats["temperature_c"],
             "power_draw_w": gpu_stats["power_draw_w"],
