@@ -13,7 +13,7 @@ Usage:
   python submit.py /path/to/plan_folder --config '{"INPUT_FOLDER": "/data"}'
 
 Monitor:
-  tail -f ~/Documents/llm_orchestration/shared/logs/brain_decisions.log
+  tail -f ~/llm_orchestration/shared/logs/brain_decisions.log
 """
 import json
 import uuid
@@ -63,7 +63,7 @@ def main():
     print(f"Submitted: {plan_path.name}")
     print(f"Task ID: {task['task_id'][:8]}")
     print(f"Config: {config}")
-    print(f"\nMonitor: tail -f ~/Documents/llm_orchestration/shared/logs/brain_decisions.log")
+    print(f"\nMonitor: tail -f ~/llm_orchestration/shared/logs/brain_decisions.log")
 
 
 if __name__ == "__main__":

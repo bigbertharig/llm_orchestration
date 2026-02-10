@@ -35,8 +35,8 @@ def get_tasks(shared_path: Path) -> dict:
                 with open(task_file) as f:
                     task = json.load(f)
                     tasks[status].append(task)
-            except:
-                pass
+            except Exception:
+                pass  # Skip malformed task file
 
     return tasks
 
@@ -108,7 +108,8 @@ def show_task(config_path: str, task_id: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Agent system status")
-    parser.add_argument("--config", default="/home/bryan/Documents/llm_orchestration/config.json")
+    default_config = str(Path(__file__).resolve().parent.parent / "shared" / "agents" / "config.json")
+    parser.add_argument("--config", default=default_config)
     parser.add_argument("--tasks", action="store_true", help="List all tasks")
     parser.add_argument("--task", metavar="ID", help="Show specific task")
     args = parser.parse_args()

@@ -260,7 +260,8 @@ def export_rated(log_path: Path, output_path: Path = None):
 
 def main():
     parser = argparse.ArgumentParser(description="Review training samples")
-    parser.add_argument("--config", default="/home/bryan/Documents/llm_orchestration/config.json")
+    default_config = str(Path(__file__).resolve().parent.parent / "shared" / "agents" / "config.json")
+    parser.add_argument("--config", default=default_config)
     parser.add_argument("--stats", action="store_true", help="Show statistics")
     parser.add_argument("--export", action="store_true", help="Export rated samples")
     args = parser.parse_args()

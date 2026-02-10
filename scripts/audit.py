@@ -40,8 +40,8 @@ def load_decisions(log_path: Path) -> list:
                 if line.strip():
                     try:
                         decisions.append(json.loads(line))
-                    except:
-                        pass
+                    except Exception:
+                        pass  # Skip malformed log line
     return decisions
 
 
@@ -56,8 +56,8 @@ def load_training_samples(log_path: Path) -> list:
                 if line.strip():
                     try:
                         samples.append(json.loads(line))
-                    except:
-                        pass
+                    except Exception:
+                        pass  # Skip malformed log line
     return samples
 
 
@@ -68,8 +68,8 @@ def load_completed_tasks(shared_path: Path) -> list:
         try:
             with open(task_file) as f:
                 tasks.append(json.load(f))
-        except:
-            pass
+        except Exception:
+            pass  # Skip malformed task file
     return tasks
 
 
@@ -220,7 +220,8 @@ def full_audit(config_path: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Audit agent system")
-    parser.add_argument("--config", default="/home/bryan/Documents/llm_orchestration/config.json")
+    default_config = str(Path(__file__).resolve().parent.parent / "shared" / "agents" / "config.json")
+    parser.add_argument("--config", default=default_config)
     parser.add_argument("--decisions", action="store_true", help="Decisions only")
     parser.add_argument("--evaluations", action="store_true", help="Evaluations only")
     parser.add_argument("--disagree", action="store_true", help="Find disagreements")

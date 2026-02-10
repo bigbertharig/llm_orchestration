@@ -76,12 +76,22 @@ def clear_active_batch(batch_id: str = None):
         json.dump(state, f, indent=2)
 
 
-def unload_worker_models():
+def unload_worker_models(ports: list = None):
     """Unload models from worker Ollama instances (not the brain)."""
     print("Unloading worker models...")
 
-    # Only unload from worker ports (11435, 11436, 11437), NOT brain (11434)
-    for port in [11435, 11436, 11437]:
+    if ports is None:
+        # Fallback: try to read from config
+        config_path = BASE_DIR / "shared" / "agents" / "config.json"
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            ports = [gpu["port"] for gpu in config["gpus"] if gpu.get("port")]
+        except Exception as e:
+            print(f"  Warning: Could not read config ({e}), using no ports")
+            return
+
+    for port in ports:
         try:
             result = subprocess.run(
                 ["curl", "-s", f"http://localhost:{port}/api/ps"],
@@ -97,7 +107,7 @@ def unload_worker_models():
                          "-d", json.dumps({"model": model_name, "keep_alive": 0})],
                         capture_output=True, timeout=10
                     )
-        except Exception as e:
+        except Exception:
             pass  # Port not responding, skip
 
 

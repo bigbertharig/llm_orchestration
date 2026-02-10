@@ -47,8 +47,8 @@ def get_tasks(shared_path: Path) -> dict:
                 with open(task_file) as f:
                     task = json.load(f)
                     tasks[status].append(task)
-            except:
-                pass
+            except Exception:
+                pass  # Skip malformed task file
 
     return tasks
 
@@ -66,7 +66,7 @@ def format_time(iso_str: str) -> str:
             return f"{int(delta.total_seconds() / 60)}m ago"
         else:
             return dt.strftime("%H:%M:%S")
-    except:
+    except Exception:
         return iso_str[:8]
 
 
@@ -246,7 +246,8 @@ def tail_brain_decisions(shared_path: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Agent system monitor")
-    parser.add_argument("--config", default="/home/bryan/Documents/llm_orchestration/config.json")
+    default_config = str(Path(__file__).resolve().parent.parent / "shared" / "agents" / "config.json")
+    parser.add_argument("--config", default=default_config)
     parser.add_argument("--once", action="store_true", help="Show once and exit")
     parser.add_argument("--tail", action="store_true", help="Follow completed task outputs")
     parser.add_argument("--brain", action="store_true", help="Follow brain decision log")

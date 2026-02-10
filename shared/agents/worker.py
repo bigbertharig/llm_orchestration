@@ -65,7 +65,8 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
         command = task.get("command", prompt)
         logger.info(f"Executing shell: {command[:80]}...")
 
-        result = executor.run_bash(command)
+        shell_timeout = task.get("timeout_seconds", task_timeout)
+        result = executor.run_bash(command, timeout=shell_timeout)
 
         _log_training_sample(task, command, result.output,
                              "success" if result.success else "failure",

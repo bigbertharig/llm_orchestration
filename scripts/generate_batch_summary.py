@@ -263,13 +263,17 @@ def main():
     parser.add_argument("--batch-id", required=True, help="Batch ID")
     parser.add_argument("--plan-name", required=True, help="Plan name")
     parser.add_argument("--plan-dir", required=True, help="Plan directory path")
+    parser.add_argument("--shared-path", help="Path to shared directory (overrides inference)")
 
     args = parser.parse_args()
 
     plan_dir = Path(args.plan_dir)
 
-    # Find shared path (go up from plan dir)
-    shared_path = plan_dir.parent
+    # Find shared path: explicit arg, or infer from plan dir (shared/plans/<name>/)
+    if args.shared_path:
+        shared_path = Path(args.shared_path)
+    else:
+        shared_path = plan_dir.parent.parent
 
     print(f"Generating execution summary for batch {args.batch_id}")
     print(f"Plan: {args.plan_name}")
