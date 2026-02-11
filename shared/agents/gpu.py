@@ -47,7 +47,6 @@ INTERNAL_POLL_INTERVAL = 5        # seconds - check worker status internally
 SIGNAL_CHECK_INTERVAL = 5         # seconds - check stop/abort signals
 
 # VRAM budget
-GPU_TOTAL_VRAM = 6144             # MB - GTX 1060 6GB
 VRAM_BUDGET_RATIO = 0.8           # Use at most 80% of total VRAM
 DEFAULT_CPU_VRAM_COST = 1024      # MB - virtual cost for CPU tasks to limit concurrency
 
@@ -68,6 +67,7 @@ class GPUAgent:
         self.gpu_config = self._get_gpu_config(gpu_name)
         self.name = gpu_name
         self.gpu_id = self.gpu_config["id"]
+        self.gpu_total_vram = self.gpu_config.get("vram_mb") or self._query_gpu_vram()
         self.logger = logging.getLogger(self.name)
 
         # Set logging level from env
@@ -181,6 +181,22 @@ class GPUAgent:
             if gpu["name"] == gpu_name:
                 return gpu
         raise ValueError(f"GPU '{gpu_name}' not found in config")
+
+    def _query_gpu_vram(self) -> int:
+        """Query total VRAM for this GPU via nvidia-smi. Fallback for configs without vram_mb."""
+        try:
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=index,memory.total',
+                 '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.strip().split('\n'):
+                parts = [p.strip() for p in line.split(',')]
+                if len(parts) >= 2 and int(parts[0]) == self.gpu_id:
+                    return int(float(parts[1]))
+        except Exception:
+            pass
+        return 6144  # Last-resort default
 
     def _verify_core_security(self):
         """Verify core/ directory is properly secured before starting.
@@ -445,7 +461,7 @@ class GPUAgent:
 
         return {
             "temperature_c": 0, "power_draw_w": 0.0,
-            "vram_used_mb": 0, "vram_total_mb": GPU_TOTAL_VRAM,
+            "vram_used_mb": 0, "vram_total_mb": self.gpu_total_vram,
             "vram_percent": 0, "gpu_util_percent": 0,
             "clock_mhz": 0, "throttle_status": "Unknown"
         }
@@ -492,7 +508,7 @@ class GPUAgent:
 
     def _get_vram_budget(self) -> int:
         """Calculate available VRAM budget for new tasks."""
-        total_budget = int(GPU_TOTAL_VRAM * VRAM_BUDGET_RATIO)
+        total_budget = int(self.gpu_total_vram * VRAM_BUDGET_RATIO)
         available = total_budget - self.claimed_vram
         return max(0, available)
 
@@ -501,7 +517,7 @@ class GPUAgent:
         task_class = task.get("task_class", "cpu")
 
         if task_class == "llm":
-            return int(GPU_TOTAL_VRAM * VRAM_BUDGET_RATIO)  # LLM uses full budget
+            return int(self.gpu_total_vram * VRAM_BUDGET_RATIO)  # LLM uses full budget
         elif task_class == "cpu":
             return DEFAULT_CPU_VRAM_COST
         elif task_class == "script":

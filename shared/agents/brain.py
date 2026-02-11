@@ -94,7 +94,8 @@ class Brain:
         self.poll_interval = self.config["timeouts"]["poll_interval_seconds"]
         self.think_timeout = self.config["timeouts"]["brain_think_seconds"]
 
-        self.gpu_agents = {g["name"]: g for g in self.config["gpus"]}
+        self.gpu_agents = {g["name"]: g for g in self.config.get("gpus", [])}
+        self.brain_only = len(self.gpu_agents) == 0
         self.ollama_process: Optional[subprocess.Popen] = None
         self.running = True
 
@@ -125,13 +126,8 @@ class Brain:
 
     def _load_config(self, config_path: str) -> dict:
         if not Path(config_path).exists():
-            template = Path(config_path).parent / "config.template.json"
             print(f"ERROR: Config file not found: {config_path}")
-            if template.exists():
-                print(f"  Copy the template and fill in your values:")
-                print(f"  cp {template} {config_path}")
-            else:
-                print(f"  See config.template.json for the required schema.")
+            print(f"  Run 'python setup.py' to scan hardware and generate config.json.")
             sys.exit(1)
         with open(config_path) as f:
             return json.load(f)
@@ -1256,11 +1252,22 @@ JSON only:"""
                 self._send_abort_signal(worker_name, task_id, f"task_timeout_{elapsed_min}min")
 
     def monitor_system(self):
-        """Monitor GPU agent status, make resource allocation decisions."""
+        """Monitor GPU agent status, make resource allocation decisions.
+
+        In brain-only mode (no worker GPUs configured), skips GPU monitoring
+        but still checks for stuck tasks in the processing queue.
+        """
         now = time.time()
         if now - self.last_monitor_check < self.monitor_interval:
             return
         self.last_monitor_check = now
+
+        if self.brain_only:
+            # Still check for stuck tasks even without GPU agents
+            stuck_tasks = self._detect_stuck_tasks()
+            if stuck_tasks:
+                self._handle_stuck_tasks(stuck_tasks)
+            return
 
         try:
             gpu_status = self._get_gpu_status()

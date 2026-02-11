@@ -2,6 +2,9 @@
 """
 Launch the agent system (brain + GPU agents).
 
+DEPRECATED: Use startup.py instead, which adds hardware verification and
+degraded-mode support. Generate config with 'python setup.py' first.
+
 Usage:
   python launch.py              # Start brain + all GPU agents
   python launch.py --brain-only # Start only brain
@@ -134,6 +137,15 @@ def cleanup(signum=None, frame=None):
 
 
 def main():
+    import warnings
+    warnings.warn(
+        "launch.py is deprecated. Use 'python startup.py' instead "
+        "(with 'python setup.py' to generate config).",
+        DeprecationWarning, stacklevel=2
+    )
+    print("WARNING: launch.py is deprecated. Use 'python startup.py' instead.")
+    print("         Run 'python setup.py' first to generate config from hardware.\n")
+
     parser = argparse.ArgumentParser(description="Launch agent system")
     default_config = Path(__file__).parent / "config.json"
     parser.add_argument("--config", default=str(default_config))
