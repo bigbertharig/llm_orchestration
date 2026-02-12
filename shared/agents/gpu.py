@@ -149,6 +149,11 @@ class GPUAgent:
         self.ollama_health_threshold = 3  # Restart after this many consecutive failures
         self.ollama_circuit_breaker = 5   # Stop claiming LLM tasks after this many
 
+        # Thermal/constrained-state tracking for explicit stall visibility
+        self.thermal_pause_active = False
+        self.thermal_pause_reasons: List[str] = []
+        self.last_thermal_event: Optional[Dict[str, Any]] = None
+
         # Set CUDA device for this process and all children
         os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
 
@@ -579,9 +584,19 @@ class GPUAgent:
         if not critical_reasons:
             return True
 
+        active_task_ids = [
+            info["task"]["task_id"][:8] for info in self.active_workers.values()
+        ]
+        self.last_thermal_event = {
+            "timestamp": datetime.now().isoformat(),
+            "event": "critical_shutdown",
+            "reasons": critical_reasons,
+            "active_task_ids": active_task_ids,
+        }
         self.logger.error(
             f"THERMAL SAFETY SHUTDOWN: {', '.join(critical_reasons)} - "
-            f"killing all workers and stopping agent"
+            f"killing all workers and stopping agent. "
+            f"TASKS_STALLED_TEMP: {active_task_ids or ['none']}"
         )
         self.running = False
         return False
@@ -640,11 +655,23 @@ class GPUAgent:
         constrained, reasons = self._is_resource_constrained(gpu_stats)
 
         if constrained:
+            self.thermal_pause_active = True
+            self.thermal_pause_reasons = reasons.copy()
+            active_task_ids = [
+                info["task"]["task_id"][:8] for info in self.active_workers.values()
+            ]
             self.logger.warning(
-                f"Resource constrained: {', '.join(reasons)} - only claiming meta/cpu"
+                f"TASKS_THERMAL_PAUSED: {', '.join(reasons)} - only claiming meta/cpu. "
+                f"active_task_ids={active_task_ids or ['none']}"
             )
             preferred = ['meta', 'cpu']
         else:
+            if self.thermal_pause_active:
+                self.logger.info(
+                    "TASKS_THERMAL_RESUMED: constraints cleared, normal claiming restored"
+                )
+            self.thermal_pause_active = False
+            self.thermal_pause_reasons = []
             preferred = self._get_preferred_classes()
 
         # Categorize available tasks
@@ -803,6 +830,7 @@ class GPUAgent:
             f"Spawned worker {worker_id} (PID {proc.pid}) for "
             f"{task.get('task_class', 'cpu')} task {task['task_id'][:8]}"
         )
+        self._write_task_heartbeat(task["task_id"], worker_id, proc.pid, peak_vram_mb=0)
 
     def _collect_finished_workers(self):
         """Check for completed worker subprocesses, collect results into outbox."""
@@ -845,6 +873,7 @@ class GPUAgent:
                     self.stats["tasks_failed"] += 1
 
                 finished.append(worker_id)
+                self._remove_task_heartbeat(info["task"]["task_id"])
 
                 self.logger.info(
                     f"Worker {worker_id} finished: "
@@ -862,6 +891,39 @@ class GPUAgent:
             vram = self._get_worker_vram(pid)
             if vram > info["peak_vram_mb"]:
                 info["peak_vram_mb"] = vram
+            self._write_task_heartbeat(
+                info["task"]["task_id"],
+                worker_id,
+                pid,
+                peak_vram_mb=info["peak_vram_mb"]
+            )
+
+    def _task_heartbeat_file(self, task_id: str) -> Path:
+        return self.processing_path / f"{task_id}.heartbeat.json"
+
+    def _write_task_heartbeat(self, task_id: str, worker_id: str, pid: int, peak_vram_mb: int = 0):
+        """Write per-task progress heartbeat for stuck-task detection."""
+        hb = {
+            "task_id": task_id,
+            "worker_id": worker_id,
+            "gpu": self.name,
+            "pid": pid,
+            "peak_vram_mb": int(peak_vram_mb),
+            "updated_at": datetime.now().isoformat(),
+        }
+        try:
+            with open(self._task_heartbeat_file(task_id), "w") as f:
+                json.dump(hb, f, indent=2)
+        except Exception:
+            pass
+
+    def _remove_task_heartbeat(self, task_id: str):
+        hb_file = self._task_heartbeat_file(task_id)
+        try:
+            if hb_file.exists():
+                hb_file.unlink()
+        except Exception:
+            pass
 
     # =========================================================================
     # Filesystem I/O (batched per cycle)
@@ -888,6 +950,7 @@ class GPUAgent:
             proc_file = self.processing_path / f"{task['task_id']}.json"
             if proc_file.exists():
                 proc_file.unlink()
+            self._remove_task_heartbeat(task["task_id"])
 
             status = "completed" if result.get("success") else "failed"
             self.logger.info(f"Task {task['task_id'][:8]}... {status}")
@@ -903,6 +966,7 @@ class GPUAgent:
         and avoid assigning LLM work to them.
         """
         gpu_stats = self._get_gpu_stats()
+        constrained, constrained_reasons = self._is_resource_constrained(gpu_stats)
 
         # Run Ollama health check as part of heartbeat cycle
         ollama_health = self.check_ollama_health()
@@ -943,6 +1007,11 @@ class GPUAgent:
             "budget_available_mb": self._get_vram_budget(),
             "active_workers": len(self.active_workers),
             "active_tasks": active_task_info,
+            "thermal_constrained": constrained,
+            "thermal_reasons": constrained_reasons,
+            "thermal_pause_active": self.thermal_pause_active,
+            "thermal_pause_reasons": self.thermal_pause_reasons,
+            "last_thermal_event": self.last_thermal_event,
             "stats": self.stats,
         }
 
@@ -1035,6 +1104,7 @@ class GPUAgent:
                     proc.kill()
 
             self.logger.info(f"Killed worker {worker_id} ({reason})")
+            self._remove_task_heartbeat(info["task"]["task_id"])
         except Exception as e:
             self.logger.debug(f"Worker already dead: {e}")
 

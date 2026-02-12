@@ -126,6 +126,15 @@ class Brain:
         # Heartbeat/missing thresholds (4 missed 30s heartbeats = 120s)
         self.heartbeat_stale_seconds = int(self.monitor_interval * 4)
         self.missing_gpu_miss_threshold = 4
+        self.task_no_progress_thresholds = {
+            "script": 600,
+            "llm": 420,
+            "cpu": 900,
+            "meta": 180,
+        }
+        self.force_kill_requeue_seconds = 60
+        self.thermal_wait_logged: set[str] = set()
+        self.last_thermal_wait_count = 0
         # Track dependency auto-fix attempts (missing Python modules, etc.)
         self.dependency_fix_attempts: Dict[str, Dict[str, Any]] = {}
         # Incident state machine for worker->brain->cloud escalation
@@ -1881,44 +1890,127 @@ JSON only:"""
     # Resource Monitoring
     # =========================================================================
 
-    def _detect_stuck_tasks(self) -> List[Dict]:
-        """P0: Detect tasks that have been in processing state for too long.
+    def _detect_stuck_tasks(self, running_gpus: Dict[str, Dict]) -> List[Dict]:
+        """
+        Detect tasks with no progress beyond class-specific thresholds.
 
-        Returns list of stuck task info dicts with full task data.
+        Progress is inferred from per-task heartbeat sidecars written by GPU agents:
+          tasks/processing/<task_id>.heartbeat.json
         """
         stuck_tasks = []
-        abort_threshold = 1200  # 20 minutes in seconds
+        gpu_states = self._get_gpu_states()
+        prev_thermal_wait = set(self.thermal_wait_logged)
+        current_thermal_wait = set()
+        now = datetime.now()
 
         for task_file in self.processing_path.glob("*.json"):
             try:
                 with open(task_file) as f:
                     task = json.load(f)
 
-                started_at_str = task.get('started_at')
-                if not started_at_str:
+                task_id = task.get("task_id", "")
+                if not task_id:
                     continue
 
-                started = datetime.fromisoformat(started_at_str)
-                elapsed = (datetime.now() - started).total_seconds()
+                assigned_to = task.get("assigned_to", "")
+                if not assigned_to or assigned_to not in running_gpus:
+                    # Orphan handling is done separately.
+                    continue
 
-                if elapsed > abort_threshold:
+                task_class = task.get("task_class", "cpu")
+                threshold = int(self.task_no_progress_thresholds.get(task_class, 900))
+
+                started_at_str = task.get('started_at') or task.get('last_attempt_at')
+                if not started_at_str:
+                    continue
+                started = datetime.fromisoformat(started_at_str)
+                elapsed = (now - started).total_seconds()
+
+                # Default progress_age: total elapsed since start.
+                progress_age = elapsed
+                progress_source = "started_at"
+
+                hb_file = self.processing_path / f"{task_id}.heartbeat.json"
+                if hb_file.exists():
+                    try:
+                        with open(hb_file) as f:
+                            hb = json.load(f)
+                        hb_time = hb.get("updated_at")
+                        if hb_time:
+                            hb_dt = datetime.fromisoformat(hb_time)
+                            progress_age = (now - hb_dt).total_seconds()
+                            progress_source = "task_heartbeat"
+                    except Exception:
+                        pass
+
+                if progress_age > threshold:
+                    # Distinguish thermal waiting from true stuck:
+                    # if GPU heartbeat says thermal-constrained/paused, do not
+                    # trigger stuck kill/requeue flow yet.
+                    gpu_state = gpu_states.get(assigned_to, {})
+                    thermal_wait = bool(
+                        gpu_state.get("thermal_pause_active")
+                        or gpu_state.get("thermal_constrained")
+                    )
+                    if thermal_wait:
+                        current_thermal_wait.add(task_id)
+                        if task_id not in prev_thermal_wait:
+                            self.log_decision(
+                                "TASK_WAITING_THERMAL",
+                                (
+                                    f"Task {task_id[:8]} waiting due to thermal constraint "
+                                    f"on {assigned_to}"
+                                ),
+                                {
+                                    "task_id": task_id[:8],
+                                    "worker": assigned_to,
+                                    "progress_age_sec": int(progress_age),
+                                    "threshold_sec": threshold,
+                                    "cpu_temp_c": gpu_state.get("cpu_temp_c"),
+                                    "gpu_temp_c": gpu_state.get("temperature_c"),
+                                    "thermal_reasons": gpu_state.get("thermal_reasons", []),
+                                },
+                            )
+                        continue
+
                     stuck_tasks.append({
-                        'task': task,  # Full task object for abort handling
+                        'task': task,
                         'task_file': task_file,
-                        'task_id': task['task_id'][:8],
-                        'assigned_to': task.get('assigned_to', 'unknown'),
+                        'task_id': task_id[:8],
+                        'assigned_to': assigned_to,
                         'elapsed_min': int(elapsed / 60),
                         'elapsed_sec': int(elapsed),
+                        'progress_age_sec': int(progress_age),
+                        'progress_source': progress_source,
+                        'threshold_sec': threshold,
                         'name': task.get('name', '')
                     })
 
             except Exception as e:
                 self.logger.debug(f"Error checking task {task_file}: {e}")
 
+        # Log thermal wait clear transitions (either temps recovered, task moved,
+        # or task completed).
+        for task_id in sorted(prev_thermal_wait - current_thermal_wait):
+            self.log_decision(
+                "TASK_WAITING_THERMAL_CLEARED",
+                f"Task {task_id[:8]} no longer in thermal-wait state",
+                {"task_id": task_id[:8]}
+            )
+        self.thermal_wait_logged = current_thermal_wait
+        self.last_thermal_wait_count = len(current_thermal_wait)
+
         if stuck_tasks:
-            summary = [{'task_id': t['task_id'], 'worker': t['assigned_to'], 'elapsed_min': t['elapsed_min']}
-                      for t in stuck_tasks]
-            self.logger.warning(f"Stuck tasks detected (>20 min): {summary}")
+            summary = [
+                {
+                    'task_id': t['task_id'],
+                    'worker': t['assigned_to'],
+                    'progress_age_sec': t['progress_age_sec'],
+                    'threshold_sec': t['threshold_sec'],
+                }
+                for t in stuck_tasks
+            ]
+            self.logger.warning(f"No-progress stuck tasks detected: {summary}")
 
         return stuck_tasks
 
@@ -1934,8 +2026,11 @@ JSON only:"""
         with open(signal_file, 'w') as f:
             json.dump(signal_data, f, indent=2)
 
-        self.log_decision("ABORT_SIGNAL",
-            f"Sent graceful abort to {worker_name} for task {task_id[:8]} (reason: {reason})")
+        self.log_decision(
+            "TASK_ABORT_SIGNAL",
+            f"Sent graceful abort to {worker_name} for task {task_id[:8]} (reason: {reason})",
+            {"worker": worker_name, "task_id": task_id[:8], "reason": reason}
+        )
 
     def _force_kill_worker_task(self, worker_name: str, task_id: str):
         """Force kill worker's subprocess if graceful abort failed."""
@@ -1949,46 +2044,135 @@ JSON only:"""
         with open(signal_file, 'w') as f:
             json.dump(signal_data, f, indent=2)
 
-        self.log_decision("FORCE_KILL",
-            f"Sent force kill to {worker_name} for task {task_id[:8]} (graceful abort failed)")
+        self.log_decision(
+            "TASK_FORCE_KILL_SIGNAL",
+            f"Sent force kill to {worker_name} for task {task_id[:8]} (graceful abort failed)",
+            {"worker": worker_name, "task_id": task_id[:8]}
+        )
 
     def _handle_stuck_tasks(self, stuck_tasks: List[Dict]):
-        """Handle stuck tasks with graceful abort, escalating to force kill if needed."""
+        """Handle stuck tasks with abort -> force-kill -> requeue recovery."""
         for stuck_info in stuck_tasks:
             task = stuck_info['task']
             task_id = task['task_id']
             worker_name = stuck_info['assigned_to']
             elapsed_min = stuck_info['elapsed_min']
+            task_file = stuck_info['task_file']
 
-            # Check if we already sent an abort signal
             abort_signal = self.signals_path / f"{worker_name}.abort"
             kill_signal = self.signals_path / f"{worker_name}.kill"
 
-            if kill_signal.exists():
-                # Already sent kill signal, task is truly stuck
-                # Last resort: could kill worker process entirely, but for now just log
-                self.logger.error(
-                    f"Task {task_id[:8]} still stuck after force kill signal ({elapsed_min} min). "
-                    f"Worker {worker_name} may need manual intervention."
-                )
-
-            elif abort_signal.exists():
-                # Abort signal sent, but task still stuck - check how long ago
+            abort_data = None
+            if abort_signal.exists():
                 try:
                     with open(abort_signal) as f:
                         abort_data = json.load(f)
-                    abort_time = datetime.fromisoformat(abort_data['timestamp'])
-                    abort_age = (datetime.now() - abort_time).total_seconds()
-
-                    if abort_age > 120:  # 2 minutes since abort signal
-                        # Graceful abort failed, escalate to force kill
-                        self._force_kill_worker_task(worker_name, task_id)
+                except Exception:
+                    abort_data = None
+            if abort_data and abort_data.get("task_id") != task_id:
+                try:
+                    abort_signal.unlink()
                 except Exception:
                     pass
+                abort_data = None
 
-            else:
-                # First detection - send graceful abort signal
-                self._send_abort_signal(worker_name, task_id, f"task_timeout_{elapsed_min}min")
+            kill_data = None
+            if kill_signal.exists():
+                try:
+                    with open(kill_signal) as f:
+                        kill_data = json.load(f)
+                except Exception:
+                    kill_data = None
+            if kill_data and kill_data.get("task_id") != task_id:
+                try:
+                    kill_signal.unlink()
+                except Exception:
+                    pass
+                kill_data = None
+
+            if kill_data:
+                # Force kill already sent. If it still hasn't moved, requeue from processing.
+                kill_time = datetime.fromisoformat(kill_data.get("timestamp"))
+                kill_age = (datetime.now() - kill_time).total_seconds()
+                if kill_age < self.force_kill_requeue_seconds:
+                    continue
+
+                if not task_file.exists():
+                    try:
+                        kill_signal.unlink()
+                    except Exception:
+                        pass
+                    continue
+
+                try:
+                    with open(task_file) as f:
+                        current = json.load(f)
+                except Exception:
+                    continue
+
+                if current.get("task_id") != task_id:
+                    continue
+
+                current["status"] = "pending"
+                current.pop("assigned_to", None)
+                current.pop("started_at", None)
+                current["requeued_at"] = datetime.now().isoformat()
+                current["requeue_reason"] = "force_kill_timeout"
+                current["stuck_requeue_count"] = int(current.get("stuck_requeue_count", 0)) + 1
+
+                queue_file = self.queue_path / task_file.name
+                with open(queue_file, 'w') as f:
+                    json.dump(current, f, indent=2)
+                task_file.unlink()
+
+                hb_file = self.processing_path / f"{task_id}.heartbeat.json"
+                if hb_file.exists():
+                    try:
+                        hb_file.unlink()
+                    except Exception:
+                        pass
+
+                try:
+                    kill_signal.unlink()
+                except Exception:
+                    pass
+                if abort_signal.exists():
+                    try:
+                        abort_signal.unlink()
+                    except Exception:
+                        pass
+
+                self.log_decision(
+                    "TASK_REQUEUED_TIMEOUT",
+                    f"Requeued stuck task {task_id[:8]} after kill timeout",
+                    {
+                        "task_id": task_id[:8],
+                        "worker": worker_name,
+                        "elapsed_min": elapsed_min,
+                        "progress_age_sec": stuck_info.get("progress_age_sec", 0),
+                        "threshold_sec": stuck_info.get("threshold_sec", 0),
+                        "requeue_reason": "force_kill_timeout",
+                    }
+                )
+                continue
+
+            if abort_data:
+                # Abort sent but task still processing; escalate to force kill after grace period.
+                abort_time = datetime.fromisoformat(abort_data.get('timestamp'))
+                abort_age = (datetime.now() - abort_time).total_seconds()
+                if abort_age > 120:
+                    self._force_kill_worker_task(worker_name, task_id)
+                continue
+
+            # First detection - send graceful abort signal.
+            self._send_abort_signal(
+                worker_name,
+                task_id,
+                (
+                    f"no_progress_{stuck_info.get('progress_age_sec', 0)}s"
+                    f"_threshold_{stuck_info.get('threshold_sec', 0)}s"
+                )
+            )
 
     def _recover_orphaned_processing_tasks(self, running_gpus: Dict[str, Dict]):
         """
@@ -1998,7 +2182,7 @@ JSON only:"""
         These should be escalated/requeued quickly instead of waiting for the
         20-minute stuck-task timeout.
         """
-        orphan_threshold_seconds = 90
+        orphan_threshold_seconds = self.heartbeat_stale_seconds
         recovered = 0
 
         for task_file in self.processing_path.glob("*.json"):
@@ -2062,7 +2246,7 @@ JSON only:"""
 
         if self.brain_only:
             # Still check for stuck tasks even without GPU agents
-            stuck_tasks = self._detect_stuck_tasks()
+            stuck_tasks = self._detect_stuck_tasks(running_gpus={})
             if stuck_tasks:
                 self._handle_stuck_tasks(stuck_tasks)
             return
@@ -2080,8 +2264,9 @@ JSON only:"""
                 queue_stats["orphan_recovered"] = orphan_recovered
 
             # P0: Check for stuck tasks (processing > 20 minutes)
-            stuck_tasks = self._detect_stuck_tasks()
+            stuck_tasks = self._detect_stuck_tasks(running_gpus)
             queue_stats['stuck_tasks'] = len(stuck_tasks)
+            queue_stats['thermal_wait_tasks'] = self.last_thermal_wait_count
             queue_stats['processing_count'] = len(list(self.processing_path.glob("*.json")))
 
             # Handle stuck tasks (send abort signals, escalate to force kill if needed)
