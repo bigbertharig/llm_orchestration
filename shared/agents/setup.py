@@ -75,7 +75,7 @@ def print_suggestion(assignment):
     print("=" * 50)
     print("  Suggested Configuration")
     print("=" * 50)
-    print(f"\n  Mode: {assignment['mode']}")
+    print(f"\n  Mode: {assignment['_discovery_mode']}")
 
     brain = assignment["brain"]
     if brain["gpus"]:
@@ -84,11 +84,11 @@ def print_suggestion(assignment):
     else:
         print(f"  Brain: CPU -> {brain['model'] or '(no model available)'}")
 
-    workers = assignment["workers"]
+    workers = assignment["gpus"]
     if workers:
         for w in workers:
             print(
-                f"  Worker: GPU {w['index']} ({w['name']}, {w['vram_mb']} MB) "
+                f"  Worker: GPU {w['id']} ({w['name']}, {w['vram_mb']} MB) "
                 f"-> {w['model'] or '(no model fits)'} "
                 f"(port {w['port']})"
             )
@@ -96,6 +96,7 @@ def print_suggestion(assignment):
         print("  Workers: (none)")
 
     print(f"  Worker mode: {assignment['worker_mode']}")
+    print(f"  Initial hot workers: {assignment.get('initial_hot_workers', 0)}")
 
 
 def prompt_confirm(assignment, ollama):
@@ -122,9 +123,10 @@ def prompt_edit(assignment, ollama):
         print("  What would you like to change?")
         print("    1. Brain model")
         print("    2. Brain GPU(s)")
-        if assignment["workers"]:
+        if assignment["gpus"]:
             print("    3. Worker model (applies to all)")
             print("    4. Worker mode (hot/cold)")
+            print("    5. Initial hot workers on startup")
         print("    d. Done editing")
         print()
 
@@ -145,20 +147,30 @@ def prompt_edit(assignment, ollama):
             except ValueError:
                 print("  Invalid GPU indices")
 
-        elif choice == "3" and assignment["workers"]:
+        elif choice == "3" and assignment["gpus"]:
             if model_names:
                 print(f"  Available: {', '.join(model_names)}")
             model = input("  Worker model: ").strip()
             if model:
-                for w in assignment["workers"]:
+                for w in assignment["gpus"]:
                     w["model"] = model
 
-        elif choice == "4" and assignment["workers"]:
+        elif choice == "4" and assignment["gpus"]:
             mode = input("  Worker mode (hot/cold): ").strip().lower()
             if mode in ("hot", "cold"):
                 assignment["worker_mode"] = mode
             else:
                 print("  Invalid mode (use 'hot' or 'cold')")
+
+        elif choice == "5" and assignment["gpus"]:
+            raw = input("  Initial hot workers (0..N): ").strip()
+            try:
+                value = max(0, int(raw))
+                assignment["initial_hot_workers"] = min(
+                    value, len(assignment["gpus"])
+                )
+            except ValueError:
+                print("  Invalid number")
 
         elif choice == "d":
             break
@@ -168,20 +180,20 @@ def prompt_edit(assignment, ollama):
 
 def prompt_worker_mode(assignment):
     """Ask user for hot/cold worker startup preference."""
-    if not assignment["workers"]:
+    if not assignment["gpus"]:
         return assignment
 
     print()
     print("  Worker startup mode:")
-    print("    1. Hot  - preload LLM into worker GPUs on startup")
-    print("    2. Cold - leave GPUs empty on startup (for script/compute)")
+    print("    1. Hot  - workers should prefer LLM-ready behavior")
+    print("    2. Cold - leave workers empty by default (recommended)")
     print()
     choice = input("  > ").strip()
 
-    if choice == "2":
-        assignment["worker_mode"] = "cold"
-    else:
+    if choice == "1":
         assignment["worker_mode"] = "hot"
+    else:
+        assignment["worker_mode"] = "cold"
 
     return assignment
 
@@ -191,11 +203,11 @@ def build_config(assignment, ollama, system):
     config = {
         "_generated_by": "setup.py",
         "_generated_at": datetime.now().isoformat(),
-        "_discovery_mode": assignment["mode"],
+        "_discovery_mode": assignment["_discovery_mode"],
         "_hardware": {
             "hostname": system["hostname"],
             "gpu_count": len(assignment["brain"]["gpus"])
-            + len(assignment["workers"]),
+            + len(assignment["gpus"]),
         },
         "shared_path": "../",
         "permissions_path": "permissions/",
@@ -207,6 +219,7 @@ def build_config(assignment, ollama, system):
         },
         "gpus": [],
         "worker_mode": assignment["worker_mode"],
+        "initial_hot_workers": assignment.get("initial_hot_workers", 0),
         "timeouts": {
             "poll_interval_seconds": 5,
             "brain_think_seconds": 120,
@@ -214,17 +227,21 @@ def build_config(assignment, ollama, system):
         },
         "resource_limits": {
             "max_temp_c": 80,
+            "gpu_temp_warning_c": 75,
+            "gpu_temp_critical_c": 90,
+            "cpu_temp_warning_c": 80,
+            "cpu_temp_critical_c": 95,
             "max_vram_percent": 95,
             "max_power_w": 140,
         },
         "retry_policy": {"max_attempts": 3},
     }
 
-    for w in assignment["workers"]:
+    for w in assignment["gpus"]:
         config["gpus"].append(
             {
                 "name": w["name"],
-                "id": w["index"],
+                "id": w["id"],
                 "vram_mb": w["vram_mb"],
                 "model": w["model"],
                 "port": w["port"],
@@ -257,6 +274,12 @@ def main():
         help="Worker startup mode",
     )
     parser.add_argument(
+        "--initial-hot-workers",
+        type=int,
+        default=None,
+        help="Number of workers to warm via startup load_llm tasks (default: 0)",
+    )
+    parser.add_argument(
         "--yes",
         "-y",
         action="store_true",
@@ -270,7 +293,7 @@ def main():
     system = scan_system()
 
     # Build preferences from CLI args
-    preferences = {}
+    preferences = {"worker_mode": "cold"}
     if args.worker_mode:
         preferences["worker_mode"] = args.worker_mode
 
@@ -281,10 +304,14 @@ def main():
     if args.brain_model:
         assignment["brain"]["model"] = args.brain_model
     if args.worker_model:
-        for w in assignment["workers"]:
+        for w in assignment["gpus"]:
             w["model"] = args.worker_model
     if args.worker_mode:
         assignment["worker_mode"] = args.worker_mode
+    if args.initial_hot_workers is not None:
+        assignment["initial_hot_workers"] = max(0, args.initial_hot_workers)
+    else:
+        assignment["initial_hot_workers"] = assignment.get("initial_hot_workers", 0)
 
     # Display scan results and suggestion
     print_hardware_scan(gpus, ollama, system)
@@ -295,8 +322,21 @@ def main():
         assignment = prompt_confirm(assignment, ollama)
 
         # Ask about worker mode if not already set via CLI
-        if not args.worker_mode and assignment["workers"]:
+        if not args.worker_mode and assignment["gpus"]:
             assignment = prompt_worker_mode(assignment)
+        if args.initial_hot_workers is None and assignment["gpus"]:
+            default_hot = assignment.get("initial_hot_workers", 0)
+            raw = input(
+                f"  Initial hot workers on startup (0..{len(assignment['gpus'])}) [{default_hot}]: "
+            ).strip()
+            if raw:
+                try:
+                    assignment["initial_hot_workers"] = max(0, int(raw))
+                except ValueError:
+                    print("  Invalid number, keeping default")
+
+    if assignment.get("initial_hot_workers", 0) > len(assignment.get("gpus", [])):
+        assignment["initial_hot_workers"] = len(assignment.get("gpus", []))
 
     # Build and write config
     config = build_config(assignment, ollama, system)

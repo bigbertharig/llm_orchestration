@@ -14,8 +14,8 @@
 
   "brain": {
     "name": "brain",
-    "model": "qwen2.5:14b",
-    "gpus": [0, 3]
+    "model": "qwen2.5:32b",
+    "gpus": [0]
   },
 
   "gpus": [
@@ -45,7 +45,8 @@
     }
   ],
 
-  "worker_mode": "hot",
+  "worker_mode": "cold",
+  "initial_hot_workers": 1,
 
   "timeouts": {
     "poll_interval_seconds": 5,
@@ -55,6 +56,10 @@
 
   "resource_limits": {
     "max_temp_c": 80,
+    "gpu_temp_warning_c": 75,
+    "gpu_temp_critical_c": 90,
+    "cpu_temp_warning_c": 80,
+    "cpu_temp_critical_c": 95,
     "max_vram_percent": 95,
     "max_power_w": 140
   },

@@ -126,18 +126,79 @@ def scan_ollama(host="http://localhost:11434"):
     return result
 
 
+def scan_cpu_temps():
+    # type: () -> List[Dict[str, Any]]
+    """Scan CPU temperatures from available sources.
+
+    Tries in order:
+        1. /sys/class/thermal/thermal_zone* (Linux generic)
+        2. vcgencmd measure_temp (Raspberry Pi)
+
+    Returns list of dicts: [{source, label, temp_c}]
+    """
+    temps = []
+
+    # Try thermal zones (works on most Linux, including GPU rigs)
+    try:
+        import glob as glob_mod
+        zones = sorted(glob_mod.glob("/sys/class/thermal/thermal_zone*/temp"))
+        for zone_path in zones:
+            zone_dir = os.path.dirname(zone_path)
+            # Read the zone type for a meaningful label
+            label = "unknown"
+            type_path = os.path.join(zone_dir, "type")
+            try:
+                with open(type_path) as f:
+                    label = f.read().strip()
+            except (FileNotFoundError, PermissionError):
+                pass
+            try:
+                with open(zone_path) as f:
+                    temp_mc = int(f.read().strip())
+                    temps.append({
+                        "source": "thermal_zone",
+                        "label": label,
+                        "temp_c": temp_mc // 1000,
+                    })
+            except (FileNotFoundError, ValueError, PermissionError):
+                continue
+    except Exception:
+        pass
+
+    # Try vcgencmd (Raspberry Pi)
+    if not temps:
+        try:
+            result = subprocess.run(
+                ["vcgencmd", "measure_temp"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                # Output: temp=48.8'C
+                temp_str = result.stdout.strip().split("=")[1].rstrip("'C")
+                temps.append({
+                    "source": "vcgencmd",
+                    "label": "cpu",
+                    "temp_c": int(float(temp_str)),
+                })
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, IndexError):
+            pass
+
+    return temps
+
+
 def scan_system():
     # type: () -> Dict[str, Any]
     """Scan basic system resources.
 
     Returns:
-        {hostname, cpu_cores, ram_total_mb, ram_available_mb}
+        {hostname, cpu_cores, ram_total_mb, ram_available_mb, cpu_temps}
     """
     info = {
         "hostname": platform.node(),
         "cpu_cores": os.cpu_count() or 1,
         "ram_total_mb": 0,
         "ram_available_mb": 0,
+        "cpu_temps": [],
     }
 
     # Parse /proc/meminfo (Linux only)
@@ -150,6 +211,8 @@ def scan_system():
                     info["ram_available_mb"] = int(line.split()[1]) // 1024
     except (FileNotFoundError, ValueError):
         pass
+
+    info["cpu_temps"] = scan_cpu_temps()
 
     return info
 
@@ -311,6 +374,12 @@ def format_scan_report(gpus, ollama, system):
     # System
     lines.append("Host: %s (%d cores, %d MB RAM)" % (
         system['hostname'], system['cpu_cores'], system['ram_total_mb']))
+
+    # CPU temps
+    cpu_temps = system.get('cpu_temps', [])
+    if cpu_temps:
+        temp_strs = ["%s: %dC" % (t['label'], t['temp_c']) for t in cpu_temps]
+        lines.append("CPU temps: %s" % ", ".join(temp_strs))
 
     # GPUs
     if gpus:

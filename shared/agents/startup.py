@@ -16,11 +16,14 @@ import argparse
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 from hardware import scan_gpus, scan_ollama
@@ -103,6 +106,135 @@ def wait_for_ready_flag(name: str, max_wait: int) -> bool:
 
     print(f"  WARNING: {name} did not signal ready within {max_wait}s")
     return False
+
+
+def _is_port_open(port: int, host: str = "127.0.0.1") -> bool:
+    """Return True if a TCP port is currently accepting connections."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, port)) == 0
+
+
+def _reclaim_worker_port(port: int, gpu_name: str):
+    """Fail-fast reclaim for worker ports.
+
+    Startup assumes worker ports must be owned by this orchestrator. If a port is
+    occupied, attempt to terminate the listener and re-check. If reclaim fails,
+    abort startup with a clear error.
+    """
+    if not _is_port_open(port):
+        return
+
+    print(
+        f"  WARNING: worker port {port} ({gpu_name}) is in use. "
+        f"Attempting reclaim..."
+    )
+
+    # Try lsof first (exact PID targeting), then fuser as fallback.
+    killed_any = False
+    try:
+        result = subprocess.run(
+            ["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        pids = [p.strip() for p in result.stdout.splitlines() if p.strip()]
+        for pid_str in pids:
+            try:
+                os.kill(int(pid_str), signal.SIGTERM)
+                killed_any = True
+            except (ProcessLookupError, PermissionError, ValueError):
+                pass
+    except FileNotFoundError:
+        pass
+
+    if not killed_any:
+        subprocess.run(
+            ["fuser", "-k", f"{port}/tcp"],
+            capture_output=True,
+            check=False,
+        )
+
+    # Wait briefly for socket close
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if not _is_port_open(port):
+            print(f"  Reclaimed port {port} for {gpu_name}")
+            return
+        time.sleep(0.2)
+
+    print(
+        f"ERROR: Failed to reclaim worker port {port} ({gpu_name}). "
+        f"Stop the conflicting process and retry."
+    )
+    remove_launch_lock()
+    sys.exit(1)
+
+
+def _count_existing_meta_tasks(shared_path: Path, command: str) -> int:
+    """Count existing meta tasks with a given command in queue/processing."""
+    count = 0
+    for folder in ("queue", "processing"):
+        path = shared_path / "tasks" / folder
+        if not path.exists():
+            continue
+        for task_file in path.glob("*.json"):
+            if str(task_file).endswith(".lock"):
+                continue
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+                if (
+                    task.get("task_class") == "meta"
+                    and task.get("command") == command
+                ):
+                    count += 1
+            except Exception:
+                continue
+    return count
+
+
+def _enqueue_startup_load_llm(shared_path: Path, created_by: str, count: int):
+    """Insert N startup load_llm meta tasks into the public queue."""
+    if count <= 0:
+        return
+
+    queue_path = shared_path / "tasks" / "queue"
+    queue_path.mkdir(parents=True, exist_ok=True)
+
+    existing = _count_existing_meta_tasks(shared_path, "load_llm")
+    to_add = max(0, count - existing)
+    if to_add == 0:
+        print(
+            f"Startup warm target already satisfied ({existing} load_llm pending)."
+        )
+        return
+
+    for idx in range(to_add):
+        task = {
+            "task_id": str(uuid.uuid4()),
+            "type": "meta",
+            "command": "load_llm",
+            "batch_id": "system",
+            "name": f"load_llm_startup_{idx + 1}",
+            "priority": 10,
+            "task_class": "meta",
+            "depends_on": [],
+            "executor": "worker",
+            "status": "pending",
+            "created_at": datetime.now().isoformat(),
+            "created_by": created_by,
+            "retry_count": 0,
+        }
+        task_file = queue_path / f"{task['task_id']}.json"
+        with open(task_file, "w") as f:
+            json.dump(task, f, indent=2)
+
+    print(
+        f"Queued {to_add} startup load_llm task(s) "
+        f"(target={count}, existing={existing})."
+    )
 
 
 # =============================================================================
@@ -256,6 +388,13 @@ def main():
         metavar="N",
         help="Number of GPU agents to start (default: all)",
     )
+    parser.add_argument(
+        "--initial-hot-workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Override config initial_hot_workers for this startup run",
+    )
     args = parser.parse_args()
 
     # Load config
@@ -319,12 +458,10 @@ def main():
     else:
         skip_ollama_restart = False
 
-    if not skip_ollama_restart:
-        print("\nStopping any existing Ollama instances...")
-        subprocess.run(["pkill", "-f", "ollama serve"], capture_output=True)
-        time.sleep(2)
-    else:
+    if skip_ollama_restart:
         print("\nReusing existing Ollama instance with pre-loaded models")
+    else:
+        print("\nNo pre-loaded brain model detected; continuing with live Ollama")
 
     # --- Start Brain ---
     print(f"\nStarting brain on GPUs {config['brain']['gpus']}...")
@@ -365,7 +502,11 @@ def main():
 
         for gpu_config in gpus_to_start:
             gpu_name = gpu_config["name"]
+            gpu_port = gpu_config.get("port")
             print(f"\n  Starting {gpu_name} (GPU {gpu_config['id']})...")
+
+            if gpu_port:
+                _reclaim_worker_port(gpu_port, gpu_name)
 
             gpu_cmd = [
                 sys.executable,
@@ -385,6 +526,21 @@ def main():
                     f"WARNING: {gpu_name} may not be ready, "
                     f"continuing anyway..."
                 )
+
+    # Optional startup warm-up: queue load_llm meta tasks.
+    # Workers still start cold; these tasks selectively heat up N workers.
+    if args.initial_hot_workers is not None:
+        initial_hot_workers = max(0, int(args.initial_hot_workers))
+    else:
+        initial_hot_workers = int(config.get("initial_hot_workers", 0))
+    if initial_hot_workers > 0 and gpus_to_start:
+        warm_target = min(initial_hot_workers, len(gpus_to_start))
+        print(f"\nQueueing startup warm-up: {warm_target} worker(s)")
+        _enqueue_startup_load_llm(
+            shared_path=Path(config["shared_path"]),
+            created_by="startup",
+            count=warm_target,
+        )
 
     # --- Running ---
     total_workers = len(config.get("gpus", []))

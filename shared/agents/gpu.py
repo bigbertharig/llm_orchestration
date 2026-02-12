@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from multiprocessing import Process, Queue
 from filelock import FileLock, Timeout
+from hardware import scan_cpu_temps
 
 logging.basicConfig(
     level=logging.INFO,
@@ -483,14 +484,32 @@ class GPUAgent:
             pass
         return 0
 
+    def _get_cpu_temp(self) -> Optional[int]:
+        """Get the highest CPU temperature reading. Returns temp in C or None."""
+        try:
+            temps = scan_cpu_temps()
+            if temps:
+                return max(t["temp_c"] for t in temps)
+        except Exception:
+            pass
+        return None
+
     def _is_resource_constrained(self, gpu_stats: Dict) -> tuple:
         """Check if GPU resources are constrained. Returns (bool, reasons)."""
         constrained = False
         reasons = []
 
-        if gpu_stats["temperature_c"] >= self.resource_limits["max_temp_c"]:
+        gpu_temp = gpu_stats["temperature_c"]
+        gpu_warn = self.resource_limits.get("gpu_temp_warning_c", self.resource_limits["max_temp_c"])
+        if gpu_temp >= gpu_warn:
             constrained = True
-            reasons.append(f"temp {gpu_stats['temperature_c']}C >= {self.resource_limits['max_temp_c']}C")
+            reasons.append(f"GPU temp {gpu_temp}C >= {gpu_warn}C")
+
+        cpu_temp = self._get_cpu_temp()
+        cpu_warn = self.resource_limits.get("cpu_temp_warning_c", 80)
+        if cpu_temp is not None and cpu_temp >= cpu_warn:
+            constrained = True
+            reasons.append(f"CPU temp {cpu_temp}C >= {cpu_warn}C")
 
         if gpu_stats["vram_percent"] >= self.resource_limits["max_vram_percent"]:
             constrained = True
@@ -501,6 +520,29 @@ class GPUAgent:
             reasons.append(f"power {gpu_stats['power_draw_w']}W >= {self.resource_limits['max_power_w']}W")
 
         return constrained, reasons
+
+    def _check_thermal_safety(self, gpu_stats: Dict) -> bool:
+        """Check for critical temperatures. Returns True if safe, False if shutdown needed."""
+        gpu_temp = gpu_stats["temperature_c"]
+        gpu_crit = self.resource_limits.get("gpu_temp_critical_c", 90)
+        cpu_temp = self._get_cpu_temp()
+        cpu_crit = self.resource_limits.get("cpu_temp_critical_c", 95)
+
+        critical_reasons = []
+        if gpu_temp >= gpu_crit:
+            critical_reasons.append(f"GPU {gpu_temp}C >= {gpu_crit}C CRITICAL")
+        if cpu_temp is not None and cpu_temp >= cpu_crit:
+            critical_reasons.append(f"CPU {cpu_temp}C >= {cpu_crit}C CRITICAL")
+
+        if not critical_reasons:
+            return True
+
+        self.logger.error(
+            f"THERMAL SAFETY SHUTDOWN: {', '.join(critical_reasons)} - "
+            f"killing all workers and stopping agent"
+        )
+        self.running = False
+        return False
 
     # =========================================================================
     # VRAM Budget
@@ -827,6 +869,8 @@ class GPUAgent:
                 "started_at": datetime.fromtimestamp(info["started_at"]).isoformat(),
             })
 
+        cpu_temp = self._get_cpu_temp()
+
         heartbeat = {
             "gpu_id": self.gpu_id,
             "name": self.name,
@@ -836,6 +880,7 @@ class GPUAgent:
             "ollama": ollama_health,
             "last_updated": datetime.now().isoformat(),
             "temperature_c": gpu_stats["temperature_c"],
+            "cpu_temp_c": cpu_temp,
             "power_draw_w": gpu_stats["power_draw_w"],
             "vram_used_mb": gpu_stats["vram_used_mb"],
             "vram_total_mb": gpu_stats["vram_total_mb"],
@@ -1024,6 +1069,11 @@ class GPUAgent:
 
                 self._check_abort_signal()
                 self._check_kill_signal()
+
+                # Thermal safety check every internal tick
+                gpu_stats_check = self._get_gpu_stats()
+                if not self._check_thermal_safety(gpu_stats_check):
+                    break
 
                 # Collect any finished workers
                 self._collect_finished_workers()
