@@ -1,0 +1,17 @@
+[Unit]
+Description=LLM Orchestration CPU Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bryan
+WorkingDirectory=/home/bryan/llm_orchestration
+ExecStart=/usr/bin/python3 /home/bryan/llm_orchestration/scripts/cpu_agent.py --name cpu-%H
+Restart=always
+RestartSec=2
+StandardOutput=append:/media/bryan/shared/logs/cpu_agent.log
+StandardError=append:/media/bryan/shared/logs/cpu_agent.log
+
+[Install]
+WantedBy=multi-user.target

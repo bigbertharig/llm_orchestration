@@ -37,12 +37,27 @@ def load_config(config_path: str) -> dict:
         return json.load(f)
 
 
+def resolve_shared_path(config_path: str, config: dict) -> Path:
+    shared = Path(config.get("shared_path", "../"))
+    if shared.is_absolute():
+        return shared
+    return (Path(config_path).resolve().parent / shared).resolve()
+
+
+def iter_task_files(folder_path: Path):
+    for task_file in folder_path.glob("*.json"):
+        if task_file.name.endswith(".heartbeat.json"):
+            continue
+        yield task_file
+
+
 def get_tasks(shared_path: Path) -> dict:
     tasks = {"queue": [], "processing": [], "complete": [], "failed": []}
 
     for status, folder in tasks.items():
         folder_path = shared_path / "tasks" / status
-        for task_file in sorted(folder_path.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        files = sorted(iter_task_files(folder_path), key=lambda p: p.stat().st_mtime, reverse=True)
+        for task_file in files:
             try:
                 with open(task_file) as f:
                     task = json.load(f)
@@ -51,6 +66,97 @@ def get_tasks(shared_path: Path) -> dict:
                 pass  # Skip malformed task file
 
     return tasks
+
+
+def get_workers(config: dict):
+    if "workers" in config and isinstance(config["workers"], list):
+        return config["workers"]
+    workers = []
+    for gpu in config.get("gpus", []):
+        workers.append({
+            "name": gpu.get("name", f"gpu-{gpu.get('id', '?')}"),
+            "gpu": gpu.get("id", "?"),
+            "model": gpu.get("model", "?"),
+            "port": gpu.get("port", "?"),
+        })
+    return workers
+
+
+def _heartbeat_age_seconds(last_updated: str):
+    if not last_updated:
+        return None
+    try:
+        return int((datetime.now() - datetime.fromisoformat(last_updated)).total_seconds())
+    except Exception:
+        return None
+
+
+def get_worker_heartbeats(shared_path: Path):
+    rows = []
+
+    gpus_dir = shared_path / "gpus"
+    if gpus_dir.exists():
+        for hb_file in sorted(gpus_dir.glob("gpu_*/heartbeat.json")):
+            try:
+                hb = json.loads(hb_file.read_text())
+                rows.append({
+                    "name": hb.get("name", hb_file.parent.name),
+                    "worker_type": "gpu",
+                    "state": hb.get("state", "?"),
+                    "host": hb.get("hostname", "-"),
+                    "last_updated": hb.get("last_updated", ""),
+                    "age_s": _heartbeat_age_seconds(hb.get("last_updated", "")),
+                    "temp_c": hb.get("temperature_c"),
+                    "cpu_temp_c": hb.get("cpu_temp_c"),
+                    "active_workers": hb.get("active_workers", 0),
+                })
+            except Exception:
+                continue
+
+    cpus_dir = shared_path / "cpus"
+    if cpus_dir.exists():
+        for hb_file in sorted(cpus_dir.glob("*/heartbeat.json")):
+            try:
+                hb = json.loads(hb_file.read_text())
+                rows.append({
+                    "name": hb.get("name", hb_file.parent.name),
+                    "worker_type": "cpu",
+                    "state": hb.get("state", "?"),
+                    "host": hb.get("hostname", "-"),
+                    "last_updated": hb.get("last_updated", ""),
+                    "age_s": _heartbeat_age_seconds(hb.get("last_updated", "")),
+                    "temp_c": None,
+                    "cpu_temp_c": None,
+                    "active_workers": 1 if hb.get("active_task_id") else 0,
+                })
+            except Exception:
+                continue
+
+    return rows
+
+
+def get_active_batches(shared_path: Path):
+    state_path = shared_path / "brain" / "state.json"
+    if not state_path.exists():
+        return {}
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+        active = state.get("active_batches", {})
+        if isinstance(active, dict):
+            return active
+    except Exception:
+        pass
+    return {}
+
+
+def batch_counts(tasks: dict, batch_id: str):
+    return {
+        "queue": sum(1 for t in tasks["queue"] if t.get("batch_id") == batch_id),
+        "processing": sum(1 for t in tasks["processing"] if t.get("batch_id") == batch_id),
+        "complete": sum(1 for t in tasks["complete"] if t.get("batch_id") == batch_id),
+        "failed": sum(1 for t in tasks["failed"] if t.get("batch_id") == batch_id),
+    }
 
 
 def format_time(iso_str: str) -> str:
@@ -86,10 +192,64 @@ def print_header(config: dict):
     brain = config["brain"]
     print(f"{BOLD}Brain:{RESET} {brain['model']} on GPUs {brain['gpus']}")
 
-    workers = config["workers"]
+    workers = get_workers(config)
     worker_str = ", ".join(f"{w['name']}(GPU {w['gpu']})" for w in workers)
     print(f"{BOLD}Workers:{RESET} {worker_str}")
     print()
+
+
+def print_progress_summary(tasks: dict, shared_path: Path):
+    print(f"{BOLD}Global Tasks:{RESET} "
+          f"queued={len(tasks['queue'])} processing={len(tasks['processing'])} "
+          f"complete={len(tasks['complete'])} failed={len(tasks['failed'])}")
+
+    active_batches = get_active_batches(shared_path)
+    if not active_batches:
+        print(f"{BOLD}Active Batch:{RESET} (none)")
+        print()
+        return
+
+    print(f"{BOLD}Active Batch Progress:{RESET}")
+    for batch_id, meta in sorted(active_batches.items()):
+        counts = batch_counts(tasks, batch_id)
+        observed_total = sum(counts.values())
+        total_hint = meta.get("total_tasks")
+        if isinstance(total_hint, int) and total_hint > 0:
+            total_tasks = max(total_hint, observed_total)
+        else:
+            total_tasks = observed_total
+        print(
+            f"  {batch_id}: {counts['complete']}/{total_tasks} complete "
+            f"(queued={counts['queue']} processing={counts['processing']} failed={counts['failed']})"
+        )
+    print()
+
+
+def print_worker_health(shared_path: Path):
+    rows = get_worker_heartbeats(shared_path)
+    print(f"{BOLD}Worker Heartbeats:{RESET}")
+    if not rows:
+        print(f"{DIM}  (none){RESET}\n")
+        return
+
+    stale = 0
+    for row in rows:
+        age = row.get("age_s")
+        if isinstance(age, int) and age > 120:
+            stale += 1
+        age_s = f"{age}s" if isinstance(age, int) else "?"
+        state = row.get("state", "?")
+        typ = row.get("worker_type", "?")
+        host = row.get("host", "-")
+        temp = row.get("temp_c")
+        cpu_temp = row.get("cpu_temp_c")
+        temp_str = f"gpu={temp}C cpu={cpu_temp}C" if temp is not None else "-"
+        print(
+            f"  {row.get('name','?'):14} type={typ:3} state={state:7} "
+            f"hb_age={age_s:>6} host={host:14} {temp_str}"
+        )
+
+    print(f"  summary: total={len(rows)} stale>120s={stale}\n")
 
 
 def print_queue_section(title: str, tasks: list, color: str, show_assigned: bool = True, show_result: bool = False):
@@ -131,6 +291,9 @@ def print_queue_section(title: str, tasks: list, color: str, show_assigned: bool
 def print_dashboard(config: dict, tasks: dict):
     clear_screen()
     print_header(config)
+    shared_path = Path(config.get("__resolved_shared_path", "."))
+    print_progress_summary(tasks, shared_path)
+    print_worker_health(shared_path)
 
     # Processing (active work)
     print_queue_section("PROCESSING", tasks["processing"], YELLOW, show_assigned=True)
@@ -255,7 +418,8 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    shared_path = Path(config["shared_path"])
+    shared_path = resolve_shared_path(args.config, config)
+    config["__resolved_shared_path"] = str(shared_path)
 
     if args.brain:
         try:
