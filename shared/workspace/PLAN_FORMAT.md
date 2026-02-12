@@ -307,6 +307,10 @@ Every operational plan should define how to run in both modes:
 1. `fresh`: create new batch state and process from scratch
 2. `resume`: continue from existing batch state without resetting progress
 
+System behavior note:
+- `RUN_MODE=fresh` now triggers plan-scoped cleanup of stale queued/processing/private tasks from older active batches of the same plan before launching the new batch.
+- Cleanup does not touch unrelated plans, so multiple different plans can run in parallel.
+
 Recommended submission inputs:
 
 - `RUN_MODE`: `fresh` or `resume`

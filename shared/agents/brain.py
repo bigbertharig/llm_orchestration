@@ -359,6 +359,67 @@ class Brain:
 
         return payload
 
+    def _cleanup_stale_plan_batches(self, plan_dir: Path) -> Dict[str, int]:
+        """
+        For RUN_MODE=fresh, clean stale orchestration artifacts for this plan only.
+
+        Multiple plans may run in parallel. This cleanup is intentionally scoped to
+        older active batches with the same plan_dir, so unrelated plans are untouched.
+        """
+        plan_dir_resolved = str(plan_dir.resolve())
+        stale_batch_ids = [
+            bid for bid, meta in self.active_batches.items()
+            if str(meta.get("plan_dir", "")) == plan_dir_resolved
+        ]
+
+        if not stale_batch_ids:
+            return {"stale_batches": 0, "private_removed": 0, "queue_removed": 0, "processing_removed": 0, "orph_lock_removed": 0}
+
+        removed_private = 0
+        removed_queue = 0
+        removed_processing = 0
+
+        def _remove_batch_tasks(path: Path) -> int:
+            removed = 0
+            for task_file in path.glob("*.json"):
+                try:
+                    with open(task_file) as f:
+                        task = json.load(f)
+                    if task.get("batch_id") in stale_batch_ids:
+                        task_file.unlink(missing_ok=True)
+                        removed += 1
+                except Exception:
+                    continue
+            return removed
+
+        removed_private = _remove_batch_tasks(self.private_tasks_path)
+        removed_queue = _remove_batch_tasks(self.queue_path)
+        removed_processing = _remove_batch_tasks(self.processing_path)
+
+        # Remove orphan lock files in queue/processing (safe cleanup).
+        orphan_lock_removed = 0
+        for path in [self.queue_path, self.processing_path]:
+            for lock_file in path.glob("*.lock"):
+                try:
+                    json_file = Path(str(lock_file)[:-5])  # strip '.lock'
+                    if not json_file.exists():
+                        lock_file.unlink(missing_ok=True)
+                        orphan_lock_removed += 1
+                except Exception:
+                    continue
+
+        for bid in stale_batch_ids:
+            self.active_batches.pop(bid, None)
+
+        self._save_brain_state()
+        return {
+            "stale_batches": len(stale_batch_ids),
+            "private_removed": removed_private,
+            "queue_removed": removed_queue,
+            "processing_removed": removed_processing,
+            "orph_lock_removed": orphan_lock_removed,
+        }
+
     def _incident_key(self, task: Dict[str, Any]) -> str:
         """Stable key for retries/fixes around the same failing work item."""
         return f"{task.get('batch_id','')}/{task.get('name','')}/{task.get('type','')}"
@@ -1123,6 +1184,14 @@ class Brain:
                     return existing_batch_id
         else:
             # Fresh mode defaults plan variables to the new execution batch.
+            cleanup_stats = self._cleanup_stale_plan_batches(plan_dir)
+            if cleanup_stats.get("stale_batches", 0) > 0:
+                self.log_decision(
+                    "PLAN_CLEANUP",
+                    f"Fresh run cleanup for {plan_dir.name}",
+                    cleanup_stats
+                )
+
             config["BATCH_ID"] = str(config.get("BATCH_ID", batch_id)).strip() or batch_id
             if "/" in config["BATCH_ID"] or ".." in config["BATCH_ID"]:
                 raise ValueError("BATCH_ID contains invalid path characters")
