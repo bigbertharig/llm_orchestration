@@ -123,6 +123,11 @@ class Brain:
         self.load_llm_requests: Dict[str, Dict] = {}
         # Track dependency auto-fix attempts (missing Python modules, etc.)
         self.dependency_fix_attempts: Dict[str, Dict[str, Any]] = {}
+        # Incident state machine for worker->brain->cloud escalation
+        self.incidents: Dict[str, Dict[str, Any]] = {}
+        self.max_brain_fix_attempts = int(
+            self.config.get("retry_policy", {}).get("max_brain_fix_attempts", 3)
+        )
 
         # Verify core/ security before starting
         self._verify_core_security()
@@ -187,12 +192,14 @@ class Brain:
                     for task_id, req in saved_requests.items():
                         req['created_at'] = datetime.fromisoformat(req['created_at'])
                         self.load_llm_requests[task_id] = req
+                    self.incidents = state.get("incidents", {})
                     self.logger.info(
                         f"Loaded state: {len(self.active_batches)} active batches, "
                         f"{len(self.load_llm_requests)} pending load_llm requests")
             except Exception as e:
                 self.logger.warning(f"Failed to load state: {e}")
                 self.active_batches = {}
+                self.incidents = {}
 
     def _save_brain_state(self):
         """Persist brain state to disk."""
@@ -208,7 +215,8 @@ class Brain:
             "started_at": datetime.now().isoformat(),
             "status": "active",
             "active_batches": self.active_batches,
-            "load_llm_requests": serializable_requests
+            "load_llm_requests": serializable_requests,
+            "incidents": self.incidents
         }
         with open(self.state_file, 'w') as f:
             json.dump(state, f, indent=2)
@@ -350,6 +358,35 @@ class Brain:
             payload["config"] = task.get("config", {})
 
         return payload
+
+    def _incident_key(self, task: Dict[str, Any]) -> str:
+        """Stable key for retries/fixes around the same failing work item."""
+        return f"{task.get('batch_id','')}/{task.get('name','')}/{task.get('type','')}"
+
+    def _get_or_create_incident(self, task: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+        """Fetch or initialize incident state for a failing task."""
+        key = self._incident_key(task)
+        incident = self.incidents.get(key)
+        if incident:
+            return incident
+
+        incident = {
+            "incident_id": f"inc_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}",
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "task_name": task.get("name"),
+            "task_type": task.get("type"),
+            "task_class": task.get("task_class"),
+            "batch_id": task.get("batch_id"),
+            "worker_cycles": 0,
+            "brain_fix_attempts": 0,
+            "cloud_escalated": False,
+            "cloud_escalation_id": None,
+            "last_result": result,
+            "history": []
+        }
+        self.incidents[key] = incident
+        return incident
 
     def log_training_sample(self, sample_type: str, prompt: str, response: str,
                             outcome: str, context: str = "", metadata: dict = None):
@@ -521,15 +558,20 @@ class Brain:
     def check_and_release_tasks(self):
         """Check private tasks and release any whose dependencies are met."""
         for batch_id in list(self.active_batches.keys()):
-            completed = self.get_completed_task_ids(batch_id)
+            satisfied = self.get_satisfied_task_ids(batch_id)
             private_tasks = self.get_private_tasks(batch_id)
 
             all_released = True
             for task in private_tasks:
                 depends_on = task.get("depends_on", [])
+                # Foreach templates may include per-item dependency placeholders.
+                # Ignore those at template-gating time; they are applied on expansion.
+                template_depends = depends_on
+                if task.get("foreach"):
+                    template_depends = [d for d in depends_on if "{ITEM" not in d]
 
-                # Check if all dependencies are complete
-                deps_met = all(dep in completed for dep in depends_on)
+                # Check if all template dependencies are satisfied
+                deps_met = all(dep in satisfied for dep in template_depends)
 
                 if deps_met:
                     task_file = self.private_tasks_path / f"{task['task_id']}.json"
@@ -554,7 +596,7 @@ class Brain:
                             self.save_to_public(task)
                 else:
                     all_released = False
-                    pending_deps = [d for d in depends_on if d not in completed]
+                    pending_deps = [d for d in template_depends if d not in satisfied]
                     self.logger.debug(f"Task {task.get('name')} waiting on: {pending_deps}")
 
             # Check if batch is complete (no private tasks, no public/processing tasks)
@@ -614,6 +656,7 @@ class Brain:
 
         # Create one task per item
         expanded_names = []
+        template_depends = template_task.get("depends_on", [])
         for i, item in enumerate(items):
             # Build item-specific command
             command = template_task.get("command", "")
@@ -629,24 +672,39 @@ class Brain:
             item_id = item.get("id", str(i)) if isinstance(item, dict) else str(i)
             task_name = f"{template_task.get('name')}_{item_id}"
 
+            # Build per-item dependencies from template depends_on.
+            item_depends = []
+            for dep in template_depends:
+                dep_name = dep
+                if isinstance(item, dict):
+                    for key, value in item.items():
+                        dep_name = dep_name.replace(f"{{ITEM.{key}}}", str(value))
+                else:
+                    dep_name = dep_name.replace("{ITEM}", str(item))
+                if dep_name and dep_name.lower() != "none":
+                    item_depends.append(dep_name)
+
             task = self.create_task(
                 task_type="shell",
                 command=command,
                 batch_id=batch_id,
                 task_name=task_name,
                 priority=template_task.get("priority", 5),
-                depends_on=[],  # Dependencies already met (template was ready)
+                depends_on=item_depends,
                 executor=template_task.get("executor", "worker"),
                 task_class=template_task.get("task_class")
             )
 
-            # Release directly to public queue (dependencies already met)
-            self.save_to_public(task)
+            # Release if ready, otherwise keep private until dependencies are met.
+            if item_depends:
+                self.save_to_private(task)
+            else:
+                self.save_to_public(task)
             expanded_names.append(task_name)
 
             self.log_decision("TASK_CREATED",
                 f"Created expanded task: {task_name}",
-                {"task_id": task["task_id"][:8], "item_id": item_id})
+                {"task_id": task["task_id"][:8], "item_id": item_id, "depends_on": item_depends})
 
         return expanded_names
 
@@ -705,6 +763,36 @@ class Brain:
                           {"batch_id": batch_id, "plan": self.active_batches.get(batch_id, {}).get("plan")})
         del self.active_batches[batch_id]
         self._save_brain_state()
+
+    def get_satisfied_task_ids(self, batch_id: str) -> set:
+        """
+        Get task names considered dependency-satisfied:
+        - successful completed tasks
+        - terminal failed tasks (max retries exhausted / cloud-blocked)
+        """
+        satisfied = self.get_completed_task_ids(batch_id)
+        max_attempts = self.config.get("retry_policy", {}).get("max_attempts", 3)
+
+        for task_file in self.failed_path.glob("*.json"):
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+                if task.get("batch_id") != batch_id:
+                    continue
+
+                is_terminal = (
+                    task.get("status") == "blocked_cloud"
+                    or bool(task.get("cloud_escalated", False))
+                    or int(task.get("attempts", 0)) >= int(max_attempts)
+                )
+                if is_terminal:
+                    name = task.get("name", "")
+                    if name:
+                        satisfied.add(name)
+            except Exception:
+                continue
+
+        return satisfied
 
     # =========================================================================
     # Task Creation
@@ -1266,6 +1354,16 @@ JSON only:"""
 
                 elif self._try_fix_missing_module(task, result):
                     # Brain fixed a missing dependency. Requeue with clean retry state.
+                    incident = self._get_or_create_incident(task, result)
+                    incident["brain_fix_attempts"] = int(incident.get("brain_fix_attempts", 0)) + 1
+                    incident["updated_at"] = datetime.now().isoformat()
+                    incident["last_result"] = result
+                    incident["history"].append({
+                        "at": datetime.now().isoformat(),
+                        "event": "brain_fix_applied",
+                        "fix_applied": task.get("fix_applied", "")
+                    })
+
                     task["status"] = "pending"
                     task["attempts"] = 0
                     task["workers_attempted"] = []
@@ -1279,9 +1377,11 @@ JSON only:"""
                         {
                             "task_id": task["task_id"][:8],
                             "fix_applied": task.get("fix_applied", ""),
-                            "name": task.get("name", "")
+                            "name": task.get("name", ""),
+                            "incident_id": incident.get("incident_id")
                         }
                     )
+                    self._save_brain_state()
 
                 elif attempts < max_attempts:
                     # Worker failure - retry
@@ -1295,31 +1395,88 @@ JSON only:"""
                         f"Retrying task (attempt {attempts}/{max_attempts}) - previous workers: {workers_str}",
                         {"task_id": task["task_id"][:8], "name": task.get("name", ""), "workers_attempted": workers})
                 else:
+                    incident = self._get_or_create_incident(task, result)
+                    incident["worker_cycles"] = int(incident.get("worker_cycles", 0)) + 1
+                    incident["updated_at"] = datetime.now().isoformat()
+                    incident["last_result"] = result
+                    incident["history"].append({
+                        "at": datetime.now().isoformat(),
+                        "event": "worker_cycle_exhausted",
+                        "attempts": attempts,
+                        "workers_attempted": workers
+                    })
+
                     workers_str = ", ".join(workers) if workers else "unknown"
                     self.log_decision("ABANDON",
                         f"Task abandoned after {attempts} attempts by workers [{workers_str}]",
                         {"task_id": task["task_id"][:8], "name": task.get("name", ""),
-                         "workers_attempted": workers, "attempts": attempts})
+                         "workers_attempted": workers, "attempts": attempts,
+                         "incident_id": incident.get("incident_id")})
 
-                    # Escalate abandoned tasks for higher-tier verification and potential resubmission.
-                    self.emit_cloud_escalation(
-                        escalation_type="verification_failure",
-                        title="Task abandoned after max retries",
-                        details={
-                            "reason": "max_retries_exhausted",
-                            "max_attempts": max_attempts,
-                            "attempts": attempts,
-                            "task_name": task.get("name"),
-                            "task_type": task.get("type"),
-                            "task_class": task.get("task_class"),
-                            "batch_id": task.get("batch_id"),
-                            "workers_attempted": workers,
-                            "last_result": result,
-                            "verification_required": True,
-                            "proposed_resubmit_task": self._build_resubmit_payload_for_abandoned_task(task)
-                        },
-                        source_task=task
-                    )
+                    # Brain gets up to N fix revisions before cloud escalation.
+                    if int(incident.get("brain_fix_attempts", 0)) < self.max_brain_fix_attempts:
+                        fixed = self._try_fix_missing_module(task, result)
+                        incident["brain_fix_attempts"] = int(incident.get("brain_fix_attempts", 0)) + 1
+                        incident["updated_at"] = datetime.now().isoformat()
+                        incident["history"].append({
+                            "at": datetime.now().isoformat(),
+                            "event": "brain_fix_attempt",
+                            "attempt_index": incident["brain_fix_attempts"],
+                            "fix_succeeded": bool(fixed),
+                            "fix_applied": task.get("fix_applied", "") if fixed else ""
+                        })
+
+                        if fixed:
+                            task["status"] = "pending"
+                            task["attempts"] = 0
+                            task["workers_attempted"] = []
+                            task_file.unlink()
+                            self.save_to_public(task)
+                            self.log_decision(
+                                "TASK_FIXED",
+                                f"Brain fix attempt {incident['brain_fix_attempts']}/{self.max_brain_fix_attempts} succeeded; re-queued",
+                                {"task_id": task["task_id"][:8], "incident_id": incident.get("incident_id")}
+                            )
+                            self._save_brain_state()
+                            continue
+
+                    # Cloud escalation gate: escalate once after brain budget exhausted.
+                    if not incident.get("cloud_escalated", False):
+                        escalation_id = self.emit_cloud_escalation(
+                            escalation_type="verification_failure",
+                            title="Task exhausted worker+brain retries; needs cloud verification",
+                            details={
+                                "reason": "max_retries_exhausted",
+                                "policy": {
+                                    "worker_max_attempts_per_revision": max_attempts,
+                                    "brain_max_fix_revisions": self.max_brain_fix_attempts
+                                },
+                                "incident_id": incident.get("incident_id"),
+                                "worker_cycles": incident.get("worker_cycles"),
+                                "brain_fix_attempts": incident.get("brain_fix_attempts"),
+                                "task_name": task.get("name"),
+                                "task_type": task.get("type"),
+                                "task_class": task.get("task_class"),
+                                "batch_id": task.get("batch_id"),
+                                "workers_attempted": workers,
+                                "last_result": result,
+                                "verification_required": True,
+                                "proposed_resubmit_task": self._build_resubmit_payload_for_abandoned_task(task)
+                            },
+                            source_task=task
+                        )
+                        incident["cloud_escalated"] = True
+                        incident["cloud_escalation_id"] = escalation_id
+                        incident["updated_at"] = datetime.now().isoformat()
+
+                    # Freeze this task for cloud review; do not loop local retries.
+                    task["status"] = "blocked_cloud"
+                    task["cloud_escalated"] = True
+                    task["incident_id"] = incident.get("incident_id")
+                    task["blocked_reason"] = "awaiting_cloud_review"
+                    with open(task_file, 'w') as f:
+                        json.dump(task, f, indent=2)
+                    self._save_brain_state()
 
             except Exception as e:
                 self.logger.error(f"Error handling failed task: {e}")
@@ -1339,11 +1496,6 @@ JSON only:"""
 
         module = match.group(1).strip()
         if not module:
-            return False
-
-        # If we already tried and failed for this module in this brain process, skip.
-        prior = self.dependency_fix_attempts.get(module)
-        if prior and not prior.get("success", False):
             return False
 
         # Try generic package name variants (no module-specific hardcoding).
@@ -1912,6 +2064,29 @@ JSON only:"""
                     f"LLM tasks waiting ({queue_stats['llm']}) but no GPUs hot - inserting load_llm task",
                     {"llm_tasks": queue_stats["llm"], "cold_gpus": healthy_cold_gpus})
                 self._insert_resource_task("load_llm")
+
+            # Mixed workload: keep at least one hot GPU for llm while balancing script pressure.
+            elif queue_stats["llm"] > 0 and queue_stats["script"] > 0:
+                llm_tasks = queue_stats["llm"]
+                script_tasks = queue_stats["script"]
+                hot = len(gpus_with_model)
+                cold = len(healthy_cold_gpus)
+                script_to_llm = script_tasks / max(llm_tasks, 1)
+                llm_to_script = llm_tasks / max(script_tasks, 1)
+
+                # If llm backlog is dominant and we have healthy cold GPUs, add hot capacity.
+                if llm_to_script >= 1.5 and cold > 0:
+                    self.log_decision("RESOURCE_DECISION",
+                        f"Mixed queue favors LLM ({llm_tasks} llm vs {script_tasks} script) - inserting load_llm task",
+                        {"llm_tasks": llm_tasks, "script_tasks": script_tasks, "hot_gpus": gpus_with_model, "cold_gpus": healthy_cold_gpus})
+                    self._insert_resource_task("load_llm")
+
+                # If script backlog is dominant and >1 GPUs are hot, free one GPU.
+                elif script_to_llm >= 3.0 and hot > 1:
+                    self.log_decision("RESOURCE_DECISION",
+                        f"Mixed queue favors script ({script_tasks} script vs {llm_tasks} llm) - inserting unload_llm task",
+                        {"script_tasks": script_tasks, "llm_tasks": llm_tasks, "hot_gpus": gpus_with_model})
+                    self._insert_resource_task("unload_llm")
 
             # Need to unload LLM? Only script tasks but GPUs are hot
             elif queue_stats["llm"] == 0 and queue_stats["script"] > 0 and len(gpus_with_model) > 0:

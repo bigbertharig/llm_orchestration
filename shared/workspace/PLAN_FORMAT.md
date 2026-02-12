@@ -221,6 +221,10 @@ Use `foreach` to expand a single task definition into N tasks - one per item in 
 
 **Item substitution:** Use `{ITEM.field}` to insert values from each item. For simple arrays (not objects), use `{ITEM}`.
 
+**Per-item dependencies:** `depends_on` can also use `{ITEM.field}` to chain matching items across foreach stages.
+Example:
+`add_topics` task can use `depends_on: init, transcribe_whisper_{ITEM.id}` so each topic task is released as soon as its own transcript finishes.
+
 **Dependency behavior:** Tasks depending on a foreach task automatically wait for ALL expanded tasks. If `process` expands to 100 tasks, `aggregate` with `depends_on: process` waits for all 100.
 
 **Typical pattern:**
