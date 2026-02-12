@@ -1,0 +1,11 @@
+#!/bin/bash
+# Chat with the brain model (qwen2.5-coder:32b on RTX 3090 Ti)
+# Usage: chat-brain         (in current terminal)
+#        chat-brain --new    (opens new terminal window)
+
+if [[ "$1" == "--new" ]]; then
+    lxterminal --title="Brain (qwen2.5-coder:32b)" -e "ssh -t gpu 'ollama run qwen2.5-coder:32b'" &
+    disown
+else
+    ssh -t gpu "ollama run qwen2.5-coder:32b"
+fi

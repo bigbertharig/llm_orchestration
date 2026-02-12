@@ -1,0 +1,33 @@
+#!/bin/bash
+# Quick launcher for LLM chat sessions
+# Usage: chat brain          (brain in current terminal)
+#        chat brain --new    (brain in new window)
+#        chat worker         (worker in current terminal)
+#        chat worker --new   (worker in new window)
+#        chat                (shows available models)
+
+case "${1:-}" in
+    brain|b)
+        shift
+        exec chat-brain "$@"
+        ;;
+    worker|w)
+        shift
+        exec chat-worker "$@"
+        ;;
+    *)
+        echo "Usage: chat <model> [--new]"
+        echo ""
+        echo "Models:"
+        echo "  brain  (b)   qwen2.5-coder:32b on RTX 3090 Ti"
+        echo "  worker (w)   qwen2.5-coder:7b on GTX 1060"
+        echo ""
+        echo "Options:"
+        echo "  --new        Open in a new terminal window"
+        echo ""
+        echo "Examples:"
+        echo "  chat brain           # chat here"
+        echo "  chat b --new         # new window"
+        echo "  chat worker          # chat here"
+        ;;
+esac

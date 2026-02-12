@@ -1,0 +1,19 @@
+#!/bin/bash
+# Chat with a worker model (qwen2.5-coder:7b on GTX 1060)
+# Usage: chat-worker        (in current terminal)
+#        chat-worker --new   (opens new terminal window)
+
+# Default to worker on port 11435 (GPU1), can override with --port
+PORT=11435
+for arg in "$@"; do
+    case $arg in
+        --port=*) PORT="${arg#*=}" ;;
+    esac
+done
+
+if [[ "$1" == "--new" || "$2" == "--new" ]]; then
+    lxterminal --title="Worker (qwen2.5-coder:7b)" -e "ssh -t gpu 'OLLAMA_HOST=http://localhost:$PORT ollama run qwen2.5-coder:7b'" &
+    disown
+else
+    ssh -t gpu "OLLAMA_HOST=http://localhost:$PORT ollama run qwen2.5-coder:7b"
+fi
