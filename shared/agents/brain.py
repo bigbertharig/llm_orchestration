@@ -18,8 +18,10 @@ import argparse
 import json
 import os
 import re
+import socket
 import sys
 import time
+import traceback
 import uuid
 import logging
 import requests
@@ -80,11 +82,13 @@ class Brain:
         # Brain state and private task list
         self.brain_path = self.shared_path / "brain"
         self.private_tasks_path = self.brain_path / "private_tasks"
+        self.escalations_path = self.brain_path / "escalations"
         self.state_file = self.brain_path / "state.json"
 
         # Ensure directories exist
         for path in [self.queue_path, self.processing_path, self.complete_path,
-                     self.failed_path, self.brain_path, self.private_tasks_path]:
+                     self.failed_path, self.brain_path, self.private_tasks_path,
+                     self.escalations_path]:
             path.mkdir(parents=True, exist_ok=True)
 
         self.model = self.brain_config["model"]
@@ -117,6 +121,8 @@ class Brain:
 
         # P1: Track load_llm requests to detect when workers don't pick them up
         self.load_llm_requests: Dict[str, Dict] = {}
+        # Track dependency auto-fix attempts (missing Python modules, etc.)
+        self.dependency_fix_attempts: Dict[str, Dict[str, Any]] = {}
 
         # Verify core/ security before starting
         self._verify_core_security()
@@ -224,6 +230,126 @@ class Brain:
             f.write(json.dumps(entry) + "\n")
 
         self.logger.info(f"[{decision_type}] {message}")
+
+    def emit_cloud_escalation(self, escalation_type: str, title: str, details: dict,
+                              source_task: Dict[str, Any] = None) -> str:
+        """
+        Write a cloud escalation request for external brain/gateway pickup.
+        Returns escalation_id.
+        """
+        now = datetime.now()
+        escalation_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}"
+
+        payload = {
+            "escalation_id": escalation_id,
+            "created_at": now.isoformat(),
+            "status": "pending",
+            "target": "cloud_brain",
+            "source": "local_brain",
+            "brain_name": self.name,
+            "hostname": socket.gethostname(),
+            "type": escalation_type,
+            "title": title,
+            "details": details or {},
+            "recommended_action": "diagnose_and_resubmit_plan"
+        }
+
+        if source_task:
+            payload["source_task"] = {
+                "task_id": source_task.get("task_id"),
+                "type": source_task.get("type"),
+                "name": source_task.get("name"),
+                "batch_id": source_task.get("batch_id"),
+                "plan_path": source_task.get("plan_path"),
+                "config": source_task.get("config", {})
+            }
+
+        out_file = self.escalations_path / f"{escalation_id}.json"
+        with open(out_file, 'w') as f:
+            json.dump(payload, f, indent=2)
+
+        self.log_decision(
+            "ESCALATION",
+            f"Escalated to cloud brain: {title}",
+            {"escalation_id": escalation_id, "type": escalation_type, "file": str(out_file)}
+        )
+        return escalation_id
+
+    def _build_execute_plan_escalation_context(self, plan_path: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Build context package to guide cloud-brain investigation."""
+        plan_name = Path(str(plan_path)).name if plan_path else ""
+        candidate_plan_dirs = []
+
+        if plan_path:
+            candidate_plan_dirs.append(str(Path(plan_path)))
+        if plan_name:
+            candidate_plan_dirs.append(str(self.shared_path / "plans" / plan_name))
+
+        # De-duplicate while preserving order
+        unique_plan_dirs = []
+        seen = set()
+        for p in candidate_plan_dirs:
+            if p not in seen:
+                seen.add(p)
+                unique_plan_dirs.append(p)
+
+        existing_plan_md = []
+        for p in unique_plan_dirs:
+            plan_md = Path(p) / "plan.md"
+            if plan_md.exists():
+                existing_plan_md.append(str(plan_md))
+
+        resume_batch_id = str(config.get("RESUME_BATCH_ID", "")).strip() if isinstance(config, dict) else ""
+        resume_manifest_candidates = []
+        if resume_batch_id:
+            for p in unique_plan_dirs:
+                resume_manifest_candidates.append(
+                    str(Path(p) / "history" / resume_batch_id / "manifest.json")
+                )
+
+        return {
+            "dig_order": [
+                "1) Verify a candidate plan path contains plan.md",
+                "2) If RUN_MODE=resume, verify resume manifest exists",
+                "3) Check brain_decisions.log and task result payload",
+                "4) Resubmit execute_plan with corrected path/config"
+            ],
+            "requested_plan_path": plan_path,
+            "candidate_plan_dirs": unique_plan_dirs,
+            "existing_plan_md": existing_plan_md,
+            "resume_batch_id": resume_batch_id or None,
+            "resume_manifest_candidates": resume_manifest_candidates,
+            "key_files": {
+                "brain_decisions_log": str(self.decision_log),
+                "brain_state": str(self.state_file),
+                "task_complete_dir": str(self.complete_path),
+                "task_failed_dir": str(self.failed_path),
+                "queue_dir": str(self.queue_path)
+            }
+        }
+
+    def _build_resubmit_payload_for_abandoned_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a safe task skeleton cloud brain can resubmit after verification."""
+        payload = {
+            "type": task.get("type"),
+            "executor": task.get("executor", "worker"),
+            "batch_id": task.get("batch_id"),
+            "name": task.get("name"),
+            "task_class": task.get("task_class"),
+            "command": task.get("command"),
+            "depends_on": task.get("depends_on", []),
+            "priority": task.get("priority", 5),
+            "retry_count": 0,
+            "attempts": 0,
+            "workers_attempted": []
+        }
+
+        # Include plan execution fields when relevant.
+        if task.get("type") == "execute_plan":
+            payload["plan_path"] = task.get("plan_path")
+            payload["config"] = task.get("config", {})
+
+        return payload
 
     def log_training_sample(self, sample_type: str, prompt: str, response: str,
                             outcome: str, context: str = "", metadata: dict = None):
@@ -703,13 +829,9 @@ class Brain:
         with open(plan_file) as f:
             plan_content = f.read()
 
-        # Generate timestamp-based batch ID for chronological ordering
+        # Generate timestamp-based execution batch ID for orchestration tracking
         batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         batch_dir = plan_dir / "history" / batch_id
-        batch_dir.mkdir(parents=True, exist_ok=True)
-        (batch_dir / "results").mkdir(exist_ok=True)
-        (batch_dir / "output").mkdir(exist_ok=True)
-        (batch_dir / "logs").mkdir(exist_ok=True)
 
         self.log_decision("PLAN_READ", f"Read plan from {plan_dir.name}", {
             "batch_id": batch_id,
@@ -717,11 +839,53 @@ class Brain:
         })
 
         # Build variable substitution map
-        config = config_overrides or {}
+        config = dict(config_overrides or {})
+
+        # Enforce explicit run mode contract for plans that use RUN_MODE.
+        run_mode = str(config.get("RUN_MODE", "fresh")).strip().lower()
+        if run_mode not in ["fresh", "resume"]:
+            raise ValueError("RUN_MODE must be 'fresh' or 'resume'")
+        config["RUN_MODE"] = run_mode
+
+        if run_mode == "resume":
+            resume_batch_id = str(config.get("RESUME_BATCH_ID", "")).strip()
+            if not resume_batch_id:
+                raise ValueError("RUN_MODE=resume requires RESUME_BATCH_ID")
+            if "/" in resume_batch_id or ".." in resume_batch_id:
+                raise ValueError("RESUME_BATCH_ID contains invalid path characters")
+
+            resume_manifest = plan_dir / "history" / resume_batch_id / "manifest.json"
+            if not resume_manifest.exists():
+                raise FileNotFoundError(
+                    f"Resume batch manifest not found: {resume_manifest}"
+                )
+
+            # Use the existing data batch for plan variables while keeping a
+            # new orchestration batch_id for dependency tracking.
+            config["BATCH_ID"] = resume_batch_id
+            self.log_decision("PLAN_MODE",
+                              f"Resume mode for {plan_dir.name}: {resume_batch_id}",
+                              {"run_mode": "resume", "resume_batch_id": resume_batch_id})
+        else:
+            # Fresh mode defaults plan variables to the new execution batch.
+            config["BATCH_ID"] = str(config.get("BATCH_ID", batch_id)).strip() or batch_id
+            if "/" in config["BATCH_ID"] or ".." in config["BATCH_ID"]:
+                raise ValueError("BATCH_ID contains invalid path characters")
+            self.log_decision("PLAN_MODE",
+                              f"Fresh mode for {plan_dir.name}: {config['BATCH_ID']}",
+                              {"run_mode": "fresh", "batch_id": config["BATCH_ID"]})
+
+        effective_batch_id = config["BATCH_ID"]
+        effective_batch_dir = plan_dir / "history" / effective_batch_id
+        effective_batch_dir.mkdir(parents=True, exist_ok=True)
+        (effective_batch_dir / "results").mkdir(exist_ok=True)
+        (effective_batch_dir / "output").mkdir(exist_ok=True)
+        (effective_batch_dir / "logs").mkdir(exist_ok=True)
+
         variables = {
-            "{BATCH_ID}": batch_id,
+            "{BATCH_ID}": effective_batch_id,
             "{PLAN_PATH}": str(plan_dir.resolve()),
-            "{BATCH_PATH}": str(batch_dir.resolve()),
+            "{BATCH_PATH}": str(effective_batch_dir.resolve()),
         }
         # Add any config overrides as variables
         for key, value in config.items():
@@ -862,8 +1026,27 @@ class Brain:
             task["status"] = "complete"
             task["result"] = {"success": True, "batch_id": batch_id, "handler": "brain"}
         except Exception as e:
+            context = self._build_execute_plan_escalation_context(plan_path, config_overrides)
+            escalation_id = self.emit_cloud_escalation(
+                escalation_type="execute_plan_failure",
+                title="Local brain failed to start plan execution",
+                details={
+                    "error": str(e),
+                    "plan_path": plan_path,
+                    "config_keys": sorted(list(config_overrides.keys())) if isinstance(config_overrides, dict) else [],
+                    "traceback_tail": traceback.format_exc().strip().splitlines()[-8:],
+                    "context": context
+                },
+                source_task=task
+            )
             task["status"] = "failed"
-            task["result"] = {"success": False, "error": str(e), "handler": "brain"}
+            task["result"] = {
+                "success": False,
+                "error": str(e),
+                "handler": "brain",
+                "escalated": True,
+                "escalation_id": escalation_id
+            }
 
         task["completed_at"] = datetime.now().isoformat()
         dest_file = self.complete_path / f"{task['task_id']}.json"
@@ -1081,6 +1264,25 @@ JSON only:"""
                             {"task_id": task["task_id"][:8]})
                         # Leave in failed/ for manual intervention
 
+                elif self._try_fix_missing_module(task, result):
+                    # Brain fixed a missing dependency. Requeue with clean retry state.
+                    task["status"] = "pending"
+                    task["attempts"] = 0
+                    task["workers_attempted"] = []
+
+                    task_file.unlink()
+                    self.save_to_public(task)
+
+                    self.log_decision(
+                        "TASK_FIXED",
+                        f"Installed missing dependency for '{task.get('name', '')}', re-queued",
+                        {
+                            "task_id": task["task_id"][:8],
+                            "fix_applied": task.get("fix_applied", ""),
+                            "name": task.get("name", "")
+                        }
+                    )
+
                 elif attempts < max_attempts:
                     # Worker failure - retry
                     task["status"] = "pending"
@@ -1099,8 +1301,143 @@ JSON only:"""
                         {"task_id": task["task_id"][:8], "name": task.get("name", ""),
                          "workers_attempted": workers, "attempts": attempts})
 
+                    # Escalate abandoned tasks for higher-tier verification and potential resubmission.
+                    self.emit_cloud_escalation(
+                        escalation_type="verification_failure",
+                        title="Task abandoned after max retries",
+                        details={
+                            "reason": "max_retries_exhausted",
+                            "max_attempts": max_attempts,
+                            "attempts": attempts,
+                            "task_name": task.get("name"),
+                            "task_type": task.get("type"),
+                            "task_class": task.get("task_class"),
+                            "batch_id": task.get("batch_id"),
+                            "workers_attempted": workers,
+                            "last_result": result,
+                            "verification_required": True,
+                            "proposed_resubmit_task": self._build_resubmit_payload_for_abandoned_task(task)
+                        },
+                        source_task=task
+                    )
+
             except Exception as e:
                 self.logger.error(f"Error handling failed task: {e}")
+
+    def _try_fix_missing_module(self, task: Dict[str, Any], result: Dict[str, Any]) -> bool:
+        """
+        Attempt to auto-fix common Python module import failures from worker output.
+        Returns True if a fix was applied and verified.
+        """
+        if task.get("dependency_fix_applied", False):
+            return False  # Avoid endless fix/retry loops per task
+
+        output = f"{result.get('output', '')}\n{result.get('error', '')}"
+        match = re.search(r"No module named ['\"]([^'\"]+)['\"]", output)
+        if not match:
+            return False
+
+        module = match.group(1).strip()
+        if not module:
+            return False
+
+        # If we already tried and failed for this module in this brain process, skip.
+        prior = self.dependency_fix_attempts.get(module)
+        if prior and not prior.get("success", False):
+            return False
+
+        # Try generic package name variants (no module-specific hardcoding).
+        candidates = [module]
+        if "_" in module:
+            candidates.append(module.replace("_", "-"))
+        if "-" in module:
+            candidates.append(module.replace("-", "_"))
+
+        # Ask brain model for likely pip package names from context.
+        infer_prompt = (
+            "A Python task failed with missing module import.\n"
+            f"Missing module: {module}\n"
+            "Suggest up to 3 likely pip package names as a comma-separated list.\n"
+            "Return only package names, no explanation."
+        )
+        inferred = self.think(infer_prompt).strip()
+        if inferred:
+            inferred = inferred.replace("\n", ",")
+            for part in inferred.split(","):
+                name = part.strip().strip("`'\"")
+                if name and " " not in name and len(name) < 80:
+                    candidates.append(name)
+        # Preserve order, remove duplicates.
+        seen = set()
+        packages = []
+        for p in candidates:
+            if p not in seen:
+                seen.add(p)
+                packages.append(p)
+
+        install_errors = []
+        for pkg in packages:
+            install_cmd = (
+                "source ~/ml-env/bin/activate && "
+                "python -m pip install --disable-pip-version-check "
+                f"{pkg}"
+            )
+            self.log_decision(
+                "DEPENDENCY_FIX",
+                f"Attempting dependency install for missing module '{module}' via package '{pkg}'",
+                {"module": module, "package": pkg, "task": task.get("name", "")}
+            )
+            try:
+                res = subprocess.run(
+                    install_cmd,
+                    shell=True,
+                    executable="/bin/bash",
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                if res.returncode != 0:
+                    install_errors.append(f"{pkg}: {res.stderr.strip()[:220]}")
+                    continue
+
+                verify_cmd = (
+                    "source ~/ml-env/bin/activate && "
+                    f"python -c \"import importlib; importlib.import_module('{module}')\""
+                )
+                ver = subprocess.run(
+                    verify_cmd,
+                    shell=True,
+                    executable="/bin/bash",
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                if ver.returncode == 0:
+                    self.dependency_fix_attempts[module] = {
+                        "success": True,
+                        "package": pkg,
+                        "at": datetime.now().isoformat()
+                    }
+                    task["dependency_fix_applied"] = True
+                    task["fix_applied"] = f"installed_python_dependency:{pkg}"
+                    return True
+
+                install_errors.append(f"{pkg}: import verify failed: {ver.stderr.strip()[:220]}")
+            except Exception as e:
+                install_errors.append(f"{pkg}: {str(e)[:220]}")
+
+        self.dependency_fix_attempts[module] = {
+            "success": False,
+            "attempted_packages": packages,
+            "errors": install_errors[-5:],
+            "at": datetime.now().isoformat()
+        }
+        self.log_decision(
+            "DEPENDENCY_UNFIXABLE",
+            f"Could not auto-fix missing module '{module}' for task '{task.get('name', '')}'",
+            {"module": module, "attempted_packages": packages, "errors": install_errors[-3:]}
+        )
+        return False
 
     def _try_fix_definition_error(self, task: Dict[str, Any]) -> bool:
         """Attempt to fix a task with a definition error.

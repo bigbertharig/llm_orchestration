@@ -63,7 +63,7 @@ All docs live in `shared/workspace/` (on the shared drive, synced to git).
 |-----|---------|
 | `shared/core/SYSTEM.md` | Agent system prompt (root-owned, read-only) |
 | `shared/core/RULES.md` | Immutable rules that agents cannot override |
-| `shared/core/ESCALATION_POLICY.md` | Worker -> Brain -> Human escalation chain |
+| `shared/core/ESCALATION_POLICY.md` | Worker -> Brain -> Cloud -> Human escalation chain |
 
 ---
 
@@ -115,7 +115,7 @@ llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
     ├── core/                      # PROTECTED - root-owned, read-only
     │   ├── SYSTEM.md              # Agent system prompt (read on startup)
     │   ├── RULES.md               # Immutable rules (cannot be overridden)
-    │   └── ESCALATION_POLICY.md   # Worker -> Brain -> Human escalation
+    │   └── ESCALATION_POLICY.md   # Worker -> Brain -> Cloud -> Human escalation
     │
     ├── workspace/                 # Agent-writable working area
     │   ├── CONTEXT.md             # Project context (this file)
@@ -281,7 +281,7 @@ Why: Backwards compatibility creates technical debt, confusing code paths, and d
 - HUMAN escalation pattern: agents write HUMAN_{topic}.md and stop when stuck
 
 **Planned:**
-- RPi gateway for Claude escalation
+- Cloud gateway transport/automation enhancements (escalation artifacts are already active)
 
 ---
 

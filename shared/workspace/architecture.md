@@ -178,7 +178,7 @@ llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
     ├── core/                      # PROTECTED - root-owned, read-only (not in git)
     │   ├── SYSTEM.md              # Agent system prompt (read on startup)
     │   ├── RULES.md               # 13 immutable rules
-    │   └── ESCALATION_POLICY.md   # Worker -> Brain -> Human escalation
+    │   └── ESCALATION_POLICY.md   # Worker -> Brain -> Cloud -> Human escalation
     │
     ├── workspace/                 # Agent-writable working area (synced to git)
     │   ├── CONTEXT.md             # Project context (read this first)

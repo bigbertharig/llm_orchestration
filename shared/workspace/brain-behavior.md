@@ -406,20 +406,19 @@ def handle_failed_tasks():
             log_decision("ABANDON", f"Abandoned after {attempts} attempts by {workers}")
 ```
 
-### Escalation to Claude (Future)
+### Escalation to Cloud Brain (Active)
 
-Some failures are beyond the brain's ability to fix. These should escalate to Claude for replanning:
+Some failures are beyond the local brain's ability to fix. These should escalate to cloud brain for replanning:
 
-| Escalate When | Example | Future Action |
+| Escalate When | Example | Action |
 |---------------|---------|---------------|
-| Same task fails on 3 workers | Script bug, missing dependency | Claude rewrites script |
-| Plan parsing fails | Malformed plan structure | Claude rewrites plan |
-| Definition error unfixable | Can't infer required field | Claude fixes plan |
+| Same task fails on 3 workers | Script bug, missing dependency | Cloud brain rewrites script |
+| Plan parsing fails | Malformed plan structure | Cloud brain rewrites plan |
+| Definition error unfixable | Can't infer required field | Cloud brain fixes plan |
 | All workers unhealthy | System problem | Alert human |
 
-**Current behavior:** Plan-level failures are terminal. The batch fails and requires manual intervention.
-
-**Future behavior:** Brain writes escalation request to `shared/brain/escalations/`. RPi gateway picks it up and sends to Claude for replanning. Claude submits corrected plan.
+**Current behavior:** On `execute_plan` startup failure, local brain writes an escalation request to `shared/brain/escalations/` with directed context (`details.context`) to guide cloud triage.
+The failed task result includes `escalated: true` and `escalation_id`.
 
 ---
 
@@ -431,7 +430,7 @@ The brain persists its state:
 shared/brain/
   state.json          # Active batches, status
   private_tasks/      # Tasks not yet released
-  escalations/        # Pending escalations
+  escalations/        # Pending cloud escalation requests
 ```
 
 ### state.json
