@@ -650,61 +650,97 @@ class Brain:
             self.logger.error(f"foreach target is not a list: {json_path}")
             return []
 
-        self.log_decision("FOREACH_EXPAND",
-            f"Expanding '{template_task.get('name')}' into {len(items)} tasks",
-            {"template": template_task.get("name"), "count": len(items)})
+        batch_size = max(1, int(template_task.get("batch_size", 1)))
+        expanded_target = (len(items) + batch_size - 1) // batch_size
+        self.log_decision(
+            "FOREACH_EXPAND",
+            f"Expanding '{template_task.get('name')}' into {expanded_target} task(s) from {len(items)} item(s)",
+            {
+                "template": template_task.get("name"),
+                "item_count": len(items),
+                "batch_size": batch_size,
+                "expanded_count": expanded_target
+            }
+        )
 
-        # Create one task per item
+        # Create one task per item (batch_size=1) or micro-batch task (batch_size>1)
         expanded_names = []
         template_depends = template_task.get("depends_on", [])
-        for i, item in enumerate(items):
-            # Build item-specific command
-            command = template_task.get("command", "")
+        for start in range(0, len(items), batch_size):
+            group = items[start:start + batch_size]
+            group_commands = []
+            group_depends = []
+            group_item_ids = []
 
-            # Substitute {ITEM.field} patterns
-            if isinstance(item, dict):
-                for key, value in item.items():
-                    command = command.replace(f"{{ITEM.{key}}}", str(value))
-            else:
-                command = command.replace("{ITEM}", str(item))
+            for i, item in enumerate(group, start=start):
+                # Build item-specific command
+                command = template_task.get("command", "")
 
-            # Create the expanded task
-            item_id = item.get("id", str(i)) if isinstance(item, dict) else str(i)
-            task_name = f"{template_task.get('name')}_{item_id}"
-
-            # Build per-item dependencies from template depends_on.
-            item_depends = []
-            for dep in template_depends:
-                dep_name = dep
+                # Substitute {ITEM.field} patterns
                 if isinstance(item, dict):
                     for key, value in item.items():
-                        dep_name = dep_name.replace(f"{{ITEM.{key}}}", str(value))
+                        command = command.replace(f"{{ITEM.{key}}}", str(value))
                 else:
-                    dep_name = dep_name.replace("{ITEM}", str(item))
-                if dep_name and dep_name.lower() != "none":
-                    item_depends.append(dep_name)
+                    command = command.replace("{ITEM}", str(item))
+                group_commands.append(command)
+
+                item_id = item.get("id", str(i)) if isinstance(item, dict) else str(i)
+                group_item_ids.append(str(item_id))
+
+                # Build per-item dependencies from template depends_on.
+                item_depends = []
+                for dep in template_depends:
+                    dep_name = dep
+                    if isinstance(item, dict):
+                        for key, value in item.items():
+                            dep_name = dep_name.replace(f"{{ITEM.{key}}}", str(value))
+                    else:
+                        dep_name = dep_name.replace("{ITEM}", str(item))
+                    if dep_name and dep_name.lower() != "none":
+                        item_depends.append(dep_name)
+
+                for dep in item_depends:
+                    if dep not in group_depends:
+                        group_depends.append(dep)
+
+            if batch_size == 1:
+                task_name = f"{template_task.get('name')}_{group_item_ids[0]}"
+                task_command = group_commands[0]
+            else:
+                task_name = f"{template_task.get('name')}_batch_{start + 1:04d}_{start + len(group):04d}"
+                # Sequential micro-batch execution in one worker claim.
+                task_command = "set -e\n" + "\n".join(group_commands)
 
             task = self.create_task(
                 task_type="shell",
-                command=command,
+                command=task_command,
                 batch_id=batch_id,
                 task_name=task_name,
                 priority=template_task.get("priority", 5),
-                depends_on=item_depends,
+                depends_on=group_depends,
                 executor=template_task.get("executor", "worker"),
                 task_class=template_task.get("task_class")
             )
+            task["batch_size"] = len(group)
+            task["item_ids"] = group_item_ids
 
             # Release if ready, otherwise keep private until dependencies are met.
-            if item_depends:
+            if group_depends:
                 self.save_to_private(task)
             else:
                 self.save_to_public(task)
             expanded_names.append(task_name)
 
-            self.log_decision("TASK_CREATED",
+            self.log_decision(
+                "TASK_CREATED",
                 f"Created expanded task: {task_name}",
-                {"task_id": task["task_id"][:8], "item_id": item_id, "depends_on": item_depends})
+                {
+                    "task_id": task["task_id"][:8],
+                    "batch_size": len(group),
+                    "item_ids": group_item_ids,
+                    "depends_on": group_depends
+                }
+            )
 
         return expanded_names
 
@@ -794,6 +830,100 @@ class Brain:
 
         return satisfied
 
+    def clear_resolved_failures(self):
+        """
+        Auto-clear stale failed entries when the same task_id later succeeds.
+
+        This supports escalation/re-submit flows where a task can be retried
+        and completed after being marked failed/blocked earlier.
+        """
+        successful_task_ids = set()
+
+        for task_file in self.complete_path.glob("*.json"):
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+                task_id = task.get("task_id")
+                if not task_id:
+                    continue
+
+                # Treat explicit success as authoritative.
+                # If result is absent, keep backward-compat behavior and consider complete as success.
+                result = task.get("result")
+                is_success = (
+                    task.get("status") == "complete"
+                    and (
+                        not isinstance(result, dict)
+                        or result.get("success", True) is True
+                    )
+                )
+                if is_success:
+                    successful_task_ids.add(task_id)
+            except Exception:
+                continue
+
+        if not successful_task_ids:
+            return
+
+        cleared = 0
+        for task_file in self.failed_path.glob("*.json"):
+            try:
+                with open(task_file) as f:
+                    failed_task = json.load(f)
+            except Exception:
+                continue
+
+            task_id = failed_task.get("task_id")
+            if not task_id or task_id not in successful_task_ids:
+                continue
+
+            # Mark linked incident resolved (if present) before clearing the failed file.
+            incident_id = failed_task.get("incident_id")
+            resolved_incident = False
+            if incident_id:
+                for incident in self.incidents.values():
+                    if incident.get("incident_id") == incident_id:
+                        incident["resolved"] = True
+                        incident["resolved_at"] = datetime.now().isoformat()
+                        incident["resolution"] = "task_completed_successfully"
+                        incident["updated_at"] = datetime.now().isoformat()
+                        incident.setdefault("history", []).append({
+                            "at": datetime.now().isoformat(),
+                            "event": "auto_cleared_after_success",
+                            "task_id": task_id
+                        })
+                        resolved_incident = True
+                        break
+
+            # Fallback: resolve by deterministic incident key for this task payload.
+            if not resolved_incident:
+                key = self._incident_key(failed_task)
+                incident = self.incidents.get(key)
+                if incident:
+                    incident["resolved"] = True
+                    incident["resolved_at"] = datetime.now().isoformat()
+                    incident["resolution"] = "task_completed_successfully"
+                    incident["updated_at"] = datetime.now().isoformat()
+                    incident.setdefault("history", []).append({
+                        "at": datetime.now().isoformat(),
+                        "event": "auto_cleared_after_success",
+                        "task_id": task_id
+                    })
+
+            try:
+                task_file.unlink()
+                cleared += 1
+                self.log_decision(
+                    "FAILED_CLEARED",
+                    f"Cleared failed task after successful completion: {failed_task.get('name', task_id)}",
+                    {"task_id": task_id, "failed_file": str(task_file)}
+                )
+            except Exception:
+                continue
+
+        if cleared:
+            self._save_brain_state()
+
     # =========================================================================
     # Task Creation
     # =========================================================================
@@ -853,6 +983,7 @@ class Brain:
         - **command**: `shell command here`
         - **depends_on**: task1, task2
         - **foreach**: manifest.videos  (optional - expands to N tasks)
+        - **batch_size**: 4  (optional - groups foreach expansion into micro-batches)
         """
         tasks = []
 
@@ -865,7 +996,15 @@ class Brain:
                 continue
 
             task_id = lines[0].strip()
-            task = {"id": task_id, "executor": "worker", "task_class": None, "command": "", "depends_on": [], "foreach": None}
+            task = {
+                "id": task_id,
+                "executor": "worker",
+                "task_class": None,
+                "command": "",
+                "depends_on": [],
+                "foreach": None,
+                "batch_size": 1,
+            }
 
             for line in lines[1:]:
                 line = line.strip()
@@ -889,6 +1028,13 @@ class Brain:
                 elif line.startswith('- **foreach**:'):
                     # e.g., "manifest.videos" means expand based on videos array in manifest
                     task["foreach"] = line.split(':', 1)[1].strip()
+                elif line.startswith('- **batch_size**:'):
+                    raw = line.split(':', 1)[1].strip()
+                    try:
+                        task["batch_size"] = max(1, int(raw))
+                    except ValueError:
+                        self.logger.warning(f"Invalid batch_size '{raw}' for {task_id}, defaulting to 1")
+                        task["batch_size"] = 1
 
             if task["command"]:  # Only add tasks with commands
                 tasks.append(task)
@@ -954,6 +1100,27 @@ class Brain:
             self.log_decision("PLAN_MODE",
                               f"Resume mode for {plan_dir.name}: {resume_batch_id}",
                               {"run_mode": "resume", "resume_batch_id": resume_batch_id})
+
+            # If this exact plan/data-batch is already active, reuse it.
+            # Avoid creating a duplicate orchestration batch that re-releases
+            # the whole plan on each resume submission.
+            plan_dir_resolved = str(plan_dir.resolve())
+            for existing_batch_id, batch_meta in self.active_batches.items():
+                existing_plan_dir = str(batch_meta.get("plan_dir", ""))
+                existing_cfg = batch_meta.get("config", {}) or {}
+                existing_data_batch = str(existing_cfg.get("BATCH_ID", "")).strip()
+
+                if existing_plan_dir == plan_dir_resolved and existing_data_batch == resume_batch_id:
+                    self.log_decision(
+                        "PLAN_RESUME_REUSE",
+                        f"Resume requested for already-active batch {existing_batch_id}; reusing existing orchestration state",
+                        {
+                            "plan_dir": plan_dir_resolved,
+                            "resume_batch_id": resume_batch_id,
+                            "orchestration_batch_id": existing_batch_id
+                        }
+                    )
+                    return existing_batch_id
         else:
             # Fresh mode defaults plan variables to the new execution batch.
             config["BATCH_ID"] = str(config.get("BATCH_ID", batch_id)).strip() or batch_id
@@ -1031,6 +1198,7 @@ class Brain:
                 for var, value in variables.items():
                     foreach_spec = foreach_spec.replace(var, value)
                 task["foreach"] = foreach_spec
+                task["batch_size"] = max(1, int(task_def.get("batch_size", 1)))
 
             # Check for definition errors - send to failed/ immediately
             if task.get("definition_error"):
@@ -1336,6 +1504,11 @@ JSON only:"""
                 # Use task memory fields (attempts, workers_attempted)
                 attempts = task.get("attempts", 0)
                 workers = task.get("workers_attempted", [])
+
+                # Already escalated/blocked tasks are terminal for local brain.
+                # Do not re-process every loop.
+                if task.get("status") == "blocked_cloud" or task.get("cloud_escalated", False):
+                    continue
 
                 if error_type == "definition":
                     # Definition error - try to fix the task
@@ -2146,6 +2319,9 @@ JSON only:"""
 
                 # 3. Handle failed tasks (retry logic)
                 self.handle_failed_tasks()
+
+                # 3b. Auto-clear stale failures when same task_id later succeeds
+                self.clear_resolved_failures()
 
                 # 4. Monitor GPU and worker health
                 self.monitor_system()

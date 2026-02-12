@@ -144,6 +144,7 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 - **command**: `shell command here`
 - **depends_on**: task1, task2
 - **foreach**: {BATCH_PATH}/manifest.json:items  (optional)
+- **batch_size**: 4  (optional, foreach only)
 ```
 
 | Field | Values | Description |
@@ -154,6 +155,7 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 | `command` | Shell command in backticks | What to execute |
 | `depends_on` | Comma-separated task IDs or `none` | Tasks that must complete first |
 | `foreach` | `path:jsonpath` | **Optional.** Expand to N tasks (see Foreach Expansion below) |
+| `batch_size` | Integer >= 1 | **Optional.** Group foreach items into micro-batch tasks (default `1`) |
 
 **Important:** All fields except `foreach` are required. If `task_class` is missing, the task goes to `failed/` immediately. The brain will attempt to auto-fix by inferring the class from command keywords, but plans should always specify it explicitly.
 
@@ -215,6 +217,7 @@ Use `foreach` to expand a single task definition into N tasks - one per item in 
 ```markdown
 ### process
 - **foreach**: {BATCH_PATH}/manifest.json:items
+- **batch_size**: 4
 - **command**: `python script.py --id {ITEM.id}`
 - **depends_on**: init
 ```
@@ -226,6 +229,12 @@ Example:
 `add_topics` task can use `depends_on: init, transcribe_whisper_{ITEM.id}` so each topic task is released as soon as its own transcript finishes.
 
 **Dependency behavior:** Tasks depending on a foreach task automatically wait for ALL expanded tasks. If `process` expands to 100 tasks, `aggregate` with `depends_on: process` waits for all 100.
+
+**Batching behavior (`batch_size > 1`):**
+- Brain groups foreach items into micro-batch tasks (e.g., `process_batch_0001_0004`).
+- Each micro-batch runs item commands sequentially in one claimed task.
+- Micro-batch dependencies are the union of dependencies across items in that batch.
+- Use conservative batch sizes for tasks with highly variable per-item runtime.
 
 **Typical pattern:**
 1. `init` (executor: brain) - creates manifest listing items to process

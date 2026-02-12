@@ -368,6 +368,7 @@ class GPUAgent:
         start_time = time.time()
 
         try:
+            # Initial pull/load request (can block while weights are loaded)
             response = requests.post(
                 self.api_url,
                 json={"model": self.model, "prompt": "Hello", "stream": False},
@@ -375,13 +376,54 @@ class GPUAgent:
             )
             response.raise_for_status()
 
+            # Readiness gate: only mark hot once generation is reliably responsive.
+            if not self._wait_for_model_ready(max_wait_seconds=90):
+                raise RuntimeError("model readiness probe timed out after load")
+
             elapsed = int(time.time() - start_time)
             self.model_loaded = True
             self.state = "hot"
             self.logger.info(f"Model loaded in {elapsed}s - GPU is now HOT")
 
         except Exception as e:
+            self.model_loaded = False
+            self.state = "cold"
             self.logger.error(f"Failed to load model: {e}")
+
+    def _wait_for_model_ready(self, max_wait_seconds: int = 90) -> bool:
+        """
+        Probe Ollama until model is actually ready to serve.
+        Prevents immediate LLM task claims while model is still warming.
+        """
+        if not self.api_url:
+            return False
+
+        deadline = time.time() + max_wait_seconds
+        last_error = ""
+
+        while time.time() < deadline:
+            try:
+                r = requests.post(
+                    self.api_url,
+                    json={
+                        "model": self.model,
+                        "prompt": "READY?",
+                        "stream": False,
+                        "options": {"num_predict": 4}
+                    },
+                    timeout=30
+                )
+                if r.status_code == 200:
+                    _ = r.json().get("response", "")
+                    return True
+                last_error = f"status={r.status_code}"
+            except Exception as e:
+                last_error = str(e)
+
+            time.sleep(2)
+
+        self.logger.warning(f"Model readiness probe failed/timed out: {last_error}")
+        return False
 
     def unload_model(self):
         """Unload LLM model from VRAM. Transitions GPU to Cold state.
@@ -585,7 +627,9 @@ class GPUAgent:
         if self.state == "hot":
             return ['meta', 'llm', 'cpu']
         else:
-            return ['meta', 'script', 'cpu', 'llm']
+            # Cold GPUs should focus on script/cpu until a load_llm task
+            # explicitly transitions them to hot.
+            return ['meta', 'script', 'cpu']
 
     def claim_tasks(self) -> List[Dict]:
         """
@@ -650,6 +694,13 @@ class GPUAgent:
                     if task_class == "meta":
                         task_file.unlink()
                         claimed.append(task)
+                        continue
+
+                    # llm tasks require a hot/ready model on this GPU.
+                    if task_class == "llm" and not self.model_loaded:
+                        self.logger.debug(
+                            f"Skipping llm task {task['task_id'][:8]}: model not loaded yet"
+                        )
                         continue
 
                     # Budget check
