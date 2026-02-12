@@ -9,7 +9,7 @@ Plans are markdown files written by a smart LLM (Claude) to guide the brain in o
 | Role | Model | Responsibility |
 |------|-------|----------------|
 | **Planner** | Claude (external) | Writes plans, prepares scripts, sets up environment |
-| **Brain** | Qwen 14B (local) | Interprets plans, creates tasks, monitors workers, evaluates output |
+| **Brain** | Qwen brain model (local, currently qwen2.5:32b) | Interprets plans, creates tasks, monitors workers, evaluates output |
 | **Workers** | Qwen 7B (local) | Execute assigned tasks, report results |
 
 **Key principle:** Claude does the smart work upfront. The brain interprets and orchestrates. Workers execute.
@@ -287,6 +287,55 @@ The brain substitutes these when generating tasks:
 
 ---
 
+## Run Modes (Fresh vs Resume)
+
+Every operational plan should define how to run in both modes:
+
+1. `fresh`: create new batch state and process from scratch
+2. `resume`: continue from existing batch state without resetting progress
+
+Recommended submission inputs:
+
+- `RUN_MODE`: `fresh` or `resume`
+- `RESUME_BATCH_ID`: required when `RUN_MODE=resume`
+
+Submission contract for execute-plan tasks:
+
+```json
+{
+  "type": "execute_plan",
+  "plan_path": "/path/to/plan",
+  "config": {
+    "RUN_MODE": "resume",
+    "RESUME_BATCH_ID": "e49bc95c"
+  }
+}
+```
+
+### Resume Safety Rules
+
+Plans must be explicit about resume behavior:
+
+1. Resume must never overwrite an existing `history/{batch_id}/manifest.json`.
+2. Resume must not regenerate already completed outputs unless explicitly requested.
+3. Resume scripts should be idempotent and skip work already marked complete.
+4. If resume state is missing or corrupted, fail fast with a clear error.
+
+### Implementation Patterns
+
+Use one of these patterns:
+
+1. Single plan with mode-aware scripts:
+- `init` checks `RUN_MODE`; on `resume`, validates existing batch and no-ops.
+
+2. Separate plans:
+- `plan_fresh.md` includes init/create-manifest.
+- `plan_resume.md` starts from existing manifest/state and only schedules continuation tasks.
+
+For critical pipelines, pattern 2 is usually safer and easier to audit.
+
+---
+
 ## Worker Environment Variables
 
 Workers set environment variables that scripts can use to access worker-specific resources:
@@ -322,6 +371,7 @@ Scripts in the plan folder should:
 4. **Exit 0 on success, non-zero on failure** - Brain uses exit code to detect success
 5. **Write progress to stdout** - Brain logs this for monitoring
 6. **Be idempotent when possible** - Safe to retry on failure
+7. **Support resume semantics** - If run against existing batch state, skip completed work instead of resetting it
 
 **VRAM Tracking:**
 Workers automatically log VRAM usage before and after executing script tasks. This data is collected in task completion results, allowing the brain and monitoring tools to compare estimated vs actual VRAM usage. Use this data to tune VRAM estimates in future plan updates.
@@ -542,6 +592,10 @@ When a task fails due to a script mismatch the brain can detect:
 9. **Generates execution summary** - Auto-inserts summary task at end of every plan
 10. **Reports completion** - When all tasks complete, batch is done
 
+### Important: Batch ID Ownership
+
+By default, `execute_plan` creates a new timestamp batch id. If you need true resume behavior, your submission+scripts must explicitly target an existing batch id and avoid reinitializing state.
+
 ---
 
 ## Automatic Execution Summary
@@ -585,6 +639,10 @@ python scripts/submit.py batch_processor \
 # GPU embedding job
 python scripts/submit.py embedding_generator \
   --config '{"DOCS_PATH": "/data/documents"}'
+
+# Resume an existing batch
+python scripts/submit.py video_zim_batch \
+  --config '{"RUN_MODE": "resume", "RESUME_BATCH_ID": "e49bc95c"}'
 ```
 
 This creates an `execute_plan` task that the brain picks up.

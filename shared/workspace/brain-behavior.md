@@ -572,7 +572,7 @@ GPU agents claim and handle meta tasks directly (no worker subprocess needed). T
 | `llm` | GPU agents (when healthy) | Needs LLM model loaded |
 | `meta` | GPU agents (always, handled directly) | Load/unload LLM, no subprocess |
 
-**Resource-aware claiming:** GPU agents automatically back off from `llm` and `script` tasks when temp >= 85C, VRAM >= 95%, or power >= 140W. They still accept `meta` tasks so the brain can help them recover.
+**Resource-aware claiming:** GPU agents automatically back off from `llm` and `script` tasks when resource thresholds are exceeded (per `config.json` `resource_limits`). They still accept `meta` tasks so the brain can help them recover.
 
 ---
 
@@ -581,7 +581,7 @@ GPU agents claim and handle meta tasks directly (no worker subprocess needed). T
 | Doc | Purpose |
 |-----|---------|
 | [architecture.md](architecture.md) | High-level system overview |
-| [PLAN_FORMAT.md](../shared/plans/PLAN_FORMAT.md) | How to write plans |
+| [PLAN_FORMAT.md](PLAN_FORMAT.md) | How to write plans |
 | [resource_manager_design.md](resource_manager_design.md) | Future GPU management |
 
 ---

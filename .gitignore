@@ -40,8 +40,9 @@ shared/agents/permissions/
 # SYNC: Logs (backup value)
 !shared/logs/
 
-# SYNC: Plans (plan definitions and history)
-!shared/plans/
+# NO SYNC: Plans (each plan is its own repo, public or private)
+# shared/plans/          - plan folders live here but have their own git repos
+# PLAN_FORMAT.md lives in shared/workspace/ (synced with main repo)
 
 # SYNC: Workspace (docs, ideas, human escalations)
 !shared/workspace/

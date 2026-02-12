@@ -78,10 +78,10 @@ nvidia-smi --query-gpu=memory.used,memory.free,utilization.gpu --format=csv -l 1
 
 | Model | Quant | VRAM (idle) | VRAM (peak) | Tokens/sec | GPU Config | Notes |
 |-------|-------|-------------|-------------|------------|------------|-------|
-| Llama 3.1 8B | Q4_K_M | | | | Single 1060 | |
-| Mistral 7B | Q5_K_M | | | | Single 1060 | |
-| Llama 3.1 8B | Q6_K | | | | Single 1060 | |
-| Phi-3 3.8B | Q8_0 | | | | Single 1060 | |
+| | | | | | Single worker GPU | |
+| | | | | | Single worker GPU | |
+| | | | | | Brain GPU(s) | |
+| | | | | | Brain GPU(s) | |
 
 ---
 

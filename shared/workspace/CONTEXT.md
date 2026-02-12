@@ -6,11 +6,11 @@
 
 ## What This Project Does (30 seconds)
 
-A **multi-GPU LLM orchestration system** that coordinates local language models across 5x GTX 1060 GPUs. Uses a tiered intelligence hierarchy:
+A **multi-GPU LLM orchestration system** that coordinates local language models across multiple NVIDIA GPUs. Uses a tiered intelligence hierarchy:
 
 - **Claude** (external) writes plans
-- **Brain** (Qwen 14B) interprets plans, creates tasks, monitors GPU agents
-- **GPU Agents** (3 agents on GPUs 1, 2, 4) claim tasks, spawn worker subprocesses
+- **Brain** (larger model on dedicated GPU(s)) interprets plans, creates tasks, monitors GPU agents
+- **GPU Agents** (one per worker GPU) claim tasks, spawn worker subprocesses
 
 **Key concept:** Smart planning happens externally. Local models handle execution and monitoring.
 
@@ -21,8 +21,8 @@ A **multi-GPU LLM orchestration system** that coordinates local language models 
 | Term | Meaning |
 |------|---------|
 | **Plan** | Markdown file defining a goal, scripts, and tasks with dependencies |
-| **Brain** | Coordinator agent (14B on GPUs 0+3) - fixes task-level issues |
-| **GPU Agent** | One per physical GPU (GPUs 1, 2, 4) - claims tasks, spawns worker subprocesses |
+| **Brain** | Coordinator agent on dedicated GPU(s) — see `config.json` for assignment |
+| **GPU Agent** | One per worker GPU — see `config.json` for which GPUs are workers |
 | **Worker** | Short-lived subprocess spawned by GPU agent - executes one task and exits |
 | **Dependency** | Task A depends_on Task B means B must complete before A runs |
 | **Batch** | One execution run of a plan |
@@ -40,7 +40,7 @@ All docs live in `shared/workspace/` (on the shared drive, synced to git).
 |-----|---------|
 | **[quickstart.md](quickstart.md)** | Check status, start system, submit plans |
 | **[architecture.md](architecture.md)** | High-level system overview, hardware, file structure |
-| **[PLAN_FORMAT.md](../plans/PLAN_FORMAT.md)** | How to write plans (the authoritative format) |
+| **[PLAN_FORMAT.md](PLAN_FORMAT.md)** | How to write plans (the authoritative format) |
 
 ### Implementation Details
 
@@ -67,23 +67,13 @@ All docs live in `shared/workspace/` (on the shared drive, synced to git).
 
 ---
 
-## Hardware Summary
+## Hardware
 
-Hardware is auto-discovered by `setup.py`. The table below shows the original reference rig:
+Hardware is auto-discovered by `setup.py` and stored in `config.json`. Run `python setup.py` on any rig to scan GPUs, suggest brain/worker assignment, and generate the config.
 
-| GPU | Role | Notes |
-|-----|------|-------|
-| 0 | Brain (pair) | Cooler, 2025 MHz |
-| 1 | GPU Agent (gpu-1) | Runs hot (76-78C) |
-| 2 | GPU Agent (gpu-2) | Runs hot (76-78C) |
-| 3 | Brain (pair) | Cooler, 2025 MHz |
-| 4 | GPU Agent (gpu-4) | Coolest |
-
-- 6GB VRAM per card (original rig — now dynamic per config)
-- PCIe Gen1 x1 (~250 MB/s per GPU)
-- 140W power limits
-
-Run `python setup.py` on any rig to scan hardware and generate `config.json`.
+- `config.json` defines: brain GPU(s), worker GPUs, models, ports, resource limits
+- `config.template.json` shows the schema
+- Models are stored on the shared drive and loaded into Ollama on demand
 
 ---
 
@@ -99,9 +89,12 @@ llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
 │   ├── submit.py                  # Submit a plan for execution
 │   ├── status.py                  # Check system status
 │   ├── watch.py                   # Live monitoring
-│   └── gpu-monitor.py             # GPU benchmarking tools
+│   ├── gpu-monitor.py             # GPU benchmarking tools
+│   ├── chat                       # Chat launcher (chat brain / chat worker)
+│   ├── chat-brain                 # Chat with brain model via SSH
+│   └── chat-worker                # Chat with worker model via SSH
 │
-└── shared/                        # ext4 USB drive, bind-mounted here
+└── shared/                        # External drive, bind-mounted here
     │                              # NFS-shared to GPU rig via ethernet
     │
     ├── agents/                    # Agent code (GPU rig runs these)
@@ -154,7 +147,7 @@ llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
     └── logs/                      # Logs (synced to git for backup)
 ```
 
-**Key insight:** The `shared/` folder lives on a 4TB ext4 USB drive mounted on the RPi, bind-mounted into the git repo, and NFS-shared to the air-gapped GPU rig over direct ethernet.
+**Key insight:** The `shared/` folder lives on an external drive mounted on the RPi, bind-mounted into the git repo, and NFS-shared to the GPU rig over direct ethernet. See [NETWORK_SETUP.md](NETWORK_SETUP.md) for specifics.
 
 ---
 
@@ -192,7 +185,7 @@ Plans are markdown files that tell the brain what to do. They contain:
 - Available scripts with run commands
 - Tasks with explicit dependencies
 
-See [PLAN_FORMAT.md](../plans/PLAN_FORMAT.md).
+See [PLAN_FORMAT.md](PLAN_FORMAT.md).
 
 ### Dependency-Based Task Release
 
@@ -220,7 +213,7 @@ This keeps workers simple while brain controls all sequencing.
 
 ## What to Read Next
 
-- **Building a new plan?** → [PLAN_FORMAT.md](../plans/PLAN_FORMAT.md)
+- **Building a new plan?** → [PLAN_FORMAT.md](PLAN_FORMAT.md)
 - **Understanding the system?** → [architecture.md](architecture.md)
 - **Debugging brain behavior?** → [brain-behavior.md](brain-behavior.md)
 - **Following work end-to-end?** → [distributed_work_guide.md](distributed_work_guide.md)
@@ -245,10 +238,12 @@ Why: Backwards compatibility creates technical debt, confusing code paths, and d
 ## Current Status
 
 **Infrastructure:**
-- RPi 5 as control plane (internet, Claude Code, plan submission)
-- 4TB ext4 USB drive on RPi (`/media/bryan/shared`, bind-mounted into repo)
-- NFS share to air-gapped GPU rig over direct ethernet (10.0.0.1 → 10.0.0.2)
-- Python venv at `~/ml-env` with dependencies
+- RPi as control plane (internet, Claude Code, plan submission)
+- GPU rig (air-gapped, runs brain + workers) — see [NETWORK_SETUP.md](NETWORK_SETUP.md)
+- External drive on RPi, bind-mounted into repo, NFS-shared to GPU rig
+- Bidirectional SSH between Pi and GPU rig
+- Ollama instances per `config.json` (one per GPU group)
+- Python venv with dependencies
 - GitHub CLI for version control
 
 **Agent System:**
@@ -286,7 +281,6 @@ Why: Backwards compatibility creates technical debt, confusing code paths, and d
 - HUMAN escalation pattern: agents write HUMAN_{topic}.md and stop when stuck
 
 **Planned:**
-- NFS mount configuration on GPU rig (pending rig reconnection)
 - RPi gateway for Claude escalation
 
 ---

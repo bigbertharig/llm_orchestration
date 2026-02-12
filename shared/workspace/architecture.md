@@ -6,9 +6,9 @@ High-level overview of the LLM orchestration system. For implementation details,
 
 ## What This System Does
 
-A **multi-GPU LLM orchestration system** that coordinates local language models across 5 GTX 1060 GPUs. Uses a tiered intelligence hierarchy where smart planning happens externally (Claude) and local models handle execution and monitoring.
+A **multi-GPU LLM orchestration system** that coordinates local language models across multiple NVIDIA GPUs. Uses a tiered intelligence hierarchy where smart planning happens externally (Claude) and local models handle execution and monitoring.
 
-**Key concept:** Local-first AI with tiered intelligence. Simple tasks run on local 7B models, coordination runs on local 14B brain, complex planning comes from external Claude.
+**Key concept:** Local-first AI with tiered intelligence. Simple tasks run on local worker models, coordination runs on a local brain model, complex planning comes from external Claude.
 
 ---
 
@@ -16,15 +16,15 @@ A **multi-GPU LLM orchestration system** that coordinates local language models 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  CLAUDE (Planner)                                                   │
+│  CLOUD LLM (Planner) — e.g. Claude                                  │
 │  • Writes plans with goals, scripts, and workflow guidance          │
 │  • Prepares environment setup in plan                               │
-│  • External, accessed via RPi gateway (future)                      │
+│  • External, accessed via control plane                             │
 └───────────────────────────┬─────────────────────────────────────────┘
                             │ writes plan.md
                             ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  BRAIN (Qwen 14B on GPUs 0+3)                                       │
+│  BRAIN (local LLM on dedicated GPU(s) — per config.json)            │
 │  • Interprets plans using LLM reasoning                             │
 │  • Creates and sequences tasks                                      │
 │  • Monitors workers, evaluates outputs                              │
@@ -33,7 +33,7 @@ A **multi-GPU LLM orchestration system** that coordinates local language models 
                             │ assigns tasks
                             ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  GPU AGENTS (gpu-1, gpu-2, gpu-4)                                    │
+│  GPU AGENTS (optional — one per worker GPU, per config.json)         │
 │  • One agent per physical GPU - owns the hardware                    │
 │  • Dual-cycle loop: 30s external (heartbeat/claim) + 5s internal    │
 │  • Claim tasks from queue within VRAM budget                        │
@@ -104,24 +104,18 @@ Each layer handles problems at its level. Unresolvable issues escalate upward.
 
 ## Hardware
 
-| GPU | Role | Agent | Notes |
-|-----|------|-------|-------|
-| 0 | Brain (pair with 3) | - | Cooler, 2025 MHz |
-| 1 | GPU Agent | gpu-1 (port 11435) | Runs hot (76-78C) |
-| 2 | GPU Agent | gpu-2 (port 11436) | Runs hot (76-78C) |
-| 3 | Brain (pair with 0) | - | Cooler, 2025 MHz |
-| 4 | GPU Agent | gpu-4 (port 11437) | Coolest |
+Hardware is auto-discovered by `setup.py` and stored in `config.json`. The system adapts to whatever GPUs are available:
 
-**Constraints:**
-- PCIe Gen1 x1 via ASMedia switch (~250 MB/s per GPU)
-- 6GB VRAM per card
-- 140W power limit per card
-- Models must load sequentially (PCIe bottleneck)
+| Mode | GPUs | Brain | Workers |
+|------|------|-------|---------|
+| `cpu_only` | 0 | CPU | None |
+| `single_gpu` | 1 | Gets the GPU | None |
+| `minimal` | 2 | Largest GPU | Other GPU |
+| `standard` | 3+ | Largest GPU(s) | All remaining |
 
-**Performance:**
-- Brain (14B split): 12.4 tok/s
-- Workers (7B each): ~22.6 tok/s
-- Combined workers: ~68 tok/s parallel
+Run `python setup.py` on any rig to scan hardware and generate `config.json`. See `config.template.json` for the schema.
+
+Models are stored on the shared drive and loaded into Ollama on demand. See [NETWORK_SETUP.md](NETWORK_SETUP.md) and [systems_prep.md](systems_prep.md) for rig-specific details.
 
 ---
 
@@ -129,9 +123,9 @@ Each layer handles problems at its level. Unresolvable issues escalate upward.
 
 ```
 ┌──────────────────────────────────┐     ethernet     ┌──────────────────────────────────┐
-│       Control Plane (RPi 5)      │  10.0.0.1:NFS    │           GPU Rig                │
+│       Control Plane              │                  │           GPU Rig                │
 │  • Internet access               │◄────────────────►│  • Air-gapped (no internet)      │
-│  • Runs Claude Code              │  10.0.0.2:mount   │  • 5x GTX 1060 6GB               │
+│  • Runs cloud LLM (Claude Code)  │                  │  • NVIDIA GPUs (per config.json) │
 │  • Prepares plans                │                  │  • Runs brain + workers          │
 │  • Submits to shared folder      │                  │  • Executes plans                │
 │  • GitHub for version control    │                  │  • Ollama for local LLM inference │
@@ -140,10 +134,10 @@ Each layer handles problems at its level. Unresolvable issues escalate upward.
            │  USB                                                 │ NFS mount
            ▼                                                      │
 ┌──────────────────────────────────┐                              │
-│     4TB ext4 USB Drive           │◄─────────────────────────────┘
-│  /media/bryan/shared             │
-│  bind-mounted → ~/llm_orchestration/shared
-│  NFS-exported to 10.0.0.0/24    │
+│     Shared Drive (ext4)          │◄─────────────────────────────┘
+│  Mounted on control plane        │
+│  bind-mounted → repo/shared      │
+│  NFS-exported to GPU rig         │
 └──────────────────────────────────┘
 ```
 
@@ -153,7 +147,7 @@ Each layer handles problems at its level. Unresolvable issues escalate upward.
 
 ## File Structure
 
-**Key insight:** The `shared/` folder lives on a 4TB ext4 USB drive, bind-mounted into the git repo on the RPi, and NFS-exported to the air-gapped GPU rig.
+**Key insight:** The `shared/` folder lives on an external drive, bind-mounted into the git repo on the control plane, and NFS-exported to the GPU rig.
 
 ```
 llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
@@ -167,7 +161,7 @@ llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
 │   ├── watch.py                   # Live monitoring
 │   └── gpu-monitor.py             # GPU benchmarking tools
 │
-└── shared/                        # ext4 USB drive, bind-mounted here
+└── shared/                        # External drive, bind-mounted here
     │                              # NFS-shared to GPU rig via ethernet
     │
     ├── agents/                    # Agent code (GPU rig runs these)
@@ -240,7 +234,7 @@ llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
 
 ## Plan Format
 
-Plans are markdown files that tell the brain what to do. See [PLAN_FORMAT.md](../plans/PLAN_FORMAT.md) for the complete specification.
+Plans are markdown files that tell the brain what to do. See [PLAN_FORMAT.md](PLAN_FORMAT.md) for the complete specification.
 
 Key sections:
 - **Goal** - What success looks like
@@ -267,10 +261,10 @@ GPU agents adjust task claiming based on **two independent factors**:
 
 #### Factor 1: GPU Health (Resource Constraints)
 
-| GPU Health | Thresholds | Behavior |
+| GPU Health | Thresholds (per config.json) | Behavior |
 |------------|-----------|----------|
-| **Healthy** | Temp < 85C, VRAM < 95%, Power < 140W | Normal task claiming (see Factor 2) |
-| **Constrained** | Temp >= 85C OR VRAM >= 95% OR Power >= 140W | Only accept `meta`, `cpu` tasks |
+| **Healthy** | Below all resource_limits thresholds | Normal task claiming (see Factor 2) |
+| **Constrained** | Any threshold exceeded (temp, VRAM, or power) | Only accept `meta`, `cpu` tasks |
 
 When constrained, GPU agents:
 - Still accept `meta` tasks (brain can tell them to unload LLM to free VRAM)
@@ -278,7 +272,7 @@ When constrained, GPU agents:
 - Reject `llm` and `script` tasks (would worsen resource pressure)
 - Auto-recover when resources improve (checked every 5s internal cycle)
 
-Hot GPUs (GPUs 1 and 2 at 76-78C) naturally back off from heavy work, then resume when cooled.
+Hot GPUs naturally back off from heavy work, then resume when cooled.
 
 #### Factor 2: Model State (Hot vs Cold)
 
@@ -303,7 +297,7 @@ How both factors interact to determine task claiming:
 | Constrained | Cold | `meta`, `cpu` | Overloaded - back off all GPU work |
 
 **Startup behavior:**
-- 3 GPU agents start (gpu-1, gpu-2, gpu-4), one per physical GPU
+- GPU agents start per `config.json` (one per worker GPU)
 - All start Cold (no LLM loaded)
 - Brain manages LLM loading on demand via meta tasks
 - GPU agents are immediately available for `script` and `cpu` tasks
@@ -315,7 +309,7 @@ How both factors interact to determine task claiming:
 
 **Why this matters:**
 - `script` tasks (like Whisper transcription) don't need LLM - cold GPU agents handle them immediately
-- Avoids loading 3 LLMs when most work is GPU compute
+- Avoids loading LLMs on all GPUs when most work is GPU compute
 - Brain can heat up GPU agents on demand when `llm` tasks appear
 - Brain can help overloaded GPU agents recover by unloading their models
 
@@ -339,14 +333,17 @@ Per-worker VRAM tracking is also done via nvidia-smi `--query-compute-apps` to g
 
 ### Resource Thresholds
 
-Configured in `shared/agents/config.json`:
+Configured in `config.json` under `resource_limits`:
 ```json
 "resource_limits": {
-  "max_temp_c": 85,
+  "max_temp_c": 80,
+  "gpu_temp_warning_c": 75,
+  "gpu_temp_critical_c": 90,
   "max_vram_percent": 95,
   "max_power_w": 140
 }
 ```
+Adjust these values based on your hardware's thermal and power characteristics.
 
 ### Self-Regulation Behavior
 
@@ -358,9 +355,9 @@ When any threshold is exceeded, GPU agent automatically:
 5. Auto-recovers when resources drop below thresholds
 
 **Example constraint scenarios:**
-- GPU 1 hits 86C -> Only claims meta/cpu tasks until temp drops below 85C
-- GPU 2 VRAM at 96% -> Only claims meta/cpu tasks, can accept brain's unload_llm command
-- GPU 4 power at 141W -> Backs off GPU work until power draw decreases
+- A GPU exceeds `max_temp_c` -> Only claims meta/cpu tasks until temp drops
+- A GPU VRAM exceeds `max_vram_percent` -> Only claims meta/cpu tasks, can accept brain's unload_llm command
+- A GPU power exceeds `max_power_w` -> Backs off GPU work until power draw decreases
 
 ### Heartbeat Format
 
@@ -419,7 +416,7 @@ Each GPU agent owns one physical GPU and manages concurrent worker subprocesses:
 |-------------|---------|---------|
 | `id` | 1 | Physical GPU index (CUDA_VISIBLE_DEVICES) |
 | `name` | gpu-1 | Agent name for logging and signals |
-| `model` | qwen2.5:7b | LLM model (for hot state) |
+| `model` | (per config) | LLM model (for hot state) |
 | `port` | 11435 | Dedicated Ollama port |
 
 **Key boundary:** A GPU is either:
@@ -430,7 +427,7 @@ Each GPU agent owns one physical GPU and manages concurrent worker subprocesses:
 
 The GPU agent tracks VRAM budget internally (no external coordination needed):
 
-1. Total budget = 6144 MB x 80% = ~4915 MB
+1. Total budget = `vram_mb` from config x 80%
 2. Each claimed task has a VRAM cost estimate
 3. GPU agent tracks `claimed_vram` as sum of active workers' estimates
 4. New tasks are only claimed if their cost fits within remaining budget
@@ -438,7 +435,7 @@ The GPU agent tracks VRAM budget internally (no external coordination needed):
 
 | Task Class | VRAM Cost |
 |-----------|-----------|
-| `llm` | Full GPU (6144 MB) - one task at a time |
+| `llm` | Full GPU VRAM - one task at a time |
 | `script` | Per-task `vram_estimate_mb` field, default 1024 MB |
 | `cpu` | Virtual cost of 1024 MB (limits concurrency) |
 | `meta` | 0 MB (handled directly by GPU agent, no subprocess) |
@@ -581,10 +578,10 @@ This allows plans to handle variable-length input (e.g., N video files) without 
 | Decision | Rationale |
 |----------|-----------|
 | File-based queue | Simple, debuggable, works across air-gap |
-| Brain/worker split | 14B for coordination, 7B for throughput |
-| Qwen 2.5 | Best reasoning/size ratio for 6GB cards |
-| Claude as planner | Smart work upfront, dumb execution locally |
+| Brain/worker split | Larger model for coordination, smaller for throughput |
+| Cloud LLM as planner | Smart work upfront, simpler execution locally |
 | Private/public task lists | Brain controls sequencing, workers stay simple |
+| Dynamic hardware discovery | `setup.py` adapts to any GPU configuration |
 
 ---
 
@@ -645,7 +642,7 @@ The *work* on that specific task run is lost, but the task naturally retries. Th
 |-----|---------|
 | [CONTEXT.md](CONTEXT.md) | Project entry point, quick orientation |
 | [brain-behavior.md](brain-behavior.md) | Brain loop, task handling, failure recovery |
-| [PLAN_FORMAT.md](../plans/PLAN_FORMAT.md) | How to write plans |
+| [PLAN_FORMAT.md](PLAN_FORMAT.md) | How to write plans |
 | [future/resource_manager_design.md](future/resource_manager_design.md) | Future: GPU resource management design |
 
 ---

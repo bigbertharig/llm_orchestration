@@ -66,7 +66,7 @@ Claude then creates:
 - `shared/plans/invoice_processor/scripts/extract.py`
 - `shared/plans/invoice_processor/scripts/combine.py`
 
-**For plan format details, see [PLAN_FORMAT.md](../shared/plans/PLAN_FORMAT.md).**
+**For plan format details, see [PLAN_FORMAT.md](PLAN_FORMAT.md).**
 
 ---
 
@@ -219,7 +219,7 @@ Batch IDs are timestamp-based (`YYYYMMDD_HHMMSS`). The `{BATCH_PATH}` variable i
 
 | Doc | Purpose |
 |-----|---------|
-| [PLAN_FORMAT.md](../shared/plans/PLAN_FORMAT.md) | **Authoritative plan format specification** |
+| [PLAN_FORMAT.md](PLAN_FORMAT.md) | **Authoritative plan format specification** |
 | [architecture.md](architecture.md) | System overview and file structure |
 | [brain-behavior.md](brain-behavior.md) | Brain loop and task handling details |
 

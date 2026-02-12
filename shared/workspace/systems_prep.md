@@ -297,9 +297,81 @@ snap list  # should error
 
 ---
 
+## Phase 7: SSD Boot Drive (Applied 2026-02-11)
+
+Replaced HDD with 110GB SSD as boot drive. Removes ~32s spinup wait.
+
+---
+
+## Phase 8: NVIDIA Driver 580 (Applied 2026-02-11)
+
+### Problem
+The rig now has an RTX 3090 Ti (Ampere) + 4x GTX 1060 6GB (Pascal). The 590 driver (and the open kernel driver) dropped Pascal support entirely. Only the 580.xx legacy driver supports both architectures.
+
+### DO (install 580 proprietary)
+```bash
+sudo apt install -y nvidia-driver-580
+sudo dkms install --force nvidia/580.126.09 -k $(uname -r)
+sudo update-initramfs -u
+sudo reboot
+```
+
+### UNDO (revert to 590)
+```bash
+sudo apt install -y nvidia-driver-590
+sudo reboot
+```
+Note: reverting to 590 will lose all 1060 support.
+
+### Verification
+```bash
+nvidia-smi -L
+# Should show: GPU 0 (RTX 3090 Ti) + GPU 1-4 (GTX 1060 6GB)
+```
+
+---
+
+## Phase 9: Auto-Login & Boot Speed (Applied 2026-02-11)
+
+### DO (enable auto-login)
+```bash
+# GDM auto-login
+sudo sed -i '/^\[daemon\]/,/^\[/{s/#  AutomaticLoginEnable = true/AutomaticLoginEnable = true/; s/#  AutomaticLogin = user1/AutomaticLogin = bryan/}' /etc/gdm3/custom.conf
+
+# Disable network wait
+sudo systemctl disable NetworkManager-wait-online.service
+```
+
+### UNDO
+```bash
+sudo sed -i '/^\[daemon\]/,/^\[/{s/AutomaticLoginEnable = true/#  AutomaticLoginEnable = true/; s/AutomaticLogin = bryan/#  AutomaticLogin = user1/}' /etc/gdm3/custom.conf
+sudo systemctl enable NetworkManager-wait-online.service
+```
+
+GRUB was already configured: `GRUB_TIMEOUT=0`, `GRUB_TIMEOUT_STYLE=hidden`.
+
+---
+
+## Phase 10: Dual Ollama Instances (Applied 2026-02-11)
+
+Two Ollama systemd services, each pinned to a specific GPU:
+
+| Service | Port | GPU | CUDA_VISIBLE_DEVICES |
+|---------|------|-----|---------------------|
+| `ollama.service` | 11434 | RTX 3090 Ti | 0 |
+| `ollama-1060.service` | 11435 | GTX 1060 #1 | 1 |
+
+Models are loaded from the shared drive (not stored on SSD image):
+```bash
+cd /mnt/shared/models/qwen2.5-coder-32b && ollama create qwen2.5-coder:32b -f Modelfile
+cd /mnt/shared/models/qwen2.5-coder-7b && OLLAMA_HOST=http://localhost:11435 ollama create qwen2.5-coder:7b -f Modelfile
+```
+
+---
+
 ## Future Optimizations (Not Yet Applied)
 
-1. **SSD upgrade** - Replace HDD boot drive (removes 32s spinup wait)
-2. **Disable Plymouth** - `sudo kernelstub -a "plymouth.enable=0"` (saves ~25s)
-3. **Reduce initrd modules** - Remove unused drivers
-4. **Switch to terminal login** - Replace GDM with getty for pure CLI
+1. **Disable Plymouth** - `sudo kernelstub -a "plymouth.enable=0"` (saves ~25s)
+2. **Reduce initrd modules** - Remove unused drivers
+3. **Switch to terminal login** - Replace GDM with getty for pure CLI
+4. **Utilize remaining 1060s** - GPUs 2-4 available for agents, embeddings, etc.
