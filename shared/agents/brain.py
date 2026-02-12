@@ -121,6 +121,11 @@ class Brain:
 
         # P1: Track load_llm requests to detect when workers don't pick them up
         self.load_llm_requests: Dict[str, Dict] = {}
+        # Infrastructure escalation tracking for missing GPU agents
+        self.gpu_missing_escalations: Dict[str, Dict[str, Any]] = {}
+        # Heartbeat/missing thresholds (4 missed 30s heartbeats = 120s)
+        self.heartbeat_stale_seconds = int(self.monitor_interval * 4)
+        self.missing_gpu_miss_threshold = 4
         # Track dependency auto-fix attempts (missing Python modules, etc.)
         self.dependency_fix_attempts: Dict[str, Dict[str, Any]] = {}
         # Incident state machine for worker->brain->cloud escalation
@@ -193,6 +198,7 @@ class Brain:
                         req['created_at'] = datetime.fromisoformat(req['created_at'])
                         self.load_llm_requests[task_id] = req
                     self.incidents = state.get("incidents", {})
+                    self.gpu_missing_escalations = state.get("gpu_missing_escalations", {})
                     self.logger.info(
                         f"Loaded state: {len(self.active_batches)} active batches, "
                         f"{len(self.load_llm_requests)} pending load_llm requests")
@@ -200,6 +206,7 @@ class Brain:
                 self.logger.warning(f"Failed to load state: {e}")
                 self.active_batches = {}
                 self.incidents = {}
+                self.gpu_missing_escalations = {}
 
     def _save_brain_state(self):
         """Persist brain state to disk."""
@@ -216,7 +223,8 @@ class Brain:
             "status": "active",
             "active_batches": self.active_batches,
             "load_llm_requests": serializable_requests,
-            "incidents": self.incidents
+            "incidents": self.incidents,
+            "gpu_missing_escalations": self.gpu_missing_escalations
         }
         with open(self.state_file, 'w') as f:
             json.dump(state, f, indent=2)
@@ -1982,6 +1990,65 @@ JSON only:"""
                 # First detection - send graceful abort signal
                 self._send_abort_signal(worker_name, task_id, f"task_timeout_{elapsed_min}min")
 
+    def _recover_orphaned_processing_tasks(self, running_gpus: Dict[str, Dict]):
+        """
+        Detect and recover orphaned processing tasks.
+
+        Orphaned = task in processing assigned to a GPU agent that is not running.
+        These should be escalated/requeued quickly instead of waiting for the
+        20-minute stuck-task timeout.
+        """
+        orphan_threshold_seconds = 90
+        recovered = 0
+
+        for task_file in self.processing_path.glob("*.json"):
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+
+                assigned_to = task.get("assigned_to", "")
+                if not assigned_to or assigned_to in running_gpus:
+                    continue
+
+                started_at_str = task.get("started_at") or task.get("last_attempt_at")
+                if not started_at_str:
+                    continue
+
+                started = datetime.fromisoformat(started_at_str)
+                elapsed = (datetime.now() - started).total_seconds()
+                if elapsed < orphan_threshold_seconds:
+                    continue
+
+                task["status"] = "pending"
+                task.pop("assigned_to", None)
+                task.pop("started_at", None)
+                task["orphan_recovered_at"] = datetime.now().isoformat()
+                task["orphan_recovered_from"] = assigned_to
+
+                # Move back to queue for reclaim
+                new_path = self.queue_path / task_file.name
+                with open(new_path, 'w') as f:
+                    json.dump(task, f, indent=2)
+                task_file.unlink()
+                recovered += 1
+
+                self.log_decision(
+                    "ORPHAN_REQUEUE",
+                    f"Recovered orphaned processing task {task.get('name', task.get('task_id','')[:8])}",
+                    {
+                        "task_id": task.get("task_id", "")[:8],
+                        "batch_id": task.get("batch_id"),
+                        "previous_worker": assigned_to,
+                        "elapsed_sec": int(elapsed),
+                        "action": "requeued"
+                    }
+                )
+
+            except Exception as e:
+                self.logger.debug(f"Error recovering orphaned task {task_file}: {e}")
+
+        return recovered
+
     def monitor_system(self):
         """Monitor GPU agent status, make resource allocation decisions.
 
@@ -2004,6 +2071,13 @@ JSON only:"""
             gpu_status = self._get_gpu_status()
             running_gpus = self._get_running_gpus()
             queue_stats = self._analyze_task_queue()
+
+            # Recover orphaned processing tasks promptly when a worker/gpu agent
+            # disappears. This prevents long silent stalls.
+            orphan_recovered = self._recover_orphaned_processing_tasks(running_gpus)
+            if orphan_recovered:
+                queue_stats = self._analyze_task_queue()
+                queue_stats["orphan_recovered"] = orphan_recovered
 
             # P0: Check for stuck tasks (processing > 20 minutes)
             stuck_tasks = self._detect_stuck_tasks()
@@ -2076,7 +2150,7 @@ JSON only:"""
                         if last_updated:
                             timestamp = datetime.fromisoformat(last_updated)
                             age = (datetime.now() - timestamp).total_seconds()
-                            if age < 60:
+                            if age < self.heartbeat_stale_seconds:
                                 running[gpu_name] = {"pid": self.gpu_pids.get(gpu_name, 0),
                                                      "gpu": gpu_id, "port": port, "via_heartbeat": True}
                     except Exception:
@@ -2215,6 +2289,57 @@ JSON only:"""
                 'gpus_needed': cold_gpus.copy()
             }
 
+    def _handle_missing_gpu_escalations(self, truly_missing: List[str], queue_stats: Dict[str, Any]):
+        """
+        Escalate persistent missing GPU agents once, and log recovery when they return.
+        """
+        missing_now = set(truly_missing)
+        tracked = set(self.gpu_missing_escalations.keys())
+
+        # Recoveries: GPUs previously escalated are now back.
+        for gpu in sorted(tracked - missing_now):
+            esc = self.gpu_missing_escalations.pop(gpu, {})
+            self.log_decision(
+                "GPU_RECOVERED",
+                f"GPU agent recovered: {gpu}",
+                {"gpu": gpu, "previous_escalation_id": esc.get("escalation_id")}
+            )
+
+        # New persistent missing GPUs: escalate once per outage.
+        for gpu in sorted(missing_now):
+            if gpu in self.gpu_missing_escalations:
+                continue
+
+            escalation_id = self.emit_cloud_escalation(
+                escalation_type="infrastructure_failure",
+                title="GPU agent missing while worker queue has pending tasks",
+                details={
+                    "gpu": gpu,
+                    "reason": "persistent_missing_gpu_agent",
+                    "miss_count": self.gpu_miss_count.get(gpu, 0),
+                    "heartbeat_stale_seconds": self.heartbeat_stale_seconds,
+                    "queue_worker_tasks": queue_stats.get("worker_tasks", 0),
+                    "queue_total_pending": queue_stats.get("total_pending", 0),
+                    "processing_count": queue_stats.get("processing_count", 0),
+                }
+            )
+
+            self.gpu_missing_escalations[gpu] = {
+                "escalation_id": escalation_id,
+                "first_seen_at": datetime.now().isoformat(),
+                "miss_count": self.gpu_miss_count.get(gpu, 0),
+            }
+            self.log_decision(
+                "GPU_MISSING_ESCALATED",
+                f"Escalated persistent missing GPU agent: {gpu}",
+                {
+                    "gpu": gpu,
+                    "escalation_id": escalation_id,
+                    "miss_count": self.gpu_miss_count.get(gpu, 0),
+                    "queue_worker_tasks": queue_stats.get("worker_tasks", 0),
+                }
+            )
+
     def _make_resource_decisions(self, gpu_status: List[Dict], running_gpus: Dict, queue_stats: Dict):
         """Make decisions about GPU resource allocation based on current state."""
         active_gpus = [g for g in gpu_status if g["util_pct"] > 10 or g["mem_used_mb"] > 1000]
@@ -2258,11 +2383,15 @@ JSON only:"""
             else:
                 self.gpu_miss_count[gpu_name] = 0
 
-        truly_missing = [g for g in missing_gpus if self.gpu_miss_count.get(g, 0) >= 3]
+        truly_missing = [g for g in missing_gpus if self.gpu_miss_count.get(g, 0) >= self.missing_gpu_miss_threshold]
         if truly_missing and queue_stats["worker_tasks"] > 0:
             self.log_decision("GPU_MISSING",
                 f"GPU agents not running: {truly_missing} ({queue_stats['worker_tasks']} tasks pending)",
                 {"missing": truly_missing, "miss_counts": {g: self.gpu_miss_count.get(g, 0) for g in missing_gpus}})
+            self._handle_missing_gpu_escalations(truly_missing, queue_stats)
+        else:
+            # If no persistent missing GPUs remain, log recovery for any tracked ones.
+            self._handle_missing_gpu_escalations([], queue_stats)
 
         # Check for stale load_llm requests
         for task_id, request in list(self.load_llm_requests.items()):
