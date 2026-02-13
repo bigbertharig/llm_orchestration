@@ -29,7 +29,7 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,6 +46,7 @@ logging.basicConfig(
 #   - meta: Model load/unload tasks (inserted by brain, claimed by GPU workers)
 # =============================================================================
 VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'meta']
+VALID_VRAM_POLICIES = ['default', 'infer', 'fixed']
 
 
 class Brain:
@@ -90,10 +91,21 @@ class Brain:
                      self.failed_path, self.brain_path, self.private_tasks_path,
                      self.escalations_path]:
             path.mkdir(parents=True, exist_ok=True)
+        self.brain_lock_file = self.brain_path / "brain_agent.lock"
+        self.brain_lock = FileLock(str(self.brain_lock_file), timeout=0)
+        try:
+            self.brain_lock.acquire()
+        except Timeout:
+            print(
+                f"ERROR: Another brain instance already holds lock: {self.brain_lock_file}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
         self.model = self.brain_config["model"]
         self.gpus = self.brain_config["gpus"]
         self.api_url = f"{self.config['ollama_host']}/api/generate"
+        self.brain_keep_alive = str(self.config.get("brain_keep_alive", "-1"))
 
         self.poll_interval = self.config["timeouts"]["poll_interval_seconds"]
         self.think_timeout = self.config["timeouts"]["brain_think_seconds"]
@@ -114,6 +126,8 @@ class Brain:
         # Resource monitoring
         self.last_monitor_check = 0
         self.monitor_interval = 30  # seconds
+        # Rail safety: cap number of hot worker GPUs at once.
+        self.max_hot_workers = int(self.config.get("max_hot_workers", 1))
         self.gpu_pids: Dict[str, int] = {}
         self.gpu_miss_count: Dict[str, int] = {}  # Track consecutive misses for 3-miss tolerance
         self.signals_path = self.shared_path / "signals"
@@ -121,6 +135,11 @@ class Brain:
 
         # P1: Track load_llm requests to detect when workers don't pick them up
         self.load_llm_requests: Dict[str, Dict] = {}
+        # Throttle repeated resource commands so balancing changes happen gradually.
+        self.resource_task_cooldown_seconds = int(
+            self.config.get("timeouts", {}).get("resource_task_cooldown_seconds", 45)
+        )
+        self.last_resource_task_at: Dict[str, datetime] = {}
         # Infrastructure escalation tracking for missing GPU agents
         self.gpu_missing_escalations: Dict[str, Dict[str, Any]] = {}
         # Heartbeat/missing thresholds (4 missed 30s heartbeats = 120s)
@@ -206,6 +225,9 @@ class Brain:
                     for task_id, req in saved_requests.items():
                         req['created_at'] = datetime.fromisoformat(req['created_at'])
                         self.load_llm_requests[task_id] = req
+                    saved_resource_times = state.get("last_resource_task_at", {})
+                    for command, ts in saved_resource_times.items():
+                        self.last_resource_task_at[command] = datetime.fromisoformat(ts)
                     self.incidents = state.get("incidents", {})
                     self.gpu_missing_escalations = state.get("gpu_missing_escalations", {})
                     self.logger.info(
@@ -232,6 +254,10 @@ class Brain:
             "status": "active",
             "active_batches": self.active_batches,
             "load_llm_requests": serializable_requests,
+            "last_resource_task_at": {
+                command: ts.isoformat()
+                for command, ts in self.last_resource_task_at.items()
+            },
             "incidents": self.incidents,
             "gpu_missing_escalations": self.gpu_missing_escalations
         }
@@ -550,7 +576,8 @@ class Brain:
                 json={
                     "model": self.model,
                     "prompt": full_prompt,
-                    "stream": False
+                    "stream": False,
+                    "keep_alive": self.brain_keep_alive
                 },
                 timeout=self.think_timeout
             )
@@ -797,7 +824,9 @@ class Brain:
                 priority=template_task.get("priority", 5),
                 depends_on=group_depends,
                 executor=template_task.get("executor", "worker"),
-                task_class=template_task.get("task_class")
+                task_class=template_task.get("task_class"),
+                vram_estimate_mb=template_task.get("vram_estimate_mb"),
+                vram_estimate_source=template_task.get("vram_estimate_source")
             )
             task["batch_size"] = len(group)
             task["item_ids"] = group_item_ids
@@ -816,7 +845,8 @@ class Brain:
                     "task_id": task["task_id"][:8],
                     "batch_size": len(group),
                     "item_ids": group_item_ids,
-                    "depends_on": group_depends
+                    "depends_on": group_depends,
+                    "vram_estimate_mb": task.get("vram_estimate_mb")
                 }
             )
 
@@ -882,9 +912,15 @@ class Brain:
         """
         Get task names considered dependency-satisfied:
         - successful completed tasks
-        - terminal failed tasks (max retries exhausted / cloud-blocked)
+        - optionally terminal failed tasks (disabled by default)
         """
         satisfied = self.get_completed_task_ids(batch_id)
+        allow_terminal = bool(
+            self.config.get("retry_policy", {}).get("allow_terminal_failed_dependencies", False)
+        )
+        if not allow_terminal:
+            return satisfied
+
         max_attempts = self.config.get("retry_policy", {}).get("max_attempts", 3)
 
         for task_file in self.failed_path.glob("*.json"):
@@ -1009,7 +1045,9 @@ class Brain:
     def create_task(self, task_type: str, command: str, batch_id: str,
                     task_name: str = "", priority: int = 5,
                     depends_on: List[str] = None, executor: str = "worker",
-                    task_class: str = None) -> Dict[str, Any]:
+                    task_class: str = None,
+                    vram_estimate_mb: Optional[int] = None,
+                    vram_estimate_source: Optional[str] = None) -> Dict[str, Any]:
         """Create a new task.
 
         task_class must be specified in plan.md. If missing or invalid,
@@ -1039,12 +1077,82 @@ class Brain:
             "retry_count": 0
         }
 
+        if isinstance(vram_estimate_mb, int) and vram_estimate_mb > 0:
+            task["vram_estimate_mb"] = int(vram_estimate_mb)
+            task["vram_estimate_source"] = vram_estimate_source or "plan"
+
         # Mark task with definition error so it goes to failed/ immediately
         if definition_error:
             task["definition_error"] = definition_error
             task["error_type"] = "definition"
 
         return task
+
+    def _infer_script_vram_estimate(self, command: str, task_name: str = "") -> (Optional[int], Optional[str]):
+        """Infer script VRAM estimate via brain LLM once per task definition."""
+        prompt = f"""Estimate peak VRAM (MB) for ONE worker running this script task.
+
+Task name: {task_name}
+Command:
+{command}
+
+Rules:
+- Return a conservative but realistic estimate for peak VRAM in MB.
+- This is for a script task (not LLM generation task).
+- We want one number reused for all expanded items of this step.
+- Output JSON only.
+
+Required JSON format:
+{{"vram_estimate_mb": <integer>, "reason": "<short reason>"}}"""
+
+        raw = self.think(prompt, log_as="vram_inference")
+        if not raw:
+            return None, None
+
+        try:
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                parts = cleaned.split("```")
+                if len(parts) >= 2:
+                    cleaned = parts[1]
+                if cleaned.startswith("json"):
+                    cleaned = cleaned[4:]
+                cleaned = cleaned.strip()
+
+            parsed = json.loads(cleaned)
+            estimate = int(parsed.get("vram_estimate_mb", 0))
+            if estimate <= 0:
+                return None, None
+
+            # Clamp to sane bounds to avoid bad model outputs from destabilizing scheduler.
+            estimate = max(256, min(65536, estimate))
+            return estimate, "infer:llm"
+        except Exception:
+            return None, None
+
+    def _resolve_task_vram_estimate(self, task_def: Dict[str, Any], resolved_command: str) -> (Optional[int], Optional[str]):
+        """Resolve script VRAM estimate from plan fields or one-time inference policy."""
+        task_class = task_def.get("task_class")
+        if task_class != "script":
+            return None, None
+
+        explicit = task_def.get("vram_estimate_mb")
+        if isinstance(explicit, int) and explicit > 0:
+            return explicit, "plan:explicit"
+
+        policy = task_def.get("vram_policy", "default")
+        if policy == "infer":
+            estimate, source = self._infer_script_vram_estimate(resolved_command, task_def.get("id", ""))
+            if estimate is not None:
+                return estimate, source
+            self.log_decision(
+                "VRAM_INFER_FALLBACK",
+                f"VRAM infer failed for '{task_def.get('id', '')}', falling back to worker default",
+                {"task_id": task_def.get("id", ""), "policy": "infer"}
+            )
+            return None, None
+
+        return None, None
 
     # =========================================================================
     # Plan Parsing and Execution
@@ -1062,6 +1170,8 @@ class Brain:
         - **depends_on**: task1, task2
         - **foreach**: manifest.videos  (optional - expands to N tasks)
         - **batch_size**: 4  (optional - groups foreach expansion into micro-batches)
+        - **vram_policy**: default|infer|fixed (optional, script tasks)
+        - **vram_estimate_mb**: 2400 (optional, script tasks)
         """
         tasks = []
 
@@ -1082,6 +1192,8 @@ class Brain:
                 "depends_on": [],
                 "foreach": None,
                 "batch_size": 1,
+                "vram_policy": None,
+                "vram_estimate_mb": None,
             }
 
             for line in lines[1:]:
@@ -1113,8 +1225,33 @@ class Brain:
                     except ValueError:
                         self.logger.warning(f"Invalid batch_size '{raw}' for {task_id}, defaulting to 1")
                         task["batch_size"] = 1
+                elif line.startswith('- **vram_policy**:'):
+                    policy = line.split(':', 1)[1].strip().lower()
+                    if policy in VALID_VRAM_POLICIES:
+                        task["vram_policy"] = policy
+                    else:
+                        self.logger.warning(
+                            f"Invalid vram_policy '{policy}' for {task_id}, defaulting to 'default'"
+                        )
+                        task["vram_policy"] = "default"
+                elif line.startswith('- **vram_estimate_mb**:'):
+                    raw = line.split(':', 1)[1].strip()
+                    try:
+                        task["vram_estimate_mb"] = max(1, int(raw))
+                    except ValueError:
+                        self.logger.warning(
+                            f"Invalid vram_estimate_mb '{raw}' for {task_id}, ignoring explicit estimate"
+                        )
+                        task["vram_estimate_mb"] = None
 
             if task["command"]:  # Only add tasks with commands
+                if task.get("task_class") == "script" and not task.get("vram_policy"):
+                    task["vram_policy"] = "infer"
+                elif not task.get("vram_policy"):
+                    task["vram_policy"] = "default"
+
+                if task.get("vram_estimate_mb") and task.get("vram_policy") in [None, "default"]:
+                    task["vram_policy"] = "fixed"
                 tasks.append(task)
 
         return tasks
@@ -1266,6 +1403,8 @@ class Brain:
             for var, value in variables.items():
                 command = command.replace(var, value)
 
+            vram_estimate_mb, vram_estimate_source = self._resolve_task_vram_estimate(task_def, command)
+
             task = self.create_task(
                 task_type="shell",
                 command=command,
@@ -1274,7 +1413,9 @@ class Brain:
                 priority=5,
                 depends_on=task_def.get("depends_on", []),
                 executor=task_def.get("executor", "worker"),
-                task_class=task_def.get("task_class")
+                task_class=task_def.get("task_class"),
+                vram_estimate_mb=vram_estimate_mb,
+                vram_estimate_source=vram_estimate_source
             )
 
             # Preserve foreach spec for later expansion
@@ -1306,7 +1447,9 @@ class Brain:
                     "task_id": task["task_id"][:8],
                     "task_class": task["task_class"],
                     "depends_on": task_def.get("depends_on", []),
-                    "executor": task_def.get("executor", "worker")
+                    "executor": task_def.get("executor", "worker"),
+                    "vram_estimate_mb": task.get("vram_estimate_mb"),
+                    "vram_estimate_source": task.get("vram_estimate_source")
                 })
 
                 # Track tasks with no dependencies for immediate release
@@ -1571,6 +1714,130 @@ JSON only:"""
     # Failed Task Handling
     # =========================================================================
 
+    def _result_text(self, task: Dict[str, Any], result: Dict[str, Any]) -> str:
+        pieces = [
+            str(result.get("output", "")),
+            str(result.get("error", "")),
+            str(task.get("blocked_reason", "")),
+        ]
+        return "\n".join(pieces).lower()
+
+    def _is_recoverable_llm_timeout(self, task: Dict[str, Any], result: Dict[str, Any]) -> bool:
+        if task.get("task_class") != "llm":
+            return False
+        text = self._result_text(task, result)
+        return (
+            "read timed out" in text
+            or "no response from llm" in text
+            or "httpconnectionpool" in text
+            or "task timed out" in text
+        )
+
+    def _is_missing_scraped_file(self, result: Dict[str, Any]) -> bool:
+        text = self._result_text({}, result)
+        return "scraped file not found" in text
+
+    def _extract_person_id(self, task: Dict[str, Any]) -> str:
+        item_ids = task.get("item_ids", [])
+        if item_ids and isinstance(item_ids, list):
+            return str(item_ids[0])
+        name = str(task.get("name", ""))
+        if "_contact_" in name:
+            return "contact_" + name.split("_contact_", 1)[1]
+        if "contact_" in name:
+            return name[name.find("contact_"):]
+        return ""
+
+    def _llm_fallback_models(self) -> List[str]:
+        models = []
+        # Configured fallback list has highest priority.
+        cfg_models = self.config.get("retry_policy", {}).get("llm_fallback_models", [])
+        if isinstance(cfg_models, list):
+            for m in cfg_models:
+                if isinstance(m, str) and m.strip():
+                    models.append(m.strip())
+        # Add worker models as baseline candidates.
+        for g in self.config.get("gpus", []):
+            m = str(g.get("model", "")).strip()
+            if m:
+                models.append(m)
+
+        dedup = []
+        seen = set()
+        for m in models:
+            if m not in seen:
+                seen.add(m)
+                dedup.append(m)
+        return dedup
+
+    def _set_next_llm_model(self, task: Dict[str, Any]) -> str:
+        candidates = self._llm_fallback_models()
+        if not candidates:
+            return ""
+
+        # Try to infer current model from command.
+        command = str(task.get("command", ""))
+        current_model = ""
+        model_match = re.search(r"--model\s+([^\s]+)", command)
+        if model_match:
+            current_model = model_match.group(1).strip().strip("'\"")
+
+        if current_model and current_model in candidates:
+            start_idx = (candidates.index(current_model) + 1) % len(candidates)
+        else:
+            start_idx = int(task.get("llm_model_retry_index", 0)) % len(candidates)
+
+        next_model = candidates[start_idx]
+        task["llm_model_retry_index"] = (start_idx + 1) % len(candidates)
+
+        if "--model" in command:
+            new_cmd = re.sub(
+                r"--model\s+[^\s]+",
+                f"--model {next_model}",
+                command,
+                count=1
+            )
+        else:
+            new_cmd = f"{command} --model {next_model}"
+
+        task["command"] = new_cmd
+        task["llm_retry_model"] = next_model
+        return next_model
+
+    def _queue_task_retry(self, task_file: Path, task: Dict[str, Any], reason: str):
+        task["status"] = "pending"
+        task["attempts"] = 0
+        task["workers_attempted"] = []
+        task["retry_recovered_by_brain"] = True
+        task["retry_recovery_reason"] = reason
+        task.pop("cloud_escalated", None)
+        task.pop("cloud_escalation_id", None)
+        task.pop("incident_id", None)
+        task.pop("blocked_reason", None)
+        task_file.unlink(missing_ok=True)
+        self.save_to_public(task)
+
+    def _requeue_upstream_scrape_for_person(self, batch_id: str, person_id: str) -> bool:
+        if not batch_id or not person_id:
+            return False
+        task_name = f"execute_and_scrape_{person_id}"
+        for task_file in self.failed_path.glob("*.json"):
+            try:
+                with open(task_file) as f:
+                    t = json.load(f)
+                if t.get("batch_id") != batch_id or t.get("name") != task_name:
+                    continue
+                self._queue_task_retry(task_file, t, "auto_recover_upstream_scrape")
+                self.log_decision(
+                    "RECOVERABLE_REQUEUE",
+                    f"Re-queued upstream scrape for {person_id}",
+                    {"batch_id": batch_id, "task_name": task_name}
+                )
+                return True
+            except Exception:
+                continue
+        return False
+
     def handle_failed_tasks(self):
         """Check for failed tasks and handle based on error type.
 
@@ -1591,9 +1858,35 @@ JSON only:"""
                 attempts = task.get("attempts", 0)
                 workers = task.get("workers_attempted", [])
 
-                # Already escalated/blocked tasks are terminal for local brain.
-                # Do not re-process every loop.
+                # Recoverable blocked tasks are re-queued automatically.
                 if task.get("status") == "blocked_cloud" or task.get("cloud_escalated", False):
+                    recoverable_timeout = self._is_recoverable_llm_timeout(task, result)
+                    recoverable_missing_scrape = self._is_missing_scraped_file(result)
+                    if recoverable_timeout or recoverable_missing_scrape:
+                        if recoverable_timeout:
+                            model_used = self._set_next_llm_model(task)
+                            self._queue_task_retry(task_file, task, "recoverable_llm_timeout")
+                            self.log_decision(
+                                "RECOVERABLE_REQUEUE",
+                                f"Recovered blocked LLM timeout task '{task.get('name', '')}'",
+                                {
+                                    "task_id": task.get("task_id", "")[:8],
+                                    "next_model": model_used or "unchanged"
+                                }
+                            )
+                        else:
+                            person_id = self._extract_person_id(task)
+                            self._requeue_upstream_scrape_for_person(task.get("batch_id", ""), person_id)
+                            self._queue_task_retry(task_file, task, "recoverable_missing_scrape")
+                            self.log_decision(
+                                "RECOVERABLE_REQUEUE",
+                                f"Recovered blocked missing-scrape task '{task.get('name', '')}'",
+                                {
+                                    "task_id": task.get("task_id", "")[:8],
+                                    "person_id": person_id
+                                }
+                            )
+                        continue
                     continue
 
                 if error_type == "definition":
@@ -1645,6 +1938,8 @@ JSON only:"""
                 elif attempts < max_attempts:
                     # Worker failure - retry
                     task["status"] = "pending"
+                    if self._is_recoverable_llm_timeout(task, result):
+                        self._set_next_llm_model(task)
 
                     task_file.unlink()
                     self.save_to_public(task)
@@ -1675,6 +1970,15 @@ JSON only:"""
                     # Brain gets up to N fix revisions before cloud escalation.
                     if int(incident.get("brain_fix_attempts", 0)) < self.max_brain_fix_attempts:
                         fixed = self._try_fix_missing_module(task, result)
+                        if not fixed and self._is_recoverable_llm_timeout(task, result):
+                            self._set_next_llm_model(task)
+                            fixed = True
+                            task["fix_applied"] = f"rotated_llm_model:{task.get('llm_retry_model', '')}"
+                        if (not fixed) and self._is_missing_scraped_file(result):
+                            person_id = self._extract_person_id(task)
+                            self._requeue_upstream_scrape_for_person(task.get("batch_id", ""), person_id)
+                            fixed = True
+                            task["fix_applied"] = "requeued_upstream_scrape"
                         incident["brain_fix_attempts"] = int(incident.get("brain_fix_attempts", 0)) + 1
                         incident["updated_at"] = datetime.now().isoformat()
                         incident["history"].append({
@@ -2441,6 +2745,18 @@ JSON only:"""
         queued or in processing, preventing duplicate meta tasks after brain restart
         or under race conditions.
         """
+        # Cooldown: avoid rapid repeated resource commands.
+        last_at = self.last_resource_task_at.get(command)
+        if last_at:
+            elapsed = (datetime.now() - last_at).total_seconds()
+            if elapsed < self.resource_task_cooldown_seconds:
+                self.log_decision(
+                    "RESOURCE_COOLDOWN",
+                    f"Skipping {command} - cooldown active ({elapsed:.0f}s/{self.resource_task_cooldown_seconds}s)",
+                    {"command": command, "elapsed_seconds": elapsed}
+                )
+                return
+
         # Dedup: check if this exact command already exists
         if self._has_existing_meta_task(command):
             self.log_decision("RESOURCE_DEDUP",
@@ -2464,6 +2780,7 @@ JSON only:"""
         }
         self.save_to_public(task)
         self.log_decision("RESOURCE_TASK", f"Inserted {command} task", {"task_id": task["task_id"][:8]})
+        self.last_resource_task_at[command] = datetime.now()
 
         # Track load_llm requests to detect when GPUs don't pick them up
         if command == "load_llm":
@@ -2615,10 +2932,15 @@ JSON only:"""
         if not has_pending_resource:
             # Need to load LLM? LLM tasks waiting but no GPUs are hot
             # Only consider healthy cold GPUs as candidates
-            if queue_stats["llm"] > 0 and len(gpus_with_model) == 0 and len(healthy_cold_gpus) > 0:
+            if (
+                queue_stats["llm"] > 0
+                and len(gpus_with_model) < self.max_hot_workers
+                and len(healthy_cold_gpus) > 0
+            ):
                 self.log_decision("RESOURCE_DECISION",
-                    f"LLM tasks waiting ({queue_stats['llm']}) but no GPUs hot - inserting load_llm task",
-                    {"llm_tasks": queue_stats["llm"], "cold_gpus": healthy_cold_gpus})
+                    f"LLM tasks waiting ({queue_stats['llm']}) and hot GPUs below cap "
+                    f"({len(gpus_with_model)}/{self.max_hot_workers}) - inserting load_llm task",
+                    {"llm_tasks": queue_stats["llm"], "cold_gpus": healthy_cold_gpus, "hot_gpus": gpus_with_model})
                 self._insert_resource_task("load_llm")
 
             # Mixed workload: keep at least one hot GPU for llm while balancing script pressure.
@@ -2631,7 +2953,7 @@ JSON only:"""
                 llm_to_script = llm_tasks / max(script_tasks, 1)
 
                 # If llm backlog is dominant and we have healthy cold GPUs, add hot capacity.
-                if llm_to_script >= 1.5 and cold > 0:
+                if llm_to_script >= 1.5 and cold > 0 and hot < self.max_hot_workers:
                     self.log_decision("RESOURCE_DECISION",
                         f"Mixed queue favors LLM ({llm_tasks} llm vs {script_tasks} script) - inserting load_llm task",
                         {"llm_tasks": llm_tasks, "script_tasks": script_tasks, "hot_gpus": gpus_with_model, "cold_gpus": healthy_cold_gpus})
@@ -2643,6 +2965,13 @@ JSON only:"""
                         f"Mixed queue favors script ({script_tasks} script vs {llm_tasks} llm) - inserting unload_llm task",
                         {"script_tasks": script_tasks, "llm_tasks": llm_tasks, "hot_gpus": gpus_with_model})
                     self._insert_resource_task("unload_llm")
+
+            # Safety clamp: if hot workers exceed configured cap, cool one down.
+            elif len(gpus_with_model) > self.max_hot_workers:
+                self.log_decision("RESOURCE_DECISION",
+                    f"Hot workers exceed cap ({len(gpus_with_model)}/{self.max_hot_workers}) - inserting unload_llm task",
+                    {"hot_gpus": gpus_with_model, "max_hot_workers": self.max_hot_workers})
+                self._insert_resource_task("unload_llm")
 
             # Need to unload LLM? Only script tasks but GPUs are hot
             elif queue_stats["llm"] == 0 and queue_stats["script"] > 0 and len(gpus_with_model) > 0:

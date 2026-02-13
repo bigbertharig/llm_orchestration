@@ -43,7 +43,7 @@ except AttributeError:
 
 def execute_task(task: Dict[str, Any], permissions_file: str,
                  gpu_name: str, ollama_url: str = None,
-                 model: str = None, task_timeout: int = 120) -> Dict[str, Any]:
+                 model: str = None, task_timeout: int | None = None) -> Dict[str, Any]:
     """
     Execute a single task and return the result.
 
@@ -65,7 +65,9 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
         command = task.get("command", prompt)
         logger.info(f"Executing shell: {command[:80]}...")
 
-        shell_timeout = task.get("timeout_seconds", task_timeout)
+        shell_timeout = task.get("timeout_seconds")
+        if shell_timeout is None:
+            shell_timeout = task_timeout
         result = executor.run_bash(command, timeout=shell_timeout)
 
         _log_training_sample(task, command, result.output,
@@ -100,10 +102,14 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
     try:
         start_time = time.time()
 
+        request_timeout = task.get("timeout_seconds")
+        if request_timeout is None:
+            request_timeout = task_timeout
+
         response = requests.post(
             api_url,
             json={"model": model, "prompt": full_prompt, "stream": False},
-            timeout=task_timeout
+            timeout=request_timeout
         )
         response.raise_for_status()
 
@@ -214,7 +220,8 @@ def main():
         print(json.dumps(result))
         sys.exit(1)
 
-    task_timeout = config.get("timeouts", {}).get("worker_task_seconds", 120)
+    configured_timeout = config.get("timeouts", {}).get("worker_task_seconds", 0)
+    task_timeout = None if not configured_timeout or configured_timeout <= 0 else configured_timeout
 
     # Get model name from GPU config
     model = None
@@ -231,6 +238,10 @@ def main():
     os.environ["LLM_ORCH_LOG_PATH"] = str(shared_path / "logs")
 
     logger.info(f"Worker starting: task {task.get('task_id', '')[:8]} on {args.gpu_name}")
+    # Export worker identity/runtime endpoint for script commands executed via shell.
+    os.environ["WORKER_NAME"] = args.gpu_name
+    if args.ollama_url:
+        os.environ["WORKER_OLLAMA_URL"] = args.ollama_url
 
     # Execute
     result = execute_task(

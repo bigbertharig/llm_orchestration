@@ -109,6 +109,7 @@ class GPUAgent:
         self.model = self.gpu_config.get("model")
         self.port = self.gpu_config.get("port")
         self.api_url = f"http://localhost:{self.port}/api/generate" if self.port else None
+        self.worker_keep_alive = str(self.config.get("worker_keep_alive", "-1"))
 
         # Permissions
         permissions_path = Path(self.config["permissions_path"])
@@ -153,6 +154,16 @@ class GPUAgent:
         self.thermal_pause_active = False
         self.thermal_pause_reasons: List[str] = []
         self.last_thermal_event: Optional[Dict[str, Any]] = None
+        self.thermal_pause_until: float = 0.0
+        self.thermal_pause_current_seconds: int = 0
+        self.thermal_pause_attempts: int = 0
+
+        # Thermal pause policy (warning-level cooldown with exponential backoff)
+        pause_cfg = self.config.get("thermal_pause", {})
+        self.thermal_pause_initial_seconds = int(pause_cfg.get("initial_seconds", 60))
+        self.thermal_pause_max_seconds = int(pause_cfg.get("max_seconds", 600))
+        self.thermal_pause_backoff_factor = float(pause_cfg.get("backoff_factor", 2.0))
+        self.thermal_resume_margin_c = int(pause_cfg.get("resume_margin_c", 3))
 
         # Set CUDA device for this process and all children
         os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
@@ -376,7 +387,13 @@ class GPUAgent:
             # Initial pull/load request (can block while weights are loaded)
             response = requests.post(
                 self.api_url,
-                json={"model": self.model, "prompt": "Hello", "stream": False},
+                json={
+                    "model": self.model,
+                    "prompt": "Hello",
+                    "stream": False,
+                    "keep_alive": self.worker_keep_alive,
+                    "options": {"num_gpu": 1}
+                },
                 timeout=600
             )
             response.raise_for_status()
@@ -414,7 +431,8 @@ class GPUAgent:
                         "model": self.model,
                         "prompt": "READY?",
                         "stream": False,
-                        "options": {"num_predict": 4}
+                        "keep_alive": self.worker_keep_alive,
+                        "options": {"num_predict": 4, "num_gpu": 1}
                     },
                     timeout=30
                 )
@@ -428,6 +446,32 @@ class GPUAgent:
             time.sleep(2)
 
         self.logger.warning(f"Model readiness probe failed/timed out: {last_error}")
+        return False
+
+    def _wait_for_model_unloaded(self, max_wait_seconds: int = 30) -> bool:
+        """Poll Ollama until this model no longer appears as loaded."""
+        if not self.port:
+            return True
+
+        ps_url = f"http://localhost:{self.port}/api/ps"
+        deadline = time.time() + max_wait_seconds
+        last_error = ""
+
+        while time.time() < deadline:
+            try:
+                r = requests.get(ps_url, timeout=5)
+                if r.status_code == 200:
+                    models = r.json().get("models", [])
+                    loaded_names = [m.get("name", "") for m in models]
+                    if self.model not in loaded_names:
+                        return True
+                else:
+                    last_error = f"status={r.status_code}"
+            except Exception as e:
+                last_error = str(e)
+            time.sleep(1)
+
+        self.logger.warning(f"Model unload verify timed out: {last_error}")
         return False
 
     def unload_model(self):
@@ -455,10 +499,14 @@ class GPUAgent:
                 )
 
                 if response.status_code == 200:
-                    self.model_loaded = False
-                    self.state = "cold"
-                    self.logger.info("Model unloaded - GPU is now COLD")
-                    return
+                    if self._wait_for_model_unloaded(max_wait_seconds=30):
+                        self.model_loaded = False
+                        self.state = "cold"
+                        self.logger.info("Model unloaded - GPU is now COLD")
+                        return
+                    self.logger.warning(
+                        f"Unload attempt {attempt}/{max_retries} did not verify model removal"
+                    )
                 else:
                     self.logger.warning(
                         f"Unload attempt {attempt}/{max_retries} returned "
@@ -601,6 +649,137 @@ class GPUAgent:
         self.running = False
         return False
 
+    def _pause_worker_processes(self):
+        """Pause all active worker subprocesses (best-effort)."""
+        paused = 0
+        for worker_id, info in self.active_workers.items():
+            proc = info["process"]
+            if proc.poll() is None and not info.get("paused", False):
+                try:
+                    os.kill(proc.pid, signal.SIGSTOP)
+                    info["paused"] = True
+                    paused += 1
+                    self.logger.warning(
+                        f"THERMAL_PAUSE_WORKER: paused {worker_id} pid={proc.pid} "
+                        f"task={info['task']['task_id'][:8]}"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to pause worker {worker_id}: {e}")
+        return paused
+
+    def _resume_worker_processes(self):
+        """Resume all paused worker subprocesses (best-effort)."""
+        resumed = 0
+        for worker_id, info in self.active_workers.items():
+            proc = info["process"]
+            if proc.poll() is None and info.get("paused", False):
+                try:
+                    os.kill(proc.pid, signal.SIGCONT)
+                    info["paused"] = False
+                    resumed += 1
+                    self.logger.info(
+                        f"THERMAL_RESUME_WORKER: resumed {worker_id} pid={proc.pid} "
+                        f"task={info['task']['task_id'][:8]}"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to resume worker {worker_id}: {e}")
+        return resumed
+
+    def _temps_below_resume_threshold(self, gpu_stats: Dict) -> bool:
+        """Require temps below warning-minus-margin to avoid pause flapping."""
+        gpu_warn = self.resource_limits.get("gpu_temp_warning_c", self.resource_limits["max_temp_c"])
+        cpu_warn = self.resource_limits.get("cpu_temp_warning_c", 80)
+        gpu_limit = max(0, gpu_warn - self.thermal_resume_margin_c)
+        cpu_limit = max(0, cpu_warn - self.thermal_resume_margin_c)
+
+        gpu_ok = gpu_stats["temperature_c"] < gpu_limit
+        cpu_temp = self._get_cpu_temp()
+        cpu_ok = True if cpu_temp is None else (cpu_temp < cpu_limit)
+        return gpu_ok and cpu_ok
+
+    def _update_thermal_pause_state(self, gpu_stats: Dict):
+        """Manage warning-level thermal pause with exponential backoff and logs."""
+        constrained, reasons = self._is_resource_constrained(gpu_stats)
+        now = time.time()
+        active_task_ids = [info["task"]["task_id"][:8] for info in self.active_workers.values()]
+
+        if constrained:
+            self.thermal_pause_reasons = reasons.copy()
+            if not self.thermal_pause_active:
+                self.thermal_pause_active = True
+                self.thermal_pause_attempts = 1
+                self.thermal_pause_current_seconds = self.thermal_pause_initial_seconds
+                self.thermal_pause_until = now + self.thermal_pause_current_seconds
+                paused = self._pause_worker_processes()
+                self.last_thermal_event = {
+                    "timestamp": datetime.now().isoformat(),
+                    "event": "pause_entered",
+                    "reasons": reasons.copy(),
+                    "pause_seconds": self.thermal_pause_current_seconds,
+                    "pause_attempt": self.thermal_pause_attempts,
+                    "active_task_ids": active_task_ids,
+                }
+                self.logger.warning(
+                    f"THERMAL_PAUSE_ENTER: reasons={reasons} pause={self.thermal_pause_current_seconds}s "
+                    f"paused_workers={paused} active_task_ids={active_task_ids or ['none']}"
+                )
+            elif now >= self.thermal_pause_until:
+                self.thermal_pause_attempts += 1
+                next_pause = int(self.thermal_pause_current_seconds * self.thermal_pause_backoff_factor)
+                self.thermal_pause_current_seconds = min(self.thermal_pause_max_seconds, max(1, next_pause))
+                self.thermal_pause_until = now + self.thermal_pause_current_seconds
+                paused = self._pause_worker_processes()
+                self.last_thermal_event = {
+                    "timestamp": datetime.now().isoformat(),
+                    "event": "pause_extended",
+                    "reasons": reasons.copy(),
+                    "pause_seconds": self.thermal_pause_current_seconds,
+                    "pause_attempt": self.thermal_pause_attempts,
+                    "active_task_ids": active_task_ids,
+                }
+                self.logger.warning(
+                    f"THERMAL_PAUSE_EXTEND: reasons={reasons} pause={self.thermal_pause_current_seconds}s "
+                    f"attempt={self.thermal_pause_attempts} paused_workers={paused} "
+                    f"active_task_ids={active_task_ids or ['none']}"
+                )
+            return
+
+        if self.thermal_pause_active and now >= self.thermal_pause_until:
+            if self._temps_below_resume_threshold(gpu_stats):
+                resumed = self._resume_worker_processes()
+                self.thermal_pause_active = False
+                self.thermal_pause_reasons = []
+                self.thermal_pause_until = 0.0
+                self.thermal_pause_current_seconds = 0
+                self.thermal_pause_attempts = 0
+                self.last_thermal_event = {
+                    "timestamp": datetime.now().isoformat(),
+                    "event": "pause_cleared",
+                    "reasons": [],
+                    "active_task_ids": active_task_ids,
+                }
+                self.logger.info(
+                    f"THERMAL_PAUSE_EXIT: resumed_workers={resumed} active_task_ids={active_task_ids or ['none']}"
+                )
+            else:
+                self.thermal_pause_attempts += 1
+                next_pause = int(self.thermal_pause_current_seconds * self.thermal_pause_backoff_factor)
+                self.thermal_pause_current_seconds = min(self.thermal_pause_max_seconds, max(1, next_pause))
+                self.thermal_pause_until = now + self.thermal_pause_current_seconds
+                self.last_thermal_event = {
+                    "timestamp": datetime.now().isoformat(),
+                    "event": "pause_hold_hot",
+                    "reasons": self.thermal_pause_reasons.copy(),
+                    "pause_seconds": self.thermal_pause_current_seconds,
+                    "pause_attempt": self.thermal_pause_attempts,
+                    "active_task_ids": active_task_ids,
+                }
+                self.logger.warning(
+                    f"THERMAL_PAUSE_HOLD: temp recovery threshold not met, "
+                    f"extending pause to {self.thermal_pause_current_seconds}s "
+                    f"attempt={self.thermal_pause_attempts}"
+                )
+
     # =========================================================================
     # VRAM Budget
     # =========================================================================
@@ -638,41 +817,39 @@ class GPUAgent:
         """
         if not self.ollama_healthy:
             self.logger.debug("Ollama unhealthy - excluding LLM tasks from claim")
-            return ['meta', 'script', 'cpu']
+            return ['meta', 'script']
         if self.state == "hot":
-            return ['meta', 'llm', 'cpu']
-        else:
-            # Cold GPUs should focus on script/cpu until a load_llm task
-            # explicitly transitions them to hot.
-            return ['meta', 'script', 'cpu']
+            return ['meta', 'llm']
+        # Cold GPUs should focus on script/cpu until a load_llm task
+        # explicitly transitions them to hot.
+        return ['meta', 'script']
+
+    def _can_claim_meta_task(self, task: Dict) -> bool:
+        """Enforce hot/cold ownership rules for meta tasks."""
+        command = task.get("command", "")
+        if command == "load_llm":
+            # Only cold workers should claim load commands.
+            return not self.model_loaded
+        if command == "unload_llm":
+            # Only hot workers should claim unload commands.
+            return self.model_loaded
+        # Unknown meta command: allow claim so it can fail explicitly.
+        return True
 
     def claim_tasks(self) -> List[Dict]:
         """
         Visit the board: claim as many tasks as fit within VRAM budget.
         Returns list of claimed tasks.
         """
-        gpu_stats = self._get_gpu_stats()
-        constrained, reasons = self._is_resource_constrained(gpu_stats)
-
-        if constrained:
-            self.thermal_pause_active = True
-            self.thermal_pause_reasons = reasons.copy()
-            active_task_ids = [
-                info["task"]["task_id"][:8] for info in self.active_workers.values()
-            ]
+        if self.thermal_pause_active:
+            remaining = max(0, int(self.thermal_pause_until - time.time()))
             self.logger.warning(
-                f"TASKS_THERMAL_PAUSED: {', '.join(reasons)} - only claiming meta/cpu. "
-                f"active_task_ids={active_task_ids or ['none']}"
+                f"TASKS_THERMAL_PAUSED: skip claiming new work for {remaining}s "
+                f"reasons={self.thermal_pause_reasons}"
             )
-            preferred = ['meta', 'cpu']
-        else:
-            if self.thermal_pause_active:
-                self.logger.info(
-                    "TASKS_THERMAL_RESUMED: constraints cleared, normal claiming restored"
-                )
-            self.thermal_pause_active = False
-            self.thermal_pause_reasons = []
-            preferred = self._get_preferred_classes()
+            return []
+
+        preferred = self._get_preferred_classes()
 
         # Categorize available tasks
         tasks_by_class = {tc: [] for tc in VALID_TASK_CLASSES}
@@ -719,6 +896,26 @@ class GPUAgent:
 
                     # Meta tasks: handle directly, don't spawn worker
                     if task_class == "meta":
+                        if not self._can_claim_meta_task(task):
+                            self.logger.debug(
+                                f"Skipping meta task {task['task_id'][:8]} ({task.get('command')}): "
+                                f"state={self.state}, model_loaded={self.model_loaded}"
+                            )
+                            continue
+                        # Keep attempt bookkeeping consistent with worker-claimed tasks.
+                        task["attempts"] = task.get("attempts", 0) + 1
+                        task["workers_attempted"] = task.get("workers_attempted", [])
+                        task["workers_attempted"].append(self.name)
+                        task["last_attempt_at"] = datetime.now().isoformat()
+                        if not task.get("first_attempted_at"):
+                            task["first_attempted_at"] = task["last_attempt_at"]
+                        task["status"] = "processing"
+                        task["assigned_to"] = self.name
+                        task["started_at"] = task["last_attempt_at"]
+                        # Keep meta tasks visible in processing/ for observability.
+                        new_path = self.processing_path / task_file.name
+                        with open(new_path, 'w') as f:
+                            json.dump(task, f, indent=2)
                         task_file.unlink()
                         claimed.append(task)
                         continue
@@ -808,6 +1005,10 @@ class GPUAgent:
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
+        # Ensure script-style worker tasks can self-identify and self-route.
+        env["WORKER_NAME"] = self.name
+        if self.port:
+            env["WORKER_OLLAMA_URL"] = f"http://localhost:{self.port}"
 
         proc = subprocess.Popen(
             worker_cmd,
@@ -824,6 +1025,7 @@ class GPUAgent:
             "pid": proc.pid,
             "started_at": time.time(),
             "peak_vram_mb": 0,
+            "paused": False,
         }
 
         self.logger.info(
@@ -1011,6 +1213,10 @@ class GPUAgent:
             "thermal_reasons": constrained_reasons,
             "thermal_pause_active": self.thermal_pause_active,
             "thermal_pause_reasons": self.thermal_pause_reasons,
+            "thermal_pause_until": datetime.fromtimestamp(self.thermal_pause_until).isoformat() if self.thermal_pause_until else None,
+            "thermal_pause_remaining_seconds": max(0, int(self.thermal_pause_until - time.time())) if self.thermal_pause_active else 0,
+            "thermal_pause_current_seconds": self.thermal_pause_current_seconds,
+            "thermal_pause_attempts": self.thermal_pause_attempts,
             "last_thermal_event": self.last_thermal_event,
             "stats": self.stats,
         }
@@ -1193,6 +1399,7 @@ class GPUAgent:
 
                 # Thermal safety check every internal tick
                 gpu_stats_check = self._get_gpu_stats()
+                self._update_thermal_pause_state(gpu_stats_check)
                 if not self._check_thermal_safety(gpu_stats_check):
                     break
 

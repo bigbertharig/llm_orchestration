@@ -223,7 +223,7 @@ def build_config(assignment, ollama, system):
         "timeouts": {
             "poll_interval_seconds": 5,
             "brain_think_seconds": 120,
-            "worker_task_seconds": 120,
+            "worker_task_seconds": 0,
         },
         "resource_limits": {
             "max_temp_c": 80,

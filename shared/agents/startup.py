@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from hardware import scan_gpus, scan_ollama
+from hardware import scan_gpus, scan_ollama, scan_cpu_temps
 
 # =============================================================================
 # Tunable wait times (seconds)
@@ -113,6 +113,70 @@ def _is_port_open(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.5)
         return sock.connect_ex((host, port)) == 0
+
+
+def _get_max_cpu_temp_c() -> int | None:
+    """Return max live CPU temperature in C, or None when unavailable."""
+    try:
+        temps = scan_cpu_temps()
+        if not temps:
+            return None
+        return max(t["temp_c"] for t in temps)
+    except Exception:
+        return None
+
+
+def _wait_for_cpu_cooldown(config: dict, max_wait_seconds: int = 600) -> bool:
+    """Block startup until CPU temp is below warning threshold.
+
+    Returns True when startup can continue, False if cooldown timed out.
+    """
+    cpu_warn = config.get("resource_limits", {}).get("cpu_temp_warning_c", 80)
+    interval = 5
+    waited = 0
+
+    while waited <= max_wait_seconds:
+        cpu_temp = _get_max_cpu_temp_c()
+        if cpu_temp is None:
+            print("CPU temp preflight: unavailable (continuing)")
+            return True
+        if cpu_temp < cpu_warn:
+            print(f"CPU temp preflight: {cpu_temp}C (< {cpu_warn}C) OK")
+            return True
+
+        print(
+            f"CPU temp preflight: {cpu_temp}C >= {cpu_warn}C "
+            f"(cooldown {waited}s/{max_wait_seconds}s)"
+        )
+        time.sleep(interval)
+        waited += interval
+
+    return False
+
+
+def _clear_stale_heartbeats(shared_path: Path, worker_gpus: list):
+    """Remove stale GPU/task heartbeat files so startup reflects live state."""
+    removed = 0
+    for gpu_cfg in worker_gpus:
+        hb = shared_path / "gpus" / f"gpu_{gpu_cfg['id']}" / "heartbeat.json"
+        if hb.exists():
+            try:
+                hb.unlink()
+                removed += 1
+            except OSError:
+                pass
+
+    processing_dir = shared_path / "tasks" / "processing"
+    if processing_dir.exists():
+        for hb in processing_dir.glob("*.heartbeat.json"):
+            try:
+                hb.unlink()
+                removed += 1
+            except OSError:
+                pass
+
+    if removed:
+        print(f"Cleared {removed} stale heartbeat file(s) before startup")
 
 
 def _reclaim_worker_port(port: int, gpu_name: str):
@@ -425,15 +489,21 @@ def main():
     signal.signal(signal.SIGTERM, cleanup)
 
     # Verify hardware
-    print("\nVerifying hardware...")
+    print("\nVerifying hardware and thermal state...")
     ollama_host = config.get("ollama_host", "http://localhost:11434")
     actual_gpus = scan_gpus()
     ollama = scan_ollama(ollama_host)
+    cpu_temp = _get_max_cpu_temp_c()
+    gpu_temp_max = max((g.get("temp_c", 0) for g in actual_gpus), default=None)
 
     expected_gpu_count = len(config["brain"]["gpus"]) + len(
         config.get("gpus", [])
     )
     print(f"  Expected {expected_gpu_count} GPUs — found {len(actual_gpus)}")
+    if cpu_temp is not None:
+        print(f"  CPU temp (live): {cpu_temp}C")
+    if gpu_temp_max is not None:
+        print(f"  Max GPU temp (live): {gpu_temp_max}C")
 
     hw = verify_hardware(config, actual_gpus, ollama)
 
@@ -442,6 +512,23 @@ def main():
         print("  Re-run 'python setup.py' to reconfigure.")
         remove_launch_lock()
         sys.exit(1)
+
+    # Startup thermal gate: require live temps to be below warning threshold
+    # before loading/reusing models or launching agents.
+    cooldown_ok = _wait_for_cpu_cooldown(config, max_wait_seconds=600)
+    if not cooldown_ok:
+        cpu_warn = config.get("resource_limits", {}).get("cpu_temp_warning_c", 80)
+        cpu_now = _get_max_cpu_temp_c()
+        print(
+            f"\nERROR: CPU temperature preflight did not cool below "
+            f"{cpu_warn}C within 600s (current: {cpu_now}C)."
+        )
+        print("  Fix cooling/airflow before restart, then retry startup.")
+        remove_launch_lock()
+        sys.exit(1)
+
+    # Fresh startup status baseline: clear stale heartbeat snapshots from old runs.
+    _clear_stale_heartbeats(Path(config["shared_path"]), hw["available_workers"])
 
     clear_ready_flags()
 

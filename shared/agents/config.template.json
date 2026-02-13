@@ -11,6 +11,8 @@
   "shared_path": "../",
   "permissions_path": "permissions/",
   "ollama_host": "http://localhost:11434",
+  "brain_keep_alive": "30m",
+  "worker_keep_alive": "30m",
 
   "brain": {
     "name": "brain",
@@ -47,11 +49,12 @@
 
   "worker_mode": "cold",
   "initial_hot_workers": 1,
+  "max_hot_workers": 4,
 
   "timeouts": {
     "poll_interval_seconds": 5,
     "brain_think_seconds": 120,
-    "worker_task_seconds": 120
+    "worker_task_seconds": 0
   },
 
   "resource_limits": {
@@ -66,5 +69,12 @@
 
   "retry_policy": {
     "max_attempts": 3
+  },
+
+  "thermal_pause": {
+    "initial_seconds": 60,
+    "max_seconds": 600,
+    "backoff_factor": 2.0,
+    "resume_margin_c": 3
   }
 }

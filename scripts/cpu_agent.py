@@ -12,6 +12,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -31,6 +32,7 @@ for candidate in AGENTS_DIR_CANDIDATES:
         sys.path.insert(0, str(candidate))
 
 from executor import PermissionExecutor  # noqa: E402
+from hardware import scan_cpu_temps  # noqa: E402
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -76,6 +78,16 @@ class CpuAgent:
             self.poll_interval = 5
         self.worker_timeout = int(self.config.get("timeouts", {}).get("worker_task_seconds", 0))
         self.worker_timeout = None if self.worker_timeout <= 0 else self.worker_timeout
+        self.resource_limits = self.config.get("resource_limits", {})
+        cpu_agent_limits = self.config.get("cpu_agent", {}).get("resource_limits", {})
+        effective_cpu_limits = dict(self.resource_limits)
+        effective_cpu_limits.update(cpu_agent_limits)
+        self.cpu_temp_warning_c = int(effective_cpu_limits.get("cpu_temp_warning_c", 80))
+        self.cpu_temp_critical_c = int(effective_cpu_limits.get("cpu_temp_critical_c", 95))
+        pause_cfg = self.config.get("thermal_pause", {})
+        self.thermal_resume_margin_c = int(pause_cfg.get("resume_margin_c", 3))
+        self.thermal_pause_active = False
+        self.thermal_pause_reason: str | None = None
 
         # Runtime baseline for command execution.
         self.venv_activate = (
@@ -98,8 +110,8 @@ class CpuAgent:
 
     def _pick_default_venv_activate(self) -> str | None:
         candidates = [
-            "/opt/worker-env/bin/activate",   # research_assistant cpu worker image default
             "/home/bryan/ml-env/bin/activate",
+            "/opt/worker-env/bin/activate",   # fallback when user env is absent
         ]
         for p in candidates:
             if Path(p).exists():
@@ -108,7 +120,7 @@ class CpuAgent:
 
     def _detect_ip_address(self) -> str | None:
         # Prefer the route-address used on the worker LAN over localhost aliases.
-        targets = [("10.0.0.2", 2049), ("10.0.0.1", 53), ("8.8.8.8", 53)]
+        targets = [("10.0.0.2", 2049), ("10.0.0.3", 22), ("10.0.0.1", 53)]
         for host, port in targets:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -123,6 +135,15 @@ class CpuAgent:
 
     def _normalize_command(self, command: str) -> str:
         fixed = command
+
+        # Remove task-authored venv activation segments.
+        # CPU agent applies one explicit baseline env for consistency.
+        source_pattern = re.compile(r"^source\s+\S+/bin/activate\s*&&\s*")
+        while True:
+            m = source_pattern.match(fixed)
+            if not m:
+                break
+            fixed = fixed[m.end():]
 
         # Prefer python3 for portability.
         if "python " in fixed and "python3 " not in fixed:
@@ -163,6 +184,8 @@ class CpuAgent:
         self.cpu_heartbeat_path.mkdir(parents=True, exist_ok=True)
         self.unified_heartbeat_path.mkdir(parents=True, exist_ok=True)
         ip_addr = self._detect_ip_address()
+        cpu_temp = self._get_cpu_temp()
+        pi_throttled, pi_reason = self._get_pi_throttled_status()
         hb = {
             "worker_type": "cpu",
             "name": self.agent_name,
@@ -173,6 +196,11 @@ class CpuAgent:
             "active_task_started_at": self._active_task_started_at,
             "active_task_pid": self._active_task_pid,
             "last_updated": datetime.now().isoformat(),
+            "cpu_temp_c": cpu_temp,
+            "pi_throttled_now": pi_throttled,
+            "pi_throttle_reason": pi_reason,
+            "thermal_pause_active": self.thermal_pause_active,
+            "thermal_pause_reason": self.thermal_pause_reason,
             "queue_path": str(self.queue_path),
             "processing_path": str(self.processing_path),
             "stats": {
@@ -182,6 +210,70 @@ class CpuAgent:
         }
         _write_json(self.cpu_heartbeat_file, hb)
         _write_json(self.unified_heartbeat_file, hb)
+
+    def _get_cpu_temp(self) -> int | None:
+        try:
+            temps = scan_cpu_temps()
+        except Exception:
+            return None
+        values = [int(t.get("temp_c")) for t in temps if isinstance(t.get("temp_c"), (int, float))]
+        return max(values) if values else None
+
+    def _get_pi_throttled_status(self) -> tuple[bool, str | None]:
+        try:
+            out = subprocess.run(
+                ["vcgencmd", "get_throttled"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (FileNotFoundError, PermissionError, subprocess.SubprocessError):
+            return False, None
+
+        if out.returncode != 0:
+            return False, None
+
+        m = re.search(r"throttled=(0x[0-9a-fA-F]+)", out.stdout.strip())
+        if not m:
+            return False, None
+
+        raw_hex = m.group(1)
+        try:
+            flags = int(raw_hex, 16)
+        except ValueError:
+            return False, None
+
+        if flags == 0:
+            return False, None
+
+        now_flags = {
+            0: "under_voltage_now",
+            1: "freq_capped_now",
+            2: "throttled_now",
+            3: "soft_temp_limit_now",
+        }
+        active_now = [name for bit, name in now_flags.items() if flags & (1 << bit)]
+        if active_now:
+            return True, f"Pi throttling active: {','.join(active_now)} ({raw_hex})"
+        return False, None
+
+    def _thermal_pause_check(self) -> tuple[bool, int | None, str | None]:
+        temp = self._get_cpu_temp()
+        pi_throttled, pi_reason = self._get_pi_throttled_status()
+        if pi_throttled:
+            return True, temp, pi_reason
+        if temp is None:
+            return False, None, None
+
+        if temp >= self.cpu_temp_critical_c:
+            return True, temp, f"CPU {temp}C >= critical {self.cpu_temp_critical_c}C"
+        if temp >= self.cpu_temp_warning_c:
+            return True, temp, f"CPU {temp}C >= warning {self.cpu_temp_warning_c}C"
+
+        resume_limit = max(0, self.cpu_temp_warning_c - self.thermal_resume_margin_c)
+        if self.thermal_pause_active and temp >= resume_limit:
+            return True, temp, f"CPU {temp}C >= resume_limit {resume_limit}C"
+        return False, temp, None
 
     def _preflight(self) -> None:
         required = [
@@ -307,6 +399,26 @@ class CpuAgent:
         )
         self._write_cpu_heartbeat(state="idle")
         while True:
+            blocked, temp, reason = self._thermal_pause_check()
+            if blocked:
+                if not self.thermal_pause_active or reason != self.thermal_pause_reason:
+                    self._log(f"thermal throttle active: {reason}")
+                self.thermal_pause_active = True
+                self.thermal_pause_reason = reason
+                self._write_cpu_heartbeat(state="thermal_pause")
+                if self.once:
+                    self._log("stopping in once mode due to thermal throttle")
+                    return 2
+                time.sleep(self.poll_interval)
+                continue
+            if self.thermal_pause_active:
+                self._log(
+                    f"thermal throttle cleared: cpu_temp={temp}C "
+                    f"(resume margin {self.thermal_resume_margin_c}C)"
+                )
+            self.thermal_pause_active = False
+            self.thermal_pause_reason = None
+
             task = self._claim_one_task()
             if not task:
                 self._write_cpu_heartbeat(state="idle")
