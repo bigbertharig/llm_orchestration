@@ -100,6 +100,34 @@ ls shared/tasks/processing/  # being worked on
 ls shared/tasks/complete/    # finished
 ```
 
+### Web Dashboard
+
+```bash
+/media/bryan/shared/scripts/start_dashboard.sh
+```
+
+- Dashboard: `http://127.0.0.1:8787/`
+- Controls: `http://127.0.0.1:8787/controls`
+- Refresh interval: 2 seconds
+- Lane tables show active-batch tasks (queue/processing/private/complete/failed) to avoid historical noise
+
+Controls page actions:
+- `Kill Plan` - remove a running batch from queue/processing/private and terminate its active work
+- `Return To Default` - restart to one startup owner (`startup.py`) and reclaim duplicate/orphan agents
+- `Start Plan` - submit selected plan using config JSON templates and parsed input option hints from `plan.md`
+
+Input hints are shown next to plan settings (key, description, options) so operators can choose valid config values quickly.
+
+### Archive Old Task Files
+
+```bash
+python ~/llm_orchestration/scripts/archive_tasks.py
+```
+
+- Moves old `tasks/complete` and `tasks/failed` entries into `tasks/archive/<batch_id>/...`
+- Unbatched files are archived under `_unbatched` instead of being skipped
+- Keeps active lanes cleaner for dashboard and troubleshooting
+
 ---
 
 ## Killing a Running Plan

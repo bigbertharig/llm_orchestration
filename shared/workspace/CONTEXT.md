@@ -265,12 +265,19 @@ Why: Backwards compatibility creates technical debt, confusing code paths, and d
 - Auto batch summary task (depends on all other tasks)
 - Variable substitution in commands ({BATCH_ID}, {PLAN_PATH}, {BATCH_PATH})
 - Launch singleton lock and model preload detection
+- Brain singleton lock (`brain_agent.lock`) prevents multiple brain instances from running concurrently
 - Generic hardware discovery (`hardware.py`): scans GPUs, Ollama models, system resources
 - Interactive setup (`setup.py`): auto-suggests brain/worker GPU assignment, writes config.json
 - Non-interactive startup (`startup.py`): hardware verification, degraded mode (missing GPU tolerance)
 - Smart GPU assignment: cpu_only / single_gpu / minimal / standard modes, brain GPU pairing
 - Dynamic VRAM: per-GPU vram_mb from config with nvidia-smi fallback (no more hardcoded constants)
 - Worker mode preference: hot (preload LLMs) or cold (empty GPUs for compute)
+- Local web dashboard (`scripts/dashboard.py`) with:
+  - Active batch/task lane visibility (queue/processing/private/complete/failed)
+  - Brain GPU + worker heartbeat/temperature/utilization views
+  - Dependency chain table with collapse + pagination
+  - Controls page for kill plan, return default, and start plan operations
+- Task archive utility (`scripts/archive_tasks.py`) to move historical complete/failed files into batch folders
 
 **Security:**
 - Protected core/ directory (root-owned, chmod 644) for agent system prompts and rules
