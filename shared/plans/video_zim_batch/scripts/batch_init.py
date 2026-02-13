@@ -27,7 +27,7 @@ from batch_logger import BatchLogger
 
 def init_batch(zim_path: str, source_id: str, output_folder: str,
                chunk_duration: float = 60.0, skip_llm: bool = False,
-               batch_id: str = None) -> dict:
+               batch_id: str = None, run_mode: str = "fresh") -> dict:
     """
     Initialize a batch processing run.
 
@@ -39,6 +39,25 @@ def init_batch(zim_path: str, source_id: str, output_folder: str,
     # Create batch directory structure
     plan_dir = Path(__file__).parent.parent
     batch_dir = plan_dir / "history" / batch_id
+    manifest_path = batch_dir / "manifest.json"
+
+    # Resume mode: require existing manifest and never overwrite it.
+    if run_mode == "resume":
+        if not manifest_path.exists():
+            raise FileNotFoundError(
+                f"Resume requested but manifest missing: {manifest_path}"
+            )
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        print(f"[batch_init] Resume mode: using existing batch {batch_id}")
+        print(f"[batch_init] Manifest preserved: {manifest_path}")
+        return manifest
+
+    # Fresh mode safety: do not overwrite existing manifest.
+    if manifest_path.exists():
+        raise FileExistsError(
+            f"Fresh run would overwrite existing manifest: {manifest_path}"
+        )
 
     (batch_dir / "transcripts").mkdir(parents=True, exist_ok=True)
     (batch_dir / "output").mkdir(parents=True, exist_ok=True)
@@ -114,7 +133,6 @@ def init_batch(zim_path: str, source_id: str, output_folder: str,
     }
 
     # Save manifest
-    manifest_path = batch_dir / "manifest.json"
     with open(manifest_path, 'w') as f:
         json.dump(manifest, f, indent=2)
 
@@ -151,6 +169,8 @@ def main():
     parser.add_argument("--source-id", required=True, help="Source identifier")
     parser.add_argument("--output", required=True, help="Output folder for final files")
     parser.add_argument("--batch-id", help="Batch ID (auto-generated if not provided)")
+    parser.add_argument("--run-mode", choices=["fresh", "resume"], default="fresh",
+                        help="Execution mode: fresh creates new state, resume keeps existing state")
     parser.add_argument("--chunk-duration", type=float, default=60.0,
                         help="Segment duration in seconds (default: 60)")
     parser.add_argument("--skip-llm", action="store_true",
@@ -173,7 +193,8 @@ def main():
         output_folder=args.output,
         chunk_duration=args.chunk_duration,
         skip_llm=args.skip_llm,
-        batch_id=args.batch_id
+        batch_id=args.batch_id,
+        run_mode=args.run_mode
     )
 
     return manifest

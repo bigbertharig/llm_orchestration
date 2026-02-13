@@ -117,6 +117,7 @@ Define tasks with explicit dependencies. The brain parses this section directly.
 ### process
 - **executor**: worker
 - **task_class**: script
+- **vram_policy**: infer
 - **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/process_script.py --batch-id {BATCH_ID}`
 - **depends_on**: init
 
@@ -145,6 +146,8 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 - **depends_on**: task1, task2
 - **foreach**: {BATCH_PATH}/manifest.json:items  (optional)
 - **batch_size**: 4  (optional, foreach only)
+- **vram_policy**: default|infer|fixed  (optional, script tasks)
+- **vram_estimate_mb**: 2400  (optional, script tasks)
 ```
 
 | Field | Values | Description |
@@ -156,6 +159,8 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 | `depends_on` | Comma-separated task IDs or `none` | Tasks that must complete first |
 | `foreach` | `path:jsonpath` | **Optional.** Expand to N tasks (see Foreach Expansion below) |
 | `batch_size` | Integer >= 1 | **Optional.** Group foreach items into micro-batch tasks (default `1`) |
+| `vram_policy` | `default`, `infer`, `fixed` | **Optional (script).** How brain sets script VRAM estimate |
+| `vram_estimate_mb` | Integer MB | **Optional (script).** Explicit VRAM estimate used when `fixed` |
 
 **Important:** All fields except `foreach` are required. If `task_class` is missing, the task goes to `failed/` immediately. The brain will attempt to auto-fix by inferring the class from command keywords, but plans should always specify it explicitly.
 
@@ -183,6 +188,13 @@ Workers prioritize tasks they're optimized for:
 ### VRAM Estimation (Script Tasks)
 
 **Priority: Script tasks are the focus for VRAM optimization.**
+
+**Policy options (per task):**
+- `default`: no explicit estimate is attached; workers use their script default
+- `infer`: brain LLM infers one estimate once per task definition, then applies it to all expanded tasks
+- `fixed`: planner provides explicit `vram_estimate_mb`, which brain passes through directly
+
+For `task_class: script`, omitted `vram_policy` defaults to `infer`.
 
 When documenting scripts in the `## Available Scripts` section, include a `VRAM estimate` field for GPU-based scripts. This helps the brain allocate tasks efficiently and enables workers to claim multiple script tasks concurrently if VRAM allows.
 
@@ -472,6 +484,7 @@ Process a folder of input files, transform each one, and combine results into a 
 ### process
 - **executor**: worker
 - **task_class**: cpu
+- **vram_policy**: infer
 - **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/process.py --batch-id {BATCH_ID}`
 - **depends_on**: scan
 
@@ -543,6 +556,8 @@ Generate vector embeddings for a set of text documents.
 ### embed
 - **executor**: worker
 - **task_class**: script
+- **vram_policy**: fixed
+- **vram_estimate_mb**: 500
 - **command**: `export LD_LIBRARY_PATH="$HOME/ml-env/lib/python3.13/site-packages/nvidia/cublas/lib:$HOME/ml-env/lib/python3.13/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH" && source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/embed.py --batch-id {BATCH_ID}`
 - **depends_on**: init
 

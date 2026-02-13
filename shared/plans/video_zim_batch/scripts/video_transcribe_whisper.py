@@ -38,6 +38,38 @@ from transcriber import transcribe_with_timestamps, group_into_chunks
 from batch_logger import BatchLogger
 
 
+def recompute_manifest_stats(manifest: dict) -> None:
+    """Rebuild stats from current video statuses to prevent counter drift."""
+    videos = manifest.get("videos", [])
+    stats = manifest.get("stats", {})
+    total_duration = sum(v.get("duration", 0) or 0 for v in videos)
+
+    rebuilt = {
+        "total_videos": len(videos),
+        "total_duration_sec": total_duration,
+        "pending": 0,
+        "processing": 0,
+        "complete": 0,
+        "failed": 0,
+        "transcribing": 0,
+        "transcribed": 0,
+        "adding_topics": 0
+    }
+
+    for video in videos:
+        status = video.get("status", "pending")
+        if status in rebuilt:
+            rebuilt[status] += 1
+        elif status == "processing":
+            rebuilt["processing"] += 1
+        else:
+            # Unknown statuses are treated as pending for safety.
+            rebuilt["pending"] += 1
+
+    stats.update(rebuilt)
+    manifest["stats"] = stats
+
+
 def update_manifest_status(manifest_path: Path, video_id: str, status: str,
                            worker_id: str = None, error: str = None):
     """Update video status in manifest (with file locking)."""
@@ -49,27 +81,24 @@ def update_manifest_status(manifest_path: Path, video_id: str, status: str,
 
         for video in manifest["videos"]:
             if video["id"] == video_id:
-                old_status = video["status"]
+                old_status = video.get("status")
+                if old_status == status:
+                    break
                 video["status"] = status
 
                 if status == "transcribing":
                     video["worker"] = worker_id
                     video["started_at"] = datetime.now().isoformat()
-                    if old_status == "pending":
-                        manifest["stats"]["pending"] -= 1
-                        manifest["stats"]["transcribing"] = manifest["stats"].get("transcribing", 0) + 1
                 elif status == "transcribed":
                     video["transcribed_at"] = datetime.now().isoformat()
-                    manifest["stats"]["transcribing"] = manifest["stats"].get("transcribing", 1) - 1
-                    manifest["stats"]["transcribed"] = manifest["stats"].get("transcribed", 0) + 1
+                    video["error"] = None
                 elif status == "failed":
                     video["completed_at"] = datetime.now().isoformat()
                     video["error"] = error
-                    if old_status == "transcribing":
-                        manifest["stats"]["transcribing"] = manifest["stats"].get("transcribing", 1) - 1
-                    manifest["stats"]["failed"] = manifest["stats"].get("failed", 0) + 1
 
                 break
+
+        recompute_manifest_stats(manifest)
 
         with open(manifest_path, 'w') as f:
             json.dump(manifest, f, indent=2)

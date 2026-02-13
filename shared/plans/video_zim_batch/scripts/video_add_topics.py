@@ -14,6 +14,7 @@ Uses WORKER_OLLAMA_URL environment variable (set by worker.py).
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -25,6 +26,38 @@ LIB_PATH = Path(__file__).parent.parent / "lib"
 sys.path.insert(0, str(LIB_PATH))
 
 from batch_logger import BatchLogger
+
+
+def recompute_manifest_stats(manifest: dict) -> None:
+    """Rebuild stats from current video statuses to prevent counter drift."""
+    videos = manifest.get("videos", [])
+    stats = manifest.get("stats", {})
+    total_duration = sum(v.get("duration", 0) or 0 for v in videos)
+
+    rebuilt = {
+        "total_videos": len(videos),
+        "total_duration_sec": total_duration,
+        "pending": 0,
+        "processing": 0,
+        "complete": 0,
+        "failed": 0,
+        "transcribing": 0,
+        "transcribed": 0,
+        "adding_topics": 0
+    }
+
+    for video in videos:
+        status = video.get("status", "pending")
+        if status in rebuilt:
+            rebuilt[status] += 1
+        elif status == "processing":
+            rebuilt["processing"] += 1
+        else:
+            # Unknown statuses are treated as pending for safety.
+            rebuilt["pending"] += 1
+
+    stats.update(rebuilt)
+    manifest["stats"] = stats
 
 
 def identify_topics_with_llm(segments: list, ollama_url: str = "http://localhost:11434") -> list:
@@ -39,6 +72,13 @@ def identify_topics_with_llm(segments: list, ollama_url: str = "http://localhost
         Segments with added topic and keywords fields
     """
     import requests
+
+    timeout_raw = os.environ.get("TOPICS_REQUEST_TIMEOUT", "300")
+    try:
+        timeout_seconds = int(timeout_raw)
+    except ValueError:
+        timeout_seconds = 300
+    request_timeout = None if timeout_seconds <= 0 else timeout_seconds
 
     print(f"[Topics] Identifying topics for {len(segments)} segments using {ollama_url}...")
 
@@ -70,7 +110,7 @@ KEYWORDS: <keyword1>, <keyword2>, ...
                     "stream": False,
                     "options": {"num_gpu": 1}
                 },
-                timeout=120  # Longer timeout for model loading
+                timeout=request_timeout
             )
 
             if response.ok:
@@ -80,10 +120,13 @@ KEYWORDS: <keyword1>, <keyword2>, ...
                 topic = ""
                 keywords = []
                 for line in result.split("\n"):
-                    if line.startswith("TOPIC:"):
-                        topic = line.replace("TOPIC:", "").strip()
-                    elif line.startswith("KEYWORDS:"):
-                        keywords = [k.strip() for k in line.replace("KEYWORDS:", "").split(",")]
+                    clean = line.strip().lstrip("-* ").replace("**", "")
+                    topic_match = re.match(r"(?i)^topic\s*:\s*(.+)$", clean)
+                    keywords_match = re.match(r"(?i)^keywords?\s*:\s*(.+)$", clean)
+                    if topic_match:
+                        topic = topic_match.group(1).strip()
+                    elif keywords_match:
+                        keywords = [k.strip() for k in keywords_match.group(1).split(",") if k.strip()]
 
                 segment["topic"] = topic or f"Segment {i+1}"
                 segment["keywords"] = keywords
@@ -112,7 +155,9 @@ def update_manifest_status(manifest_path: Path, video_id: str, status: str,
 
         for video in manifest["videos"]:
             if video["id"] == video_id:
-                old_status = video["status"]
+                old_status = video.get("status")
+                if old_status == status:
+                    break
                 video["status"] = status
 
                 if status == "adding_topics":
@@ -120,20 +165,20 @@ def update_manifest_status(manifest_path: Path, video_id: str, status: str,
                     video["topics_started_at"] = datetime.now().isoformat()
                 elif status == "complete":
                     video["completed_at"] = datetime.now().isoformat()
-                    if old_status == "transcribed":
-                        manifest["stats"]["transcribed"] = manifest["stats"].get("transcribed", 1) - 1
-                    manifest["stats"]["complete"] = manifest["stats"].get("complete", 0) + 1
+                    video["error"] = None
                 elif status == "failed":
                     video["completed_at"] = datetime.now().isoformat()
                     video["error"] = error
-                    manifest["stats"]["failed"] = manifest["stats"].get("failed", 0) + 1
 
                 break
+
+        recompute_manifest_stats(manifest)
 
         # Check if all done
         if manifest["stats"].get("pending", 0) == 0 and \
            manifest["stats"].get("transcribing", 0) == 0 and \
-           manifest["stats"].get("transcribed", 0) == 0:
+           manifest["stats"].get("transcribed", 0) == 0 and \
+           manifest["stats"].get("adding_topics", 0) == 0:
             if manifest["stats"].get("complete", 0) == manifest["stats"]["total_videos"]:
                 manifest["status"] = "complete"
                 manifest["completed_at"] = datetime.now().isoformat()

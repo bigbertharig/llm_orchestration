@@ -9,6 +9,8 @@ Extract videos from a ZIM archive, transcribe them using Whisper, identify topic
 - **ZIM_PATH**: Path to the ZIM file containing videos
 - **SOURCE_ID**: Identifier for this source (used in output file naming)
 - **OUTPUT_FOLDER**: Where to write the final output files
+- **RUN_MODE**: `fresh` or `resume` (default: `fresh`)
+- **RESUME_BATCH_ID**: Required when `RUN_MODE=resume`; existing batch to continue
 
 ## Outputs
 
@@ -21,9 +23,9 @@ Extract videos from a ZIM archive, transcribe them using Whisper, identify topic
 
 ### scripts/batch_init.py
 
-- **Purpose**: Read ZIM file and create batch manifest with video list
+- **Purpose**: Create manifest for fresh runs, or validate/reuse existing manifest for resume runs
 - **GPU**: no
-- **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/batch_init.py --zim {ZIM_PATH} --source-id {SOURCE_ID} --output {OUTPUT_FOLDER} --batch-id {BATCH_ID}`
+- **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/batch_init.py --zim {ZIM_PATH} --source-id {SOURCE_ID} --output {OUTPUT_FOLDER} --batch-id {BATCH_ID} --run-mode {RUN_MODE}`
 - **Output**: `{BATCH_PATH}/manifest.json` listing all videos to process
 
 ### scripts/video_transcribe_whisper.py
@@ -52,22 +54,25 @@ Extract videos from a ZIM archive, transcribe them using Whisper, identify topic
 ### init
 - **executor**: brain
 - **task_class**: cpu
-- **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/batch_init.py --zim {ZIM_PATH} --source-id {SOURCE_ID} --output {OUTPUT_FOLDER} --batch-id {BATCH_ID}`
+- **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/batch_init.py --zim {ZIM_PATH} --source-id {SOURCE_ID} --output {OUTPUT_FOLDER} --batch-id {BATCH_ID} --run-mode {RUN_MODE}`
 - **depends_on**: none
 
 ### transcribe_whisper
 - **executor**: worker
 - **task_class**: script
-- **foreach**: {BATCH_PATH}/manifest.json:videos
+- **vram_policy**: infer
+- **foreach**: {PLAN_PATH}/history/{BATCH_ID}/manifest.json:videos
+- **batch_size**: 1
 - **command**: `export LD_LIBRARY_PATH="$HOME/ml-env/lib/python3.13/site-packages/nvidia/cublas/lib:$HOME/ml-env/lib/python3.13/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH" && source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/video_transcribe_whisper.py --batch-id {BATCH_ID} --video-id {ITEM.id}`
 - **depends_on**: init
 
 ### add_topics
 - **executor**: worker
 - **task_class**: llm
-- **foreach**: {BATCH_PATH}/manifest.json:videos
+- **foreach**: {PLAN_PATH}/history/{BATCH_ID}/manifest.json:videos
+- **batch_size**: 1
 - **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/video_add_topics.py --batch-id {BATCH_ID} --video-id {ITEM.id}`
-- **depends_on**: transcribe_whisper
+- **depends_on**: init, transcribe_whisper_{ITEM.id}
 
 ### aggregate
 - **executor**: brain
@@ -79,18 +84,23 @@ Extract videos from a ZIM archive, transcribe them using Whisper, identify topic
 
 ### Task Flow
 
-1. **init**: Brain reads ZIM, creates manifest with video list
+1. **init**: Brain creates manifest for fresh runs, or validates existing manifest for resume runs
 2. **transcribe_whisper**: Workers transcribe videos using Whisper (script tasks, cold workers)
 3. **add_topics**: Workers add LLM topics (llm tasks, hot workers with model loaded)
 4. **aggregate**: Brain combines transcripts into final output
 
+### Run Modes
+
+- `fresh`: starts a new batch and writes a new `manifest.json`
+- `resume`: reuses existing `history/{BATCH_ID}/manifest.json` and does not reset progress
+
 ### Foreach Expansion
 
-Both `transcribe_whisper` and `add_topics` use `foreach` to create one task per video:
+Both `transcribe_whisper` and `add_topics` use `foreach` with micro-batching:
 - Brain runs `init`, which creates `manifest.json` with video list
-- Brain expands `transcribe_whisper` into N tasks (one per video)
-- After ALL whisper tasks complete, brain expands `add_topics` into N tasks
-- After ALL topic tasks complete, brain runs `aggregate`
+- Brain expands `transcribe_whisper` into per-video tasks (`batch_size: 1`)
+- Brain expands `add_topics` into per-video tasks (`batch_size: 1`) with per-item dependency checks
+- After ALL expanded topic tasks complete, brain runs `aggregate`
 
 ### Resource Management
 
