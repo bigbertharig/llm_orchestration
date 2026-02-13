@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+HEARTBEAT_WARN_S = 60
+HEARTBEAT_BAD_S = 120
+HEARTBEAT_MAX_S = 600
+
 
 def load_config(config_path: Path) -> dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
@@ -108,6 +112,24 @@ def heartbeat_age_seconds(last_updated: str | None) -> int | None:
         return None
 
 
+def classify_thermal_cause(reasons: Any) -> str:
+    parts: list[str] = []
+    if isinstance(reasons, list):
+        parts = [str(x) for x in reasons]
+    elif isinstance(reasons, str):
+        parts = [reasons]
+    text = " ".join(parts).upper()
+    has_cpu = "CPU" in text
+    has_gpu = "GPU" in text
+    if has_cpu and has_gpu:
+        return "mixed"
+    if has_cpu:
+        return "cpu"
+    if has_gpu:
+        return "gpu"
+    return "none"
+
+
 def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_worker: dict[str, list[str]] = {}
     for t in processing_tasks:
@@ -128,6 +150,13 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
                 n = at.get("task_name") or at.get("task_id")
                 if n and n not in held:
                     held.append(n)
+        last_thermal_event = hb.get("last_thermal_event") if isinstance(hb.get("last_thermal_event"), dict) else None
+        thermal_reasons = hb.get("thermal_reasons") if isinstance(hb.get("thermal_reasons"), list) else []
+        thermal_cause = "none"
+        if last_thermal_event and isinstance(last_thermal_event.get("reasons"), list):
+            thermal_cause = classify_thermal_cause(last_thermal_event.get("reasons"))
+        elif thermal_reasons:
+            thermal_cause = classify_thermal_cause(thermal_reasons)
         rows.append({
             "name": name,
             "gpu_id": hb.get("gpu_id"),
@@ -143,6 +172,9 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
             "vram_used_mb": hb.get("vram_used_mb"),
             "vram_total_mb": hb.get("vram_total_mb"),
             "holding": held,
+            "thermal_event_type": last_thermal_event.get("type") if last_thermal_event else None,
+            "thermal_event_detail": " ".join(last_thermal_event.get("reasons") or []) if last_thermal_event else "",
+            "thermal_cause": thermal_cause,
         })
 
     for hb_file in sorted((shared_path / "cpus").glob("*/heartbeat.json")):
@@ -171,7 +203,27 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
             "vram_used_mb": None,
             "vram_total_mb": None,
             "holding": held,
+            "thermal_event_type": None,
+            "thermal_event_detail": "",
+            "thermal_cause": "cpu",
         })
+
+    # Drop expired heartbeats so dead workers disappear from live tables.
+    rows = [
+        r for r in rows
+        if (r.get("age_s") is None or r.get("age_s") <= HEARTBEAT_MAX_S)
+    ]
+
+    for row in rows:
+        age = row.get("age_s")
+        if age is None:
+            row["heartbeat_status"] = "missing"
+        elif age >= HEARTBEAT_BAD_S:
+            row["heartbeat_status"] = "stale_bad"
+        elif age >= HEARTBEAT_WARN_S:
+            row["heartbeat_status"] = "stale_warn"
+        else:
+            row["heartbeat_status"] = "ok"
 
     rows.sort(key=lambda r: (r["type"], r["name"]))
     return rows
@@ -315,6 +367,54 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
                 "note": "configured brain GPU has no worker heartbeat",
             })
 
+    alerts: list[dict[str, Any]] = []
+    for w in workers:
+        hb = w.get("heartbeat_status")
+        if hb in {"stale_warn", "stale_bad", "missing"}:
+            sev = "warn" if hb == "stale_warn" else "bad"
+            age = w.get("age_s")
+            msg = f"{w.get('name')} heartbeat {hb}"
+            if age is not None:
+                msg += f" ({age}s old)"
+            alerts.append({"severity": sev, "message": msg, "worker": w.get("name"), "age_s": age})
+        thermal_type = w.get("thermal_event_type")
+        thermal_cause = w.get("thermal_cause")
+        if thermal_type == "critical_shutdown":
+            cause_label = thermal_cause if thermal_cause and thermal_cause != "none" else "unknown"
+            detail = (w.get("thermal_event_detail") or "")[:120]
+            message = f"thermal shutdown ({cause_label})"
+            if detail:
+                message += f": {detail}"
+            alerts.append({
+                "severity": "bad",
+                "message": message,
+                "worker": w.get("name"),
+                "age_s": w.get("age_s"),
+            })
+
+    expected_worker_names: set[str] = set()
+    for w in config.get("workers", []) if isinstance(config.get("workers"), list) else []:
+        name = w.get("name") if isinstance(w, dict) else None
+        if name:
+            expected_worker_names.add(name)
+    if not expected_worker_names:
+        brain_ids = set(brain_gpu_ids)
+        for g in config.get("gpus", []) if isinstance(config.get("gpus"), list) else []:
+            if not isinstance(g, dict):
+                continue
+            gid = g.get("id")
+            gname = g.get("name")
+            if gname and gid not in brain_ids:
+                expected_worker_names.add(gname)
+    seen_worker_names = {w.get("name") for w in workers if w.get("type") == "gpu"}
+    for name in sorted(expected_worker_names - seen_worker_names):
+        alerts.append({
+            "severity": "bad",
+            "message": f"missing configured GPU worker heartbeat: {name}",
+            "worker": name,
+            "age_s": None,
+        })
+
     batches: dict[str, Any] = {}
     batch_chains: dict[str, Any] = {}
     for batch_id, meta in active_batches.items():
@@ -348,6 +448,7 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
         "batch_chains": batch_chains,
         "workers": workers,
         "brain_gpus": brain_gpus,
+        "alerts": alerts,
         "lanes": {
             "queue": lane_view(lane_source["queue"], 50),
             "processing": lane_view(lane_source["processing"], 50),
@@ -540,6 +641,16 @@ HTML = """<!doctype html>
     .chip.failed { color:#ff6b6b; background:rgba(255,107,107,.15); }
     .chip.missing { color:#9db4c8; background:rgba(157,180,200,.12); }
     .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .filter-bar { display:flex; gap:8px; flex-wrap:wrap; margin: 6px 0 8px; align-items:center; }
+    .filter-field { display:flex; gap:4px; align-items:center; }
+    .filter-field input, .filter-field select {
+      background: #0d1f31;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 4px 6px;
+      font-size: 12px;
+    }
     .tab-btn {
       background: #16324a;
       color: var(--text);
@@ -570,6 +681,11 @@ HTML = """<!doctype html>
     <div class=\"grid g5\" id=\"countCards\"></div>
 
     <div class=\"section card\">
+      <h3>Alerts</h3>
+      <div id=\"alerts\"></div>
+    </div>
+
+    <div class=\"section card\">
       <h3>Active Batches</h3>
       <div id=\"batches\"></div>
       <div id=\"batchChains\"></div>
@@ -596,6 +712,8 @@ HTML = """<!doctype html>
     const laneOrder = ['queue', 'processing', 'private', 'complete', 'failed'];
     let activeLane = 'processing';
     const chainState = {};
+    const batchState = { batch: '', plan: '', sort: 'started_desc' };
+    const laneState = { taskClass: '', task: '', worker: '', batch: '', error: '', sort: 'task_asc' };
 
     function typeBadge(type) {
       return `<span class=\"pill ${type}\">${type}</span>`;
@@ -612,6 +730,13 @@ HTML = """<!doctype html>
       if (cpu === null || cpu === undefined) return '';
       if (cpu >= 85) return 'bad';
       if (cpu >= 75) return 'warn';
+      return 'ok';
+    }
+
+    function hbClass(age) {
+      if (age === null || age === undefined) return 'bad';
+      if (age >= 120) return 'bad';
+      if (age >= 60) return 'warn';
       return 'ok';
     }
 
@@ -640,8 +765,53 @@ HTML = """<!doctype html>
       `).join('');
     }
 
+    function renderAlerts(alerts) {
+      if (!alerts || !alerts.length) {
+        document.getElementById('alerts').innerHTML = '<div class=\"k\">(none)</div>';
+        return;
+      }
+      const rows = alerts.slice(0, 40).map(a => [
+        `<span class=\"${a.severity === 'bad' ? 'bad' : 'warn'}\">${a.severity}</span>`,
+        fmt(a.worker),
+        fmt(a.message),
+        fmt(a.age_s),
+      ]);
+      document.getElementById('alerts').innerHTML = table(['Severity', 'Worker', 'Message', 'HB s'], rows);
+    }
+
     function renderTaskLane(targetId, items) {
-      const rows = items.map(t => [
+      const classes = [...new Set(items.map(t => (t.task_class || '').toLowerCase()).filter(Boolean))].sort();
+      const sort = laneState.sort || 'task_asc';
+
+      let filtered = items.filter(t => {
+        const cls = (t.task_class || '').toLowerCase();
+        const task = (t.name || '').toLowerCase();
+        const worker = (t.assigned_to || '').toLowerCase();
+        const batch = (t.batch_id || '').toLowerCase();
+        const err = (t.error || '').toLowerCase();
+        if (laneState.taskClass && cls !== laneState.taskClass) return false;
+        if (laneState.task && !task.includes(laneState.task.toLowerCase())) return false;
+        if (laneState.worker && !worker.includes(laneState.worker.toLowerCase())) return false;
+        if (laneState.batch && !batch.includes(laneState.batch.toLowerCase())) return false;
+        if (laneState.error && !err.includes(laneState.error.toLowerCase())) return false;
+        return true;
+      });
+
+      filtered.sort((a, b) => {
+        const aval = (key) => String(a[key] || '').toLowerCase();
+        const bval = (key) => String(b[key] || '').toLowerCase();
+        if (sort === 'task_asc') return aval('name').localeCompare(bval('name'));
+        if (sort === 'task_desc') return bval('name').localeCompare(aval('name'));
+        if (sort === 'worker_asc') return aval('assigned_to').localeCompare(bval('assigned_to'));
+        if (sort === 'worker_desc') return bval('assigned_to').localeCompare(aval('assigned_to'));
+        if (sort === 'batch_asc') return aval('batch_id').localeCompare(bval('batch_id'));
+        if (sort === 'batch_desc') return bval('batch_id').localeCompare(aval('batch_id'));
+        if (sort === 'try_desc') return (Number(b.attempts || 0) - Number(a.attempts || 0));
+        if (sort === 'try_asc') return (Number(a.attempts || 0) - Number(b.attempts || 0));
+        return 0;
+      });
+
+      const rows = filtered.map(t => [
         classBadge(t.task_class),
         fmt(t.name),
         fmt(t.assigned_to),
@@ -649,7 +819,166 @@ HTML = """<!doctype html>
         fmt(t.attempts),
         `<span class=\"mono\">${fmt(t.error)}</span>`
       ]);
-      document.getElementById(targetId).innerHTML = table(['Class', 'Task', 'Worker', 'Batch', 'Try', 'Error'], rows);
+      const sortArrow = (ascKey, descKey) => sort === ascKey ? ' ↑' : (sort === descKey ? ' ↓' : '');
+      const controls = `
+        <div class=\"filter-bar\">
+          <span class=\"k\">showing ${filtered.length} of ${items.length}</span>
+          <label class=\"filter-field k\">Class
+            <select id=\"laneFilterClass\">
+              <option value=\"\">all</option>
+              ${classes.map(c => `<option value=\"${c}\" ${laneState.taskClass === c ? 'selected' : ''}>${c}</option>`).join('')}
+            </select>
+          </label>
+          <label class=\"filter-field k\">Task <input id=\"laneFilterTask\" value=\"${laneState.task}\" placeholder=\"contains\" /></label>
+          <label class=\"filter-field k\">Worker <input id=\"laneFilterWorker\" value=\"${laneState.worker}\" placeholder=\"contains\" /></label>
+          <label class=\"filter-field k\">Batch <input id=\"laneFilterBatch\" value=\"${laneState.batch}\" placeholder=\"contains\" /></label>
+          <label class=\"filter-field k\">Error <input id=\"laneFilterError\" value=\"${laneState.error}\" placeholder=\"contains\" /></label>
+          <span class=\"k\">Click headers to sort</span>
+        </div>
+      `;
+      const headers = [
+        `<th data-sort=\"class\">Class${sortArrow('class_asc', 'class_desc')}</th>`,
+        `<th data-sort=\"task\">Task${sortArrow('task_asc', 'task_desc')}</th>`,
+        `<th data-sort=\"worker\">Worker${sortArrow('worker_asc', 'worker_desc')}</th>`,
+        `<th data-sort=\"batch\">Batch${sortArrow('batch_asc', 'batch_desc')}</th>`,
+        `<th data-sort=\"try\">Try${sortArrow('try_asc', 'try_desc')}</th>`,
+        `<th>Error</th>`
+      ].join('');
+      const laneTable = rows.length
+        ? `<table><thead><tr>${headers}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`
+        : '<div class=\"k\">(none)</div>';
+      document.getElementById(targetId).innerHTML = controls + laneTable;
+      const bind = (id, key) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', () => { laneState[key] = el.value; renderTaskLane(targetId, items); });
+        el.addEventListener('change', () => { laneState[key] = el.value; renderTaskLane(targetId, items); });
+      };
+      document.querySelectorAll('#laneTable th[data-sort]').forEach(th => {
+        th.style.cursor = 'pointer';
+        th.addEventListener('click', () => {
+          const key = th.getAttribute('data-sort');
+          const current = laneState.sort || 'task_asc';
+          const nextMap = {
+            class: ['class_asc', 'class_desc'],
+            task: ['task_asc', 'task_desc'],
+            worker: ['worker_asc', 'worker_desc'],
+            batch: ['batch_asc', 'batch_desc'],
+            try: ['try_asc', 'try_desc'],
+          };
+          const pair = nextMap[key] || ['task_asc', 'task_desc'];
+          laneState.sort = current === pair[0] ? pair[1] : pair[0];
+          renderTaskLane(targetId, items);
+        });
+      });
+      bind('laneFilterClass', 'taskClass');
+      bind('laneFilterTask', 'task');
+      bind('laneFilterWorker', 'worker');
+      bind('laneFilterBatch', 'batch');
+      bind('laneFilterError', 'error');
+    }
+
+    function renderBatches(activeBatches) {
+      const plans = [...new Set(activeBatches.map(b => b.plan).filter(Boolean))].sort();
+      const sort = batchState.sort || 'started_desc';
+      let filtered = activeBatches.filter(b => {
+        const bid = (b.id || '').toLowerCase();
+        const plan = (b.plan || '').toLowerCase();
+        if (batchState.batch && !bid.includes(batchState.batch.toLowerCase())) return false;
+        if (batchState.plan && plan !== batchState.plan.toLowerCase()) return false;
+        return true;
+      });
+      filtered.sort((a, b) => {
+        if (sort === 'batch_asc') return String(a.id || '').localeCompare(String(b.id || ''));
+        if (sort === 'batch_desc') return String(b.id || '').localeCompare(String(a.id || ''));
+        if (sort === 'plan_asc') return String(a.plan || '').localeCompare(String(b.plan || ''));
+        if (sort === 'plan_desc') return String(b.plan || '').localeCompare(String(a.plan || ''));
+        if (sort === 'stage_asc') return Number(a.stage_rank || 0) - Number(b.stage_rank || 0);
+        if (sort === 'stage_desc') return Number(b.stage_rank || 0) - Number(a.stage_rank || 0);
+        if (sort === 'done_desc') return Number(b.done_pct || 0) - Number(a.done_pct || 0);
+        if (sort === 'done_asc') return Number(a.done_pct || 0) - Number(b.done_pct || 0);
+        if (sort === 'complete_desc') return Number(b.complete || 0) - Number(a.complete || 0);
+        if (sort === 'complete_asc') return Number(a.complete || 0) - Number(b.complete || 0);
+        if (sort === 'queue_desc') return Number(b.queue || 0) - Number(a.queue || 0);
+        if (sort === 'queue_asc') return Number(a.queue || 0) - Number(b.queue || 0);
+        if (sort === 'processing_desc') return Number(b.processing || 0) - Number(a.processing || 0);
+        if (sort === 'processing_asc') return Number(a.processing || 0) - Number(b.processing || 0);
+        if (sort === 'private_desc') return Number(b.private || 0) - Number(a.private || 0);
+        if (sort === 'private_asc') return Number(a.private || 0) - Number(b.private || 0);
+        if (sort === 'failed_desc') return Number(b.failed || 0) - Number(a.failed || 0);
+        if (sort === 'failed_asc') return Number(a.failed || 0) - Number(b.failed || 0);
+        if (sort === 'started_asc') return String(a.started_raw || '').localeCompare(String(b.started_raw || ''));
+        return String(b.started_raw || '').localeCompare(String(a.started_raw || ''));
+      });
+      const rows = filtered.map(b => [
+        `<span class=\"mono\">${b.id}</span>`,
+        fmt(b.plan),
+        fmt(b.stage),
+        fmt(b.complete),
+        fmt(b.queue),
+        fmt(b.processing),
+        fmt(b.failed),
+        fmt(b.private),
+        fmt(b.started)
+      ]);
+      const sortArrow = (ascKey, descKey) => sort === ascKey ? ' ↑' : (sort === descKey ? ' ↓' : '');
+      const controls = `
+        <div class=\"filter-bar\">
+          <span class=\"k\">showing ${filtered.length} of ${activeBatches.length}</span>
+          <label class=\"filter-field k\">Batch <input id=\"batchFilterBatch\" value=\"${batchState.batch}\" placeholder=\"contains\" /></label>
+          <label class=\"filter-field k\">Plan
+            <select id=\"batchFilterPlan\">
+              <option value=\"\">all</option>
+              ${plans.map(p => `<option value=\"${String(p).toLowerCase()}\" ${batchState.plan === String(p).toLowerCase() ? 'selected' : ''}>${p}</option>`).join('')}
+            </select>
+          </label>
+          <span class=\"k\">Click headers to sort</span>
+        </div>
+      `;
+      const headers = [
+        `<th data-sort=\"batch\">Batch${sortArrow('batch_asc', 'batch_desc')}</th>`,
+        `<th data-sort=\"plan\">Plan${sortArrow('plan_asc', 'plan_desc')}</th>`,
+        `<th data-sort=\"stage\">Stage${sortArrow('stage_asc', 'stage_desc')}</th>`,
+        `<th data-sort=\"complete\">Complete${sortArrow('complete_asc', 'complete_desc')}</th>`,
+        `<th data-sort=\"queue\">Queue${sortArrow('queue_asc', 'queue_desc')}</th>`,
+        `<th data-sort=\"processing\">Processing${sortArrow('processing_asc', 'processing_desc')}</th>`,
+        `<th data-sort=\"failed\">Failed${sortArrow('failed_asc', 'failed_desc')}</th>`,
+        `<th data-sort=\"private\">Private${sortArrow('private_asc', 'private_desc')}</th>`,
+        `<th data-sort=\"started\">Started${sortArrow('started_asc', 'started_desc')}</th>`,
+      ].join('');
+      const batchTable = rows.length
+        ? `<table><thead><tr>${headers}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`
+        : '<div class=\"k\">(none)</div>';
+      document.getElementById('batches').innerHTML = controls + batchTable;
+      const bind = (id, key) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', () => { batchState[key] = el.value; renderBatches(activeBatches); });
+        el.addEventListener('change', () => { batchState[key] = el.value; renderBatches(activeBatches); });
+      };
+      document.querySelectorAll('#batches th[data-sort]').forEach(th => {
+        th.style.cursor = 'pointer';
+        th.addEventListener('click', () => {
+          const key = th.getAttribute('data-sort');
+          const current = batchState.sort || 'started_desc';
+          const nextMap = {
+            batch: ['batch_asc', 'batch_desc'],
+            plan: ['plan_asc', 'plan_desc'],
+            stage: ['stage_asc', 'stage_desc'],
+            complete: ['complete_asc', 'complete_desc'],
+            queue: ['queue_asc', 'queue_desc'],
+            processing: ['processing_asc', 'processing_desc'],
+            failed: ['failed_asc', 'failed_desc'],
+            private: ['private_asc', 'private_desc'],
+            started: ['started_asc', 'started_desc'],
+          };
+          const pair = nextMap[key] || ['started_asc', 'started_desc'];
+          batchState.sort = current === pair[0] ? pair[1] : pair[0];
+          renderBatches(activeBatches);
+        });
+      });
+      bind('batchFilterBatch', 'batch');
+      bind('batchFilterPlan', 'plan');
     }
 
     function renderLaneTabs(counts, lanes) {
@@ -686,28 +1015,56 @@ HTML = """<!doctype html>
       const perPage = 15;
       const out = [];
       const chains = data.batch_chains || {};
+      const laneRank = { '-': 0, queue: 1, private: 2, processing: 3, complete: 4, failed: 5 };
       Object.entries(chains).forEach(([batchId, chain]) => {
         const stages = chain.stage_order || [];
         if (!stages.length) return;
         const totalRows = chain.row_count || (chain.rows || []).length;
         if (!chainState[batchId]) {
-          chainState[batchId] = { collapsed: false, page: 1 };
+          chainState[batchId] = { collapsed: false, page: 1, sortKey: 'item', sortDir: 'asc' };
         }
         const st = chainState[batchId];
         const totalPages = Math.max(1, Math.ceil(totalRows / perPage));
         if (st.page > totalPages) st.page = totalPages;
+        const sortKey = st.sortKey || 'item';
+        const sortDir = st.sortDir || 'asc';
+        const direction = sortDir === 'desc' ? -1 : 1;
+        const sortedRows = [...(chain.rows || [])].sort((a, b) => {
+          if (sortKey === 'item') {
+            return direction * String(a.item || '').localeCompare(String(b.item || ''));
+          }
+          const ar = laneRank[(a.stages || {})[sortKey] || '-'] || 0;
+          const br = laneRank[(b.stages || {})[sortKey] || '-'] || 0;
+          if (ar !== br) return direction * (ar - br);
+          return String(a.item || '').localeCompare(String(b.item || ''));
+        });
         const start = (st.page - 1) * perPage;
         const end = start + perPage;
 
-        const visibleRows = (chain.rows || []).slice(start, end).map(r => {
+        const visibleRows = sortedRows.slice(start, end).map(r => {
           const cols = [ `<span class=\"mono\">${r.item}</span>` ];
           stages.forEach(s => cols.push(laneChip((r.stages || {})[s])));
           return cols;
         });
+        const arrow = (key) => (sortKey === key ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '');
+        const headers = [
+          `<th data-batch=\"${batchId}\" data-sort=\"item\">Item${arrow('item')}</th>`,
+          ...stages.map(s => `<th data-batch=\"${batchId}\" data-sort=\"${s}\">${s}${arrow(s)}</th>`)
+        ];
+        const chainTable = visibleRows.length
+          ? `
+            <table>
+              <thead><tr>${headers.join('')}</tr></thead>
+              <tbody>
+                ${visibleRows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}
+              </tbody>
+            </table>
+          `
+          : '<div class=\"k\">(none)</div>';
         const collapsed = st.collapsed;
         const body = collapsed
           ? ''
-          : `${table(['Item', ...stages], visibleRows)}
+          : `${chainTable}
              <div class=\"k\">showing ${visibleRows.length} of ${totalRows}</div>`;
 
         out.push(`
@@ -731,12 +1088,29 @@ HTML = """<!doctype html>
         btn.addEventListener('click', () => {
           const action = btn.getAttribute('data-action');
           const batchId = btn.getAttribute('data-batch');
-          const st = chainState[batchId] || { collapsed: false, page: 1 };
+          const st = chainState[batchId] || { collapsed: false, page: 1, sortKey: 'item', sortDir: 'asc' };
           const total = (chains[batchId]?.row_count) || 0;
           const pages = Math.max(1, Math.ceil(total / perPage));
           if (action === 'toggle') st.collapsed = !st.collapsed;
           if (action === 'prev' && st.page > 1) st.page -= 1;
           if (action === 'next' && st.page < pages) st.page += 1;
+          chainState[batchId] = st;
+          renderBatchChains(data);
+        });
+      });
+      container.querySelectorAll('th[data-sort]').forEach(th => {
+        th.style.cursor = 'pointer';
+        th.addEventListener('click', () => {
+          const batchId = th.getAttribute('data-batch');
+          const key = th.getAttribute('data-sort');
+          const st = chainState[batchId] || { collapsed: false, page: 1, sortKey: 'item', sortDir: 'asc' };
+          if (st.sortKey === key) {
+            st.sortDir = st.sortDir === 'asc' ? 'desc' : 'asc';
+          } else {
+            st.sortKey = key;
+            st.sortDir = 'asc';
+          }
+          st.page = 1;
           chainState[batchId] = st;
           renderBatchChains(data);
         });
@@ -753,24 +1127,37 @@ HTML = """<!doctype html>
       const batchRows = Object.entries(data.active_batches).map(([id, b]) => {
         const c = b.counts;
         const total = Math.max(b.total_hint || 0, c.queue + c.processing + c.complete + c.failed);
-        return [
-          `<span class=\"mono\">${id}</span>`,
-          fmt(b.plan),
-          `${c.complete}/${total}`,
-          `${c.queue}/${c.processing}/${c.failed}/${c.private}`,
-          fmt(b.started_at ? new Date(b.started_at).toLocaleTimeString() : '-')
-        ];
+        let stage = 'idle';
+        let stageRank = 0;
+        if (c.failed > 0) { stage = 'failed'; stageRank = 4; }
+        else if (c.processing > 0) { stage = 'processing'; stageRank = 3; }
+        else if (c.queue > 0 || c.private > 0) { stage = 'queued'; stageRank = 2; }
+        else if (total > 0 && c.complete >= total) { stage = 'complete'; stageRank = 5; }
+        else if (c.complete > 0) { stage = 'partial'; stageRank = 1; }
+        return {
+          id: id,
+          plan: b.plan || '',
+          stage: stage,
+          stage_rank: stageRank,
+          done_pct: total > 0 ? (c.complete / total) : 0,
+          complete: c.complete,
+          total: total,
+          queue: c.queue,
+          processing: c.processing,
+          failed: c.failed,
+          private: c.private,
+          started_raw: b.started_at || '',
+          started: fmt(b.started_at ? new Date(b.started_at).toLocaleTimeString() : '-')
+        };
       });
-      document.getElementById('batches').innerHTML = table(
-        ['Batch', 'Plan', 'Done', 'Q/P/F/Priv', 'Started'],
-        batchRows
-      );
+      renderBatches(batchRows);
       renderBatchChains(data);
 
       const brainRows = (data.brain_gpus || []).map(w => {
         const vram = (w.vram_used_mb !== null && w.vram_total_mb !== null)
           ? `${w.vram_used_mb}/${w.vram_total_mb}`
           : '-';
+        const thermal = w.thermal_cause && w.thermal_cause !== 'none' ? w.thermal_cause : '-';
         return [
           fmt(w.gpu_id),
           fmt(w.name),
@@ -780,12 +1167,13 @@ HTML = """<!doctype html>
           fmt(w.power_w),
           vram,
           `<span class=\"${tempClass(w.cpu_temp_c)}\">${fmt(w.cpu_temp_c)}</span>`,
-          fmt(w.age_s),
+          fmt(thermal),
+          `<span class=\"${hbClass(w.age_s)}\">${fmt(w.age_s)}</span>`,
           fmt(w.note)
         ];
       });
       document.getElementById('brainGpus').innerHTML = table(
-        ['GPU', 'Name', 'State', 'GPU C', 'GPU %', 'W', 'VRAM MB', 'CPU C', 'HB s', 'Note'],
+        ['GPU', 'Name', 'State', 'GPU C', 'GPU %', 'W', 'VRAM MB', 'CPU C', 'Thermal', 'HB s', 'Note'],
         brainRows
       );
 
@@ -798,14 +1186,16 @@ HTML = """<!doctype html>
         fmt(w.gpu_temp_c),
         fmt(w.gpu_util),
         fmt(w.power_w),
+        fmt(w.thermal_cause && w.thermal_cause !== 'none' ? w.thermal_cause : '-'),
         `<span class=\"mono\">${(w.holding || []).slice(0,2).join(' | ') || '-'}</span>`,
-        fmt(w.age_s)
+        `<span class=\"${hbClass(w.age_s)}\">${fmt(w.age_s)}</span>`
       ]);
       document.getElementById('workers').innerHTML = table(
-        ['Type', 'Name', 'State', 'Host', 'CPU C', 'GPU C', 'GPU %', 'W', 'Holding', 'HB s'],
+        ['Type', 'Name', 'State', 'Host', 'CPU C', 'GPU C', 'GPU %', 'W', 'Thermal', 'Holding', 'HB s'],
         workerRows
       );
 
+      renderAlerts(data.alerts || []);
       renderLaneTabs(data.counts, data.lanes);
     }
 
