@@ -527,12 +527,25 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
     batch_chains: dict[str, Any] = {}
     for batch_id, meta in active_batches.items():
         counts = count_by_batch(lanes, batch_id)
-        batches[batch_id] = {
+        batch_info: dict[str, Any] = {
             "plan": meta.get("plan"),
             "started_at": meta.get("started_at"),
             "total_hint": meta.get("total_tasks"),
             "counts": counts,
         }
+        # Include goal progress if this is a goal-driven batch
+        goal = meta.get("goal")
+        if goal and isinstance(goal, dict):
+            batch_info["goal"] = {
+                "target": goal.get("target", 0),
+                "tolerance": goal.get("tolerance", 0),
+                "accepted": goal.get("accepted", 0),
+                "rejected": goal.get("rejected", 0),
+                "in_flight": len(goal.get("in_flight_ids", [])),
+                "pool_remaining": goal.get("candidates_total", 0) - goal.get("next_index", 0),
+                "status": goal.get("status", ""),
+            }
+        batches[batch_id] = batch_info
         batch_chains[batch_id] = build_batch_chain(lanes, batch_id)
 
     # Keep lane tables focused on currently active batches so historical
@@ -1171,6 +1184,7 @@ HTML = """<!doctype html>
         fmt(b.plan),
         fmt(b.stage),
         `<span class=\"mono\">${fmt(b.complete)}/${fmt(b.total)}</span>`,
+        fmt(b.goal),
         fmt(b.queue),
         fmt(b.processing),
         fmt(b.failed),
@@ -1196,6 +1210,7 @@ HTML = """<!doctype html>
         `<th data-sort=\"plan\">Plan${sortArrow('plan_asc', 'plan_desc')}</th>`,
         `<th data-sort=\"stage\">Stage${sortArrow('stage_asc', 'stage_desc')}</th>`,
         `<th data-sort=\"complete\">Complete${sortArrow('complete_asc', 'complete_desc')}</th>`,
+        `<th>Goal</th>`,
         `<th data-sort=\"queue\">Queue${sortArrow('queue_asc', 'queue_desc')}</th>`,
         `<th data-sort=\"processing\">Processing${sortArrow('processing_asc', 'processing_desc')}</th>`,
         `<th data-sort=\"failed\">Failed${sortArrow('failed_asc', 'failed_desc')}</th>`,
@@ -1457,6 +1472,13 @@ HTML = """<!doctype html>
         else if (c.queue > 0 || c.private > 0) { stage = 'queued'; stageRank = 2; }
         else if (total > 0 && c.complete >= total) { stage = 'complete'; stageRank = 5; }
         else if (c.complete > 0) { stage = 'partial'; stageRank = 1; }
+        // Goal progress string
+        let goalStr = '-';
+        if (b.goal) {
+          const g = b.goal;
+          const statusBadge = g.status === 'complete' ? '\\u2705' : g.status === 'exhausted' ? '\\u26a0' : g.status === 'draining' ? '\\u23f3' : '';
+          goalStr = `${g.accepted}/${g.target} ${statusBadge} (${g.in_flight} fly, ${g.rejected} rej, ${g.pool_remaining} pool)`;
+        }
         return {
           id: id,
           plan: b.plan || '',
@@ -1469,6 +1491,7 @@ HTML = """<!doctype html>
           processing: c.processing,
           failed: c.failed,
           private: c.private,
+          goal: goalStr,
           started_raw: b.started_at || '',
           started: fmt(b.started_at ? new Date(b.started_at).toLocaleTimeString() : '-')
         };

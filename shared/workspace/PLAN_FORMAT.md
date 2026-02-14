@@ -140,6 +140,67 @@ Any additional guidance, constraints, or edge cases.
 
 ---
 
+## Goal-Driven Plans
+
+Plans can include an optional `## Goal` section for dynamic, result-driven execution. Instead of expanding all foreach tasks upfront, the brain generates tasks incrementally and validates results against a target count.
+
+### Goal Section Format
+
+```markdown
+## Goal
+- **type**: target_count
+- **target**: {TARGET_COUNT}
+- **tolerance**: 2
+- **max_attempts_multiplier**: 5
+- **tracked_task**: score_person
+```
+
+| Field | Description |
+|-------|-------------|
+| `type` | `target_count` — brain aims for N successful validations |
+| `target` | How many accepted results needed (supports variable substitution) |
+| `tolerance` | ±N acceptable deviation. Draining starts at `target - tolerance` |
+| `max_attempts_multiplier` | Pool size and circuit breaker. `identify_people` generates `target * multiplier` candidates. Brain stops after that many total attempts |
+| `tracked_task` | Foreach task name whose completion triggers validation |
+
+### Behavior
+
+1. Candidate pool generated = `target * max_attempts_multiplier`
+2. Initial wave = `target` candidates (one full pipeline each)
+3. Fast pre-filter on each tracked task completion (schema check + confidence threshold)
+4. Brain LLM validates borderline cases only (auto-accept high confidence, auto-reject missing/malformed)
+5. Rejected → replacement spawned one-for-one from the candidate pool
+6. Draining starts at `accepted >= target - tolerance` (no new spawns)
+7. Complete when draining and no in-flight candidates remain
+8. Exhausted if pool empty or circuit breaker hits before reaching target
+
+### Tolerance
+
+With `target=20`, `tolerance=2`:
+- Draining starts at `accepted >= 18`
+- Final count: 18–22 depending on trailing in-flight results
+- The ±2 comes naturally: trailing in-flight may succeed (overshoot) or you may drain at exactly 18 (undershoot)
+
+### Idempotency
+
+Goal state is persisted in the brain's `state.json`. On restart:
+- `spawned_ids` prevents re-spawning candidate pipelines
+- `validated_task_ids` (keyed by UUID) prevents re-validation
+- `in_flight_ids` is reconciled against actual completions on the next cycle
+
+### When to Use Goal-Driven Plans
+
+Use goal-driven execution when:
+- The output quality varies and some candidates will be rejected
+- You want a specific number of good results, not just "process everything"
+- Generating 2–5x candidates and filtering is a reasonable strategy
+
+Standard (non-goal) plans are still better when:
+- Every item must be processed (no quality gate)
+- The total count is known upfront and fixed
+
+---
+
 ## Task Format
 
 The brain parses the `## Tasks` section directly. Each task is defined as:
