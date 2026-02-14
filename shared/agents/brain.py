@@ -1660,7 +1660,10 @@ Required JSON format:
         batch_meta = {
             "plan": plan_dir.name,
             "plan_dir": str(plan_dir.resolve()),
-            "batch_dir": str(batch_dir.resolve()),
+            # Effective data batch path (respects RUN_MODE + BATCH_ID overrides).
+            "batch_dir": str(effective_batch_dir.resolve()),
+            # Orchestration batch path (timestamp id used for this execution run).
+            "orchestration_batch_dir": str(batch_dir.resolve()),
             "env_manifest_path": str(env_manifest_path.resolve()),
             "started_at": datetime.now().isoformat(),
             "config": config,

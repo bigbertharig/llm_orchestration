@@ -8,6 +8,45 @@ from typing import Any, Dict, List, Optional
 
 
 class BrainGoalMixin:
+    def _goal_batch_dir(self, batch_id: str) -> Path:
+        """
+        Resolve the effective data batch directory for goal-driven profile reads.
+
+        Prefer {BATCH_PATH} from goal variables (authoritative runtime path),
+        then fall back to batch_meta["batch_dir"].
+        """
+        batch_meta = self.active_batches.get(batch_id, {}) or {}
+        goal = batch_meta.get("goal", {}) if isinstance(batch_meta.get("goal"), dict) else {}
+        variables = goal.get("variables", {}) if isinstance(goal.get("variables"), dict) else {}
+        batch_path = variables.get("{BATCH_PATH}")
+        if isinstance(batch_path, str) and batch_path.strip():
+            return Path(batch_path.strip())
+        return Path(str(batch_meta.get("batch_dir", "")).strip())
+
+    def _numeric_confidence(self, profile: Dict[str, Any]) -> Optional[float]:
+        """
+        Normalize profile confidence to a numeric score (0-100).
+        """
+        raw = profile.get("confidence")
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        if isinstance(raw, str):
+            s = raw.strip().lower()
+            if not s:
+                return None
+            # Backward compatibility for legacy string labels.
+            if s == "high":
+                return 85.0
+            if s == "medium":
+                return 70.0
+            if s == "low":
+                return 50.0
+            try:
+                return float(s.replace("%", "").strip())
+            except ValueError:
+                return None
+        return None
+
     def _replace_goal_dep(self, batch_id: str, template_name: str):
         """
         Replace dependency on a goal template name with the virtual
@@ -262,9 +301,8 @@ class BrainGoalMixin:
             "reject"     - profile missing/empty/fatally malformed → skip LLM
             "borderline" - needs brain LLM validation
         """
-        batch_meta = self.active_batches.get(batch_id, {})
-        batch_dir = batch_meta.get("batch_dir", "")
-        profile_path = Path(batch_dir) / "results" / person_id / "profile.json"
+        batch_dir = self._goal_batch_dir(batch_id)
+        profile_path = batch_dir / "results" / person_id / "profile.json"
 
         if not profile_path.exists():
             self.log_decision("GOAL_PREFILTER", f"Candidate '{person_id}': profile.json missing → reject",
@@ -283,26 +321,31 @@ class BrainGoalMixin:
             return "reject"
 
         # Check required fields
-        name = profile.get("name", "").strip()
-        confidence = profile.get("confidence", "").strip().lower()
+        name = str(profile.get("name", "") or "").strip()
+        confidence = self._numeric_confidence(profile)
 
         if not name:
             self.log_decision("GOAL_PREFILTER", f"Candidate '{person_id}': missing name → reject",
                               {"person_id": person_id, "result": "reject"})
             return "reject"
 
-        # Auto-accept high confidence with good data
-        if confidence == "high":
-            has_company = bool(profile.get("company", "").strip() or profile.get("title", "").strip())
+        # Auto-accept high confidence with minimal role/company evidence.
+        if confidence is not None and confidence >= 85:
+            current_role = profile.get("current_role", {}) if isinstance(profile.get("current_role"), dict) else {}
+            top_company = str(profile.get("company", "") or "").strip()
+            top_title = str(profile.get("title", "") or "").strip()
+            role_company = str(current_role.get("company", "") or "").strip()
+            role_title = str(current_role.get("title", "") or "").strip()
+            has_company = bool(top_company or top_title or role_company or role_title)
             if has_company:
                 self.log_decision("GOAL_PREFILTER", f"Candidate '{person_id}': high confidence → auto-accept",
-                                  {"person_id": person_id, "result": "accept"})
+                                  {"person_id": person_id, "confidence": confidence, "result": "accept"})
                 return "accept"
 
         # Auto-reject low confidence
-        if confidence == "low":
+        if confidence is not None and confidence <= 55:
             self.log_decision("GOAL_PREFILTER", f"Candidate '{person_id}': low confidence → reject",
-                              {"person_id": person_id, "result": "reject"})
+                              {"person_id": person_id, "confidence": confidence, "result": "reject"})
             return "reject"
 
         # Medium confidence or missing confidence → borderline
@@ -318,8 +361,8 @@ class BrainGoalMixin:
         """
         batch_meta = self.active_batches.get(batch_id, {})
         goal = batch_meta.get("goal", {})
-        batch_dir = batch_meta.get("batch_dir", "")
-        profile_path = Path(batch_dir) / "results" / person_id / "profile.json"
+        batch_dir = self._goal_batch_dir(batch_id)
+        profile_path = batch_dir / "results" / person_id / "profile.json"
 
         try:
             with open(profile_path) as f:
@@ -609,4 +652,3 @@ class BrainGoalMixin:
 
         self.log_decision("GOAL_PARSED", f"Parsed goal: type={goal['type']}, target={goal.get('target')}, tracked={goal['tracked_task']}", goal)
         return goal
-
