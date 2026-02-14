@@ -2629,120 +2629,143 @@ JSON only:"""
             worker_name = stuck_info['assigned_to']
             elapsed_min = stuck_info['elapsed_min']
             task_file = stuck_info['task_file']
-
-            abort_signal = self.signals_path / f"{worker_name}.abort"
-            kill_signal = self.signals_path / f"{worker_name}.kill"
-
-            abort_data = None
-            if abort_signal.exists():
-                try:
-                    with open(abort_signal) as f:
-                        abort_data = json.load(f)
-                except Exception:
-                    abort_data = None
-            if abort_data and abort_data.get("task_id") != task_id:
-                try:
-                    abort_signal.unlink()
-                except Exception:
-                    pass
-                abort_data = None
-
-            kill_data = None
-            if kill_signal.exists():
-                try:
-                    with open(kill_signal) as f:
-                        kill_data = json.load(f)
-                except Exception:
-                    kill_data = None
-            if kill_data and kill_data.get("task_id") != task_id:
-                try:
-                    kill_signal.unlink()
-                except Exception:
-                    pass
-                kill_data = None
-
-            if kill_data:
-                # Force kill already sent. If it still hasn't moved, requeue from processing.
-                kill_time = datetime.fromisoformat(kill_data.get("timestamp"))
-                kill_age = (datetime.now() - kill_time).total_seconds()
-                if kill_age < self.force_kill_requeue_seconds:
-                    continue
-
-                if not task_file.exists():
-                    try:
-                        kill_signal.unlink()
-                    except Exception:
-                        pass
-                    continue
-
-                try:
-                    with open(task_file) as f:
-                        current = json.load(f)
-                except Exception:
-                    continue
-
-                if current.get("task_id") != task_id:
-                    continue
-
-                current["status"] = "pending"
-                current.pop("assigned_to", None)
-                current.pop("started_at", None)
-                current["requeued_at"] = datetime.now().isoformat()
-                current["requeue_reason"] = "force_kill_timeout"
-                current["stuck_requeue_count"] = int(current.get("stuck_requeue_count", 0)) + 1
-
-                queue_file = self.queue_path / task_file.name
-                with open(queue_file, 'w') as f:
-                    json.dump(current, f, indent=2)
-                task_file.unlink()
-
-                hb_file = self.processing_path / f"{task_id}.heartbeat.json"
-                if hb_file.exists():
-                    try:
-                        hb_file.unlink()
-                    except Exception:
-                        pass
-
-                try:
-                    kill_signal.unlink()
-                except Exception:
-                    pass
-                if abort_signal.exists():
-                    try:
-                        abort_signal.unlink()
-                    except Exception:
-                        pass
-
-                self.log_decision(
-                    "TASK_REQUEUED_TIMEOUT",
-                    f"Requeued stuck task {task_id[:8]} after kill timeout",
-                    {
-                        "task_id": task_id[:8],
-                        "worker": worker_name,
-                        "elapsed_min": elapsed_min,
-                        "progress_age_sec": stuck_info.get("progress_age_sec", 0),
-                        "threshold_sec": stuck_info.get("threshold_sec", 0),
-                        "requeue_reason": "force_kill_timeout",
-                    }
-                )
-                continue
-
-            if abort_data:
-                # Abort sent but task still processing; escalate to force kill after grace period.
-                abort_time = datetime.fromisoformat(abort_data.get('timestamp'))
-                abort_age = (datetime.now() - abort_time).total_seconds()
-                if abort_age > 120:
-                    self._force_kill_worker_task(worker_name, task_id)
-                continue
-
-            # First detection - send graceful abort signal.
-            self._send_abort_signal(
-                worker_name,
-                task_id,
-                (
+            now = datetime.now()
+            incident = self._get_or_create_incident(task, {
+                "success": False,
+                "error": "stuck_no_progress",
+                "reason": (
                     f"no_progress_{stuck_info.get('progress_age_sec', 0)}s"
                     f"_threshold_{stuck_info.get('threshold_sec', 0)}s"
+                ),
+            })
+            incident["updated_at"] = now.isoformat()
+
+            abort_sent_at = incident.get("stuck_abort_sent_at")
+            kill_sent_at = incident.get("stuck_force_kill_sent_at")
+            abort_count = int(incident.get("stuck_abort_count", 0))
+
+            if not abort_sent_at:
+                self._send_abort_signal(
+                    worker_name,
+                    task_id,
+                    (
+                        f"no_progress_{stuck_info.get('progress_age_sec', 0)}s"
+                        f"_threshold_{stuck_info.get('threshold_sec', 0)}s"
+                    )
                 )
+                incident["stuck_abort_sent_at"] = now.isoformat()
+                incident["stuck_abort_count"] = abort_count + 1
+                incident["history"].append({
+                    "at": now.isoformat(),
+                    "event": "stuck_abort_sent",
+                    "task_id": task_id,
+                    "worker": worker_name,
+                })
+                continue
+
+            if not kill_sent_at:
+                # User policy: if abort has been sent twice for the same stuck task,
+                # escalate immediately to force-kill.
+                if abort_count < 2:
+                    self._send_abort_signal(
+                        worker_name,
+                        task_id,
+                        (
+                            f"no_progress_{stuck_info.get('progress_age_sec', 0)}s"
+                            f"_threshold_{stuck_info.get('threshold_sec', 0)}s"
+                        )
+                    )
+                    incident["stuck_abort_sent_at"] = now.isoformat()
+                    incident["stuck_abort_count"] = abort_count + 1
+                    incident["history"].append({
+                        "at": now.isoformat(),
+                        "event": "stuck_abort_sent_repeat",
+                        "task_id": task_id,
+                        "worker": worker_name,
+                        "abort_count": incident["stuck_abort_count"],
+                    })
+                    continue
+
+                self._force_kill_worker_task(worker_name, task_id)
+                incident["stuck_force_kill_sent_at"] = now.isoformat()
+                incident["history"].append({
+                    "at": now.isoformat(),
+                    "event": "stuck_force_kill_sent",
+                    "task_id": task_id,
+                    "worker": worker_name,
+                })
+                continue
+
+            # Force kill was already sent. If task still hasn't moved after grace,
+            # requeue from processing regardless of signal-file lifecycle.
+            try:
+                kill_age = (now - datetime.fromisoformat(kill_sent_at)).total_seconds()
+            except Exception:
+                kill_age = 0
+            if kill_age < self.force_kill_requeue_seconds:
+                continue
+
+            if not task_file.exists():
+                continue
+
+            try:
+                with open(task_file) as f:
+                    current = json.load(f)
+            except Exception:
+                continue
+
+            if current.get("task_id") != task_id:
+                continue
+
+            current["status"] = "pending"
+            current.pop("assigned_to", None)
+            current.pop("started_at", None)
+            current["requeued_at"] = now.isoformat()
+            current["requeue_reason"] = "force_kill_timeout"
+            current["stuck_requeue_count"] = int(current.get("stuck_requeue_count", 0)) + 1
+
+            queue_file = self.queue_path / task_file.name
+            with open(queue_file, 'w') as f:
+                json.dump(current, f, indent=2)
+            task_file.unlink()
+
+            hb_file = self.processing_path / f"{task_id}.heartbeat.json"
+            if hb_file.exists():
+                try:
+                    hb_file.unlink()
+                except Exception:
+                    pass
+
+            # Best-effort cleanup of stale control signals for this worker.
+            for suffix in ("abort", "kill"):
+                sig = self.signals_path / f"{worker_name}.{suffix}"
+                if sig.exists():
+                    try:
+                        with open(sig) as f:
+                            sig_data = json.load(f)
+                        if sig_data.get("task_id") == task_id:
+                            sig.unlink()
+                    except Exception:
+                        pass
+
+            incident["history"].append({
+                "at": now.isoformat(),
+                "event": "stuck_requeued_after_force_kill_timeout",
+                "task_id": task_id,
+                "worker": worker_name,
+            })
+
+            self.log_decision(
+                "TASK_REQUEUED_TIMEOUT",
+                f"Requeued stuck task {task_id[:8]} after kill timeout",
+                {
+                    "task_id": task_id[:8],
+                    "worker": worker_name,
+                    "elapsed_min": elapsed_min,
+                    "progress_age_sec": stuck_info.get("progress_age_sec", 0),
+                    "threshold_sec": stuck_info.get("threshold_sec", 0),
+                    "requeue_reason": "force_kill_timeout",
+                }
             )
 
     def _recover_orphaned_processing_tasks(self, running_gpus: Dict[str, Dict]):
