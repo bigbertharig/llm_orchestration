@@ -74,13 +74,13 @@ First run on new hardware? Run `python setup.py` first to generate `config.json`
 cd ~/llm_orchestration
 source ~/ml-env/bin/activate
 
-python scripts/submit.py shared/plans/<plan_name> \
+python scripts/submit.py shared/plans/shoulders/<plan_name> \
   --config '{"VAR1": "value1", "VAR2": "value2"}'
 ```
 
-**Example - video_zim_batch:**
+**Example - dc_integration:**
 ```bash
-python scripts/submit.py shared/plans/video_zim_batch \
+python scripts/submit.py shared/plans/shoulders/dc_integration \
   --config '{
     "ZIM_PATH": "/path/to/videos.zim",
     "SOURCE_ID": "my-source",
@@ -88,7 +88,7 @@ python scripts/submit.py shared/plans/video_zim_batch \
   }'
 ```
 
-Plans live in `shared/plans/`. Each has a `plan.md` defining the workflow. See [PLAN_FORMAT.md](PLAN_FORMAT.md) for how to write plans.
+Runnable plans live in `shared/plans/shoulders/` (contracts). Full project code lives in `shared/plans/arms/`. See [PLAN_FORMAT.md](PLAN_FORMAT.md) for plan authoring.
 
 ---
 

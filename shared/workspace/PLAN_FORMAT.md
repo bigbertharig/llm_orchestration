@@ -208,7 +208,7 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 ```markdown
 ### task_id
 - **executor**: brain|worker
-- **task_class**: cpu|script|llm
+- **task_class**: cpu|script|llm|brain
 - **command**: `shell command here`
 - **depends_on**: task1, task2
 - **requires**: path1, path2
@@ -223,7 +223,7 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 |-------|--------|-------------|
 | `task_id` | Any unique name | Used for dependency references |
 | `executor` | `brain` or `worker` | Who runs this task (routing control) |
-| `task_class` | `cpu`, `script`, or `llm` | **Required.** What resources the task needs (see below) |
+| `task_class` | `cpu`, `script`, `llm`, or `brain` | **Required.** What resources the task needs (see below) |
 | `command` | Shell command in backticks | What to execute |
 | `depends_on` | Comma-separated task IDs or `none` | Tasks that must complete first |
 | `requires` | Comma-separated file paths/patterns | **Required.** Inputs this task expects to read |
@@ -273,6 +273,7 @@ Use `requires` and `produces` to make task handoffs explicit and machine-checkab
 | `cpu` | CPU only | File I/O, data transforms, aggregation | 1000 MB (nominal) |
 | `script` | GPU compute (no LLM) | Transcription, embeddings, ffmpeg | **Per-script estimate** |
 | `llm` | GPU + LLM model | Text generation, parsing, summarization | 5000 MB (not stackable) |
+| `brain` | Brain process only | Global planning, cross-item reasoning, final arbitration | N/A |
 | `meta` | Worker management | load_llm, unload_llm | 0 MB |
 
 Workers prioritize tasks they're optimized for:
@@ -787,7 +788,7 @@ python scripts/submit.py embedding_generator \
   --config '{"DOCS_PATH": "/data/documents"}'
 
 # Resume an existing batch
-python scripts/submit.py video_zim_batch \
+python scripts/submit.py /mnt/shared/plans/shoulders/dc_integration \
   --config '{"RUN_MODE": "resume", "RESUME_BATCH_ID": "e49bc95c"}'
 ```
 

@@ -4,6 +4,7 @@
 import argparse
 import json
 import re
+import shlex
 import subprocess
 from datetime import datetime
 from http import HTTPStatus
@@ -58,7 +59,12 @@ def task_sort_key(task: dict[str, Any]) -> str:
 
 def to_task_view(task: dict[str, Any]) -> dict[str, Any]:
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
-    error_text = (result.get("output") or task.get("blocked_reason") or "")
+    error_text = (
+        result.get("output")
+        or task.get("error")
+        or task.get("blocked_reason")
+        or ""
+    )
     error_text = " ".join(str(error_text).split())
     return {
         "task_id": task.get("task_id"),
@@ -88,8 +94,16 @@ def list_tasks(shared_path: Path) -> dict[str, list[dict[str, Any]]]:
         folder = shared_path / "tasks" / lane
         for task_file in iter_task_files(folder) or []:
             task = load_json(task_file)
-            if task:
+            if not task:
+                continue
+            status = str(task.get("status") or "").strip().lower()
+            # Some failed tasks can be materialized under complete/.
+            # Rebucket by explicit status so dashboard failure counts stay accurate.
+            if status in {"failed", "blocked_cloud", "abandoned", "error"}:
+                lanes["failed"].append(task)
+            else:
                 lanes[lane].append(task)
+    for lane in lanes:
         lanes[lane].sort(key=task_sort_key, reverse=True)
     return lanes
 
@@ -243,6 +257,13 @@ def load_brain_heartbeat(shared_path: Path) -> dict[str, Any]:
         or load_json(shared_path / "brain" / "heartbeat.json")
         or {}
     )
+
+
+def file_mtime_iso(path: Path) -> str | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+    except Exception:
+        return None
 
 
 def load_gpu_telemetry() -> dict[int, dict[str, Any]]:
@@ -460,6 +481,19 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
 
     brain = load_brain_state(shared_path)
     brain_hb = load_brain_heartbeat(shared_path)
+    brain_state_mtime = file_mtime_iso(shared_path / "brain" / "state.json")
+    hb_age = heartbeat_age_seconds(brain_hb.get("last_updated"))
+    mtime_age = heartbeat_age_seconds(brain_state_mtime)
+    # Fallback when heartbeat writing is stale but brain state is active.
+    if brain_state_mtime and (
+        not brain_hb.get("last_updated")
+        or hb_age is None
+        or (hb_age > HEARTBEAT_MAX_S and mtime_age is not None and mtime_age <= HEARTBEAT_MAX_S)
+    ):
+        brain_hb = dict(brain_hb)
+        brain_hb["last_updated"] = brain_state_mtime
+        brain_hb["last_updated_source"] = "state_file_mtime"
+
     gpu_telemetry = load_gpu_telemetry()
     configured_brain_model = config.get("brain", {}).get("model") if isinstance(config.get("brain"), dict) else None
     active_batches = brain.get("active_batches", {}) if isinstance(brain.get("active_batches"), dict) else {}
@@ -676,43 +710,223 @@ def run_shell(cmd: str, timeout_s: int = 120) -> dict[str, Any]:
         }
 
 
+def shoulders_dir(shared_path: Path) -> Path:
+    return shared_path / "plans" / "shoulders"
+
+
+def shoulder_plan_dir(shared_path: Path, plan_name: str) -> Path:
+    return shoulders_dir(shared_path) / plan_name
+
+
 def discover_plans(shared_path: Path) -> list[str]:
-    plans_dir = shared_path / "plans"
+    plans_dir = shoulders_dir(shared_path)
     out: list[str] = []
     if not plans_dir.exists():
         return out
     for p in sorted(plans_dir.iterdir()):
-        if p.is_dir() and (p / "plan.md").exists():
+        if not p.is_dir():
+            continue
+        has_scripts = (p / "scripts").exists()
+        has_root_plan = (p / "plan.md").exists()
+        has_input_starter = False
+        input_dir = p / "input"
+        if input_dir.exists():
+            has_input_starter = any(
+                md.is_file() and (md.name == "plan.md" or md.name.endswith("_plan.md"))
+                for md in input_dir.glob("*.md")
+            )
+        if has_scripts and (has_root_plan or has_input_starter):
             out.append(p.name)
     return out
 
 
+def discover_plan_starters(shared_path: Path, plan_name: str) -> list[str]:
+    plan_dir = shoulder_plan_dir(shared_path, plan_name)
+    starters: set[str] = set()
+    if not plan_dir.exists():
+        return []
+    for md in plan_dir.glob("*.md"):
+        if md.is_file() and (md.name == "plan.md" or md.name.endswith("_plan.md")):
+            starters.add(md.name)
+    input_dir = plan_dir / "input"
+    if input_dir.exists():
+        for md in input_dir.rglob("*.md"):
+            if md.is_file() and (md.name == "plan.md" or md.name.endswith("_plan.md")):
+                starters.add(str(Path("input") / md.relative_to(input_dir)))
+    return sorted(starters)
+
+
+def discover_plan_input_files(shared_path: Path, plan_name: str, limit: int = 200) -> list[str]:
+    plan_dir = shoulder_plan_dir(shared_path, plan_name)
+    input_dir = plan_dir / "input"
+    if not input_dir.exists():
+        return []
+    out: list[str] = []
+    for p in sorted(input_dir.rglob("*")):
+        if len(out) >= limit:
+            break
+        if not p.is_file():
+            continue
+        if ".submit_runtime" in p.parts:
+            continue
+        rel = p.relative_to(shared_path)
+        out.append(f"/mnt/shared/{rel.as_posix()}")
+    return out
+
+
+def find_batch_dir(shared_path: Path, batch_id: str) -> tuple[str, Path] | None:
+    if not batch_id:
+        return None
+    plans_dir = shoulders_dir(shared_path)
+    if not plans_dir.exists():
+        return None
+    for plan_dir in plans_dir.iterdir():
+        if not plan_dir.is_dir():
+            continue
+        candidate = plan_dir / "history" / batch_id
+        if candidate.exists() and candidate.is_dir():
+            return plan_dir.name, candidate
+    return None
+
+
+def discover_recent_batches(
+    shared_path: Path,
+    active_batches: dict[str, Any],
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    plans_dir = shoulders_dir(shared_path)
+    out: list[dict[str, Any]] = []
+    if not plans_dir.exists():
+        return out
+
+    active_set = set(active_batches.keys())
+    for plan_dir in plans_dir.iterdir():
+        if not plan_dir.is_dir():
+            continue
+        hist = plan_dir / "history"
+        if not hist.exists():
+            continue
+        for batch_dir in hist.iterdir():
+            if not batch_dir.is_dir():
+                continue
+            out.append(
+                {
+                    "batch_id": batch_dir.name,
+                    "plan": plan_dir.name,
+                    "updated_at": file_mtime_iso(batch_dir),
+                    "active": batch_dir.name in active_set,
+                }
+            )
+    out.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
+    return out[:limit]
+
+
+def collect_batch_outputs(shared_path: Path, batch_id: str, max_files: int = 40) -> dict[str, Any]:
+    found = find_batch_dir(shared_path, batch_id)
+    if not found:
+        return {"ok": False, "message": f"Batch directory not found for {batch_id}"}
+
+    plan_name, batch_dir = found
+    files: list[Path] = []
+    preferred = [
+        batch_dir / "output",
+        batch_dir / "results",
+    ]
+    for root in preferred:
+        if not root.exists():
+            continue
+        for p in sorted(root.rglob("*")):
+            if p.is_file():
+                files.append(p)
+
+    for extra in [
+        batch_dir / "execution_stats.json",
+        batch_dir / "manifest.json",
+    ]:
+        if extra.exists() and extra.is_file():
+            files.append(extra)
+
+    # De-duplicate while preserving order.
+    dedup: list[Path] = []
+    seen: set[Path] = set()
+    for p in files:
+        if p in seen:
+            continue
+        seen.add(p)
+        dedup.append(p)
+    files = dedup[:max_files]
+
+    def to_mnt(path: Path) -> str:
+        rel = path.relative_to(shared_path)
+        return f"/mnt/shared/{rel.as_posix()}"
+
+    file_rows: list[dict[str, Any]] = []
+    for p in files:
+        rel = p.relative_to(batch_dir).as_posix()
+        try:
+            size_b = int(p.stat().st_size)
+        except Exception:
+            size_b = 0
+        preview = ""
+        if p.suffix.lower() in {".md", ".txt", ".json", ".csv", ".log"}:
+            try:
+                preview = p.read_text(encoding="utf-8", errors="replace")[:2000]
+            except Exception:
+                preview = ""
+        file_rows.append(
+            {
+                "name": p.name,
+                "relative_path": rel,
+                "path": str(p),
+                "mnt_path": to_mnt(p),
+                "size_bytes": size_b,
+                "updated_at": file_mtime_iso(p),
+                "preview": preview,
+            }
+        )
+
+    return {
+        "ok": True,
+        "batch_id": batch_id,
+        "plan": plan_name,
+        "batch_path": str(batch_dir),
+        "batch_mnt_path": to_mnt(batch_dir),
+        "files": file_rows,
+        "message": f"Found {len(file_rows)} output/result files",
+    }
+
+
 def default_plan_config(shared_path: Path, plan_name: str) -> dict[str, Any]:
     if plan_name == "research_assistant":
-        input_dir = shared_path / "plans" / "research_assistant" / "input"
-        default_input = "/mnt/shared/plans/research_assistant/input/canucks.md"
-        if input_dir.exists():
-            md_files = sorted([p for p in input_dir.glob("*.md") if p.is_file()])
-            if md_files:
-                default_input = f"/mnt/shared/plans/research_assistant/input/{md_files[0].name}"
         return {
-            "INPUT_FILE": default_input,
+            "QUERY_FILE": "/mnt/shared/plans/shoulders/research_assistant/input/query.md",
+            "TARGET_COUNT": "20",
+            "TARGET_TOLERANCE": "0",
+            "SECONDARY_TARGET_COUNT": "20",
             "SEARCH_DEPTH": "basic",
             "OUTPUT_FORMAT": "both",
             "RUN_MODE": "fresh",
         }
-    if plan_name == "video_zim_batch":
+    if plan_name == "dc_integration":
         return {
             "ZIM_PATH": "/mnt/shared/path/to/archive.zim",
             "SOURCE_ID": "source_name",
-            "OUTPUT_FOLDER": "/mnt/shared/plans/video_zim_batch/output",
+            "OUTPUT_FOLDER": "/mnt/shared/plans/shoulders/dc_integration/output",
             "RUN_MODE": "fresh",
         }
     return {"RUN_MODE": "fresh"}
 
 
-def plan_input_help(shared_path: Path, plan_name: str) -> list[dict[str, str]]:
-    plan_md = shared_path / "plans" / plan_name / "plan.md"
+def plan_input_help(shared_path: Path, plan_name: str, starter_file: str | None = None) -> list[dict[str, str]]:
+    plan_dir = shoulder_plan_dir(shared_path, plan_name)
+    if starter_file:
+        plan_md = plan_dir / starter_file
+    else:
+        plan_md = plan_dir / "plan.md"
+    if not plan_md.exists() and not starter_file:
+        starters = discover_plan_starters(shared_path, plan_name)
+        if starters:
+            plan_md = plan_dir / starters[0]
     if not plan_md.exists():
         return []
     try:
@@ -1706,6 +1920,10 @@ CONTROLS_HTML = """<!doctype html>
     table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
     th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: top; word-break: break-word; }
     th { color: var(--muted); font-weight: 600; }
+    .mono { font-family: "JetBrains Mono", monospace; }
+    .stack { display: grid; gap: 8px; }
+    .tiny { font-size: 11px; color: var(--muted); }
+    .preview { white-space: pre-wrap; background: #0b1a2a; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-family: "JetBrains Mono", monospace; font-size: 12px; max-height: 320px; overflow: auto; }
     @media (max-width: 980px) {
       .start-grid { grid-template-columns: 1fr; }
       .field-row { grid-template-columns: 1fr; }
@@ -1721,18 +1939,26 @@ CONTROLS_HTML = """<!doctype html>
     <h1>Control Panel</h1>
 
     <div class=\"card\">
-      <h3>Kill Plan</h3>
+      <h3>Batch Actions</h3>
       <div class=\"row\">
         <select id=\"killBatch\"></select>
         <button class=\"danger\" onclick=\"killPlan()\">Kill selected batch</button>
+        <button class=\"danger\" onclick=\"killAllActive()\">Kill all active</button>
       </div>
-      <div class=\"k\">Runs `kill_plan.py <batch_id>` and removes queued/processing/private tasks for that batch.</div>
-      <h3 style=\"margin-top:12px;\">Resume Plan</h3>
+      <div class=\"k\">Kills selected/all active batches without shutting down workers.</div>
       <div class=\"row\">
         <select id=\"resumeBatch\"></select>
         <button onclick=\"resumePlan()\">Resume selected batch</button>
       </div>
-      <div class=\"k\">Submits the plan in resume mode for the selected batch ID.</div>
+      <div class=\"k\">Resubmits selected batch with `RUN_MODE=resume`.</div>
+      <div style=\"margin-top:10px;\">
+        <table>
+          <thead>
+            <tr><th>Batch</th><th>Plan</th><th>Started</th><th>Actions</th></tr>
+          </thead>
+          <tbody id=\"activeBatchRows\"></tbody>
+        </table>
+      </div>
     </div>
 
     <div class=\"card\">
@@ -1744,15 +1970,24 @@ CONTROLS_HTML = """<!doctype html>
     </div>
 
     <div class=\"card\">
-      <h3>Start Plan</h3>
+      <h3>Start Plan (Simplified)</h3>
       <div class=\"row\" style=\"margin-bottom:8px;\">
         <select id=\"planName\"></select>
+        <select id=\"starterFile\"></select>
       </div>
       <div class=\"start-grid\">
         <div>
-          <div class=\"k\">Config JSON</div>
+          <div class=\"row\" style=\"margin-bottom:6px;\">
+            <button onclick=\"applyFormToJson()\">Apply form to JSON</button>
+            <button onclick=\"loadJsonToForm()\">Load JSON into form</button>
+          </div>
+          <div id=\"planConfigForm\" class=\"field-grid\"></div>
+          <div class=\"k\" style=\"margin-top:8px;\">Advanced JSON (optional)</div>
           <textarea id=\"planConfig\">{
-  "INPUT_FILE": "/mnt/shared/plans/research_assistant/input/canucks.md",
+  "QUERY_FILE": "/mnt/shared/plans/shoulders/research_assistant/input/query.md",
+  "TARGET_COUNT": "20",
+  "TARGET_TOLERANCE": "0",
+  "SECONDARY_TARGET_COUNT": "20",
   "SEARCH_DEPTH": "basic",
   "OUTPUT_FORMAT": "both",
   "RUN_MODE": "fresh"
@@ -1770,6 +2005,18 @@ CONTROLS_HTML = """<!doctype html>
     </div>
 
     <div class=\"card\">
+      <h3>Batch Outputs</h3>
+      <div class=\"row\">
+        <select id=\"outputBatch\"></select>
+        <button onclick=\"loadBatchOutputs()\">Load outputs</button>
+      </div>
+      <div class=\"k\">Browse recent batch output files and quick previews.</div>
+      <div id=\"outputMeta\" class=\"tiny\" style=\"margin-top:8px;\"></div>
+      <div id=\"outputFiles\" style=\"margin-top:8px;\"></div>
+      <div id=\"outputPreview\" class=\"preview\" style=\"margin-top:8px;\">(select a file preview)</div>
+    </div>
+
+    <div class=\"card\">
       <h3>Result</h3>
       <div id=\"result\">(waiting)</div>
     </div>
@@ -1777,7 +2024,11 @@ CONTROLS_HTML = """<!doctype html>
 
   <script>
     let planDefaults = {};
+    let planStarters = {};
+    let planDefaultStarter = {};
     let planInputs = {};
+    let planInputFiles = {};
+    let outputFiles = [];
 
     async function api(path, payload) {
       const res = await fetch(path, {
@@ -1801,39 +2052,141 @@ CONTROLS_HTML = """<!doctype html>
       el.className = data.ok ? 'ok' : 'bad';
     }
 
+    function fmtTs(ts) {
+      if (!ts) return '-';
+      const d = new Date(ts);
+      if (Number.isNaN(d.getTime())) return String(ts);
+      return d.toLocaleString();
+    }
+
+    function parseOptions(optionsText) {
+      const raw = String(optionsText || '').trim();
+      if (!raw) return [];
+      return raw
+        .split(/[|,/]/)
+        .map(x => x.trim())
+        .filter(Boolean);
+    }
+
+    function getCurrentConfig() {
+      try {
+        const obj = JSON.parse(document.getElementById('planConfig').value || '{}');
+        return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : {};
+      } catch (e) {
+        return {};
+      }
+    }
+
+    function readFormConfig() {
+      const out = {};
+      document.querySelectorAll('[data-config-key]').forEach(el => {
+        const key = el.getAttribute('data-config-key');
+        if (!key) return;
+        out[key] = String(el.value ?? '').trim();
+      });
+      return out;
+    }
+
+    function applyFormToJson() {
+      const cfg = readFormConfig();
+      document.getElementById('planConfig').value = JSON.stringify(cfg, null, 2);
+    }
+
+    function loadJsonToForm() {
+      renderConfigForm(document.getElementById('planName').value, getCurrentConfig());
+    }
+
+    function renderConfigForm(planName, overrideCfg) {
+      const cfg = (overrideCfg && typeof overrideCfg === 'object') ? overrideCfg : (planDefaults[planName] || getCurrentConfig());
+      const starterFile = document.getElementById('starterFile').value;
+      const perStarter = planInputs[planName] || {};
+      const helpList = perStarter[starterFile] || [];
+      const helpByKey = {};
+      helpList.forEach(x => { helpByKey[x.key] = x; });
+      const keys = Object.keys(cfg);
+      const inputFiles = planInputFiles[planName] || [];
+      const rows = keys.map(key => {
+        const v = String(cfg[key] ?? '');
+        const help = helpByKey[key] || {};
+        const opts = parseOptions(help.options || '');
+        const desc = help.description ? `<div class="field-help">${help.description}</div>` : '';
+        const hint = help.options ? `<div class="field-help">Options: ${help.options}</div>` : '<div class="field-help">(free text)</div>';
+        if (opts.length) {
+          const options = opts.map(o => `<option value="${o}" ${o === v ? 'selected' : ''}>${o}</option>`).join('');
+          return `<div class="field-row"><div class="field-key">${key}</div><div>${desc}${hint}<select data-config-key="${key}">${options}</select></div></div>`;
+        }
+        if (key.endsWith('_FILE')) {
+          const listId = `list_${key.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+          const dlist = inputFiles.map(p => `<option value="${p}"></option>`).join('');
+          return `<div class="field-row"><div class="field-key">${key}</div><div>${desc}${hint}<input data-config-key="${key}" value="${v}" list="${listId}" /><datalist id="${listId}">${dlist}</datalist></div></div>`;
+        }
+        return `<div class="field-row"><div class="field-key">${key}</div><div>${desc}${hint}<input data-config-key="${key}" value="${v}" /></div></div>`;
+      }).join('');
+      document.getElementById('planConfigForm').innerHTML = rows || '<div class="k">(no config keys)</div>';
+    }
+
+    function renderActiveBatches(rows) {
+      const tbody = document.getElementById('activeBatchRows');
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="k">(no active batches)</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map(r => `
+        <tr>
+          <td class="mono">${r.batch_id || '-'}</td>
+          <td>${r.plan || '-'}</td>
+          <td>${fmtTs(r.started_at)}</td>
+          <td class="row">
+            <button class="danger" onclick="killBatchInline('${r.batch_id}')">Kill</button>
+            <button onclick="resumeBatchInline('${r.batch_id}')">Resume</button>
+            <button onclick="viewBatchInline('${r.batch_id}')">Outputs</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function fillBatchSelect(selectId, ids) {
+      const el = document.getElementById(selectId);
+      el.innerHTML = '';
+      ids.forEach(b => {
+        const o = document.createElement('option');
+        o.value = b;
+        o.textContent = b;
+        el.appendChild(o);
+      });
+      if (!el.options.length) {
+        const o = document.createElement('option');
+        o.value = '';
+        o.textContent = '(none)';
+        el.appendChild(o);
+      }
+    }
+
     async function refreshOptions() {
       const res = await fetch('/api/control/options');
       const data = await res.json();
       planDefaults = data.plan_defaults || {};
+      planStarters = data.plan_starters || {};
+      planDefaultStarter = data.plan_default_starter || {};
       planInputs = data.plan_inputs || {};
-      const kill = document.getElementById('killBatch');
-      const resume = document.getElementById('resumeBatch');
-      kill.innerHTML = '';
-      resume.innerHTML = '';
+      planInputFiles = data.plan_input_files || {};
+      renderActiveBatches(data.active_batches_meta || []);
+
+      const ids = [];
+      const seen = new Set();
       (data.active_batches || []).forEach(b => {
-        const o = document.createElement('option');
-        o.value = b;
-        o.textContent = b;
-        kill.appendChild(o);
-        const r = document.createElement('option');
-        r.value = b;
-        r.textContent = b;
-        resume.appendChild(r);
+        if (!seen.has(b)) { ids.push(b); seen.add(b); }
       });
-      if (!kill.options.length) {
-        const o = document.createElement('option');
-        o.value = '';
-        o.textContent = '(no active batches)';
-        kill.appendChild(o);
-      }
-      if (!resume.options.length) {
-        const o = document.createElement('option');
-        o.value = '';
-        o.textContent = '(no resumable batches)';
-        resume.appendChild(o);
-      }
+      (data.recent_batches || []).forEach(r => {
+        const b = r.batch_id;
+        if (b && !seen.has(b)) { ids.push(b); seen.add(b); }
+      });
+      fillBatchSelect('killBatch', ids);
+      fillBatchSelect('resumeBatch', ids);
+      fillBatchSelect('outputBatch', ids);
 
       const plan = document.getElementById('planName');
+      const starter = document.getElementById('starterFile');
       plan.innerHTML = '';
       (data.plans || []).forEach(p => {
         const o = document.createElement('option');
@@ -1842,6 +2195,10 @@ CONTROLS_HTML = """<!doctype html>
         plan.appendChild(o);
       });
       plan.onchange = () => applyPlanDefault(plan.value);
+      starter.onchange = () => {
+        renderPlanInputHelp(plan.value, starter.value);
+        renderConfigForm(plan.value);
+      };
       if (plan.value) applyPlanDefault(plan.value);
     }
 
@@ -1850,9 +2207,29 @@ CONTROLS_HTML = """<!doctype html>
       if (defaults) {
         document.getElementById('planConfig').value = JSON.stringify(defaults, null, 2);
       }
+      const starterSelect = document.getElementById('starterFile');
+      starterSelect.innerHTML = '';
+      const starters = planStarters[planName] || [];
+      starters.forEach(s => {
+        const o = document.createElement('option');
+        o.value = s;
+        o.textContent = s;
+        starterSelect.appendChild(o);
+      });
+      if (starters.length) {
+        starterSelect.value = planDefaultStarter[planName] || starters[0];
+      }
+      renderPlanInputHelp(planName, starterSelect.value);
+      renderConfigForm(planName, defaults || {});
+    }
+
+    function renderPlanInputHelp(planName, starterFile) {
+      const perStarter = planInputs[planName] || {};
+      const inputList = perStarter[starterFile] || [];
       const help = {};
-      (planInputs[planName] || []).forEach(x => { help[x.key] = x; });
-      const src = defaults && Object.keys(defaults).length ? defaults : help;
+      inputList.forEach(x => { help[x.key] = x; });
+      const defaults = planDefaults[planName] || {};
+      const src = Object.keys(defaults).length ? defaults : help;
       const keys = Object.keys(src);
       const rows = keys.map(key => {
         const h = help[key] || {};
@@ -1870,10 +2247,32 @@ CONTROLS_HTML = """<!doctype html>
         : '<div class=\"k\">(no input metadata found)</div>';
     }
 
+    async function killBatchInline(batchId) {
+      if (!batchId) return;
+      showResult(await api('/api/control/kill_plan', { batch_id: batchId }));
+      await refreshOptions();
+    }
+
+    async function resumeBatchInline(batchId) {
+      if (!batchId) return;
+      showResult(await api('/api/control/resume_plan', { batch_id: batchId }));
+      await refreshOptions();
+    }
+
+    async function viewBatchInline(batchId) {
+      document.getElementById('outputBatch').value = batchId;
+      await loadBatchOutputs();
+    }
+
     async function killPlan() {
       const batchId = document.getElementById('killBatch').value;
       if (!batchId) return;
       showResult(await api('/api/control/kill_plan', { batch_id: batchId }));
+      await refreshOptions();
+    }
+
+    async function killAllActive() {
+      showResult(await api('/api/control/kill_all_active', {}));
       await refreshOptions();
     }
 
@@ -1891,9 +2290,59 @@ CONTROLS_HTML = """<!doctype html>
 
     async function startPlan() {
       const planName = document.getElementById('planName').value;
+      const starterFile = document.getElementById('starterFile').value;
+      applyFormToJson();
       const configText = document.getElementById('planConfig').value;
-      showResult(await api('/api/control/start_plan', { plan_name: planName, config_json: configText }));
+      showResult(await api('/api/control/start_plan', { plan_name: planName, starter_file: starterFile, config_json: configText }));
       await refreshOptions();
+    }
+
+    function showOutputPreview(idx) {
+      const row = outputFiles[idx];
+      const box = document.getElementById('outputPreview');
+      if (!row) {
+        box.textContent = '(no preview)';
+        return;
+      }
+      const header = [
+        `file: ${row.relative_path}`,
+        `mnt: ${row.mnt_path}`,
+        `updated: ${fmtTs(row.updated_at)}`,
+        `size: ${row.size_bytes} bytes`,
+        '',
+      ].join('\\n');
+      box.textContent = header + (row.preview || '(preview unavailable for this file type)');
+    }
+
+    async function loadBatchOutputs() {
+      const batchId = document.getElementById('outputBatch').value;
+      if (!batchId) return;
+      const data = await api('/api/control/batch_outputs', { batch_id: batchId });
+      showResult(data);
+      if (!data.ok) {
+        document.getElementById('outputMeta').textContent = '';
+        document.getElementById('outputFiles').innerHTML = '';
+        document.getElementById('outputPreview').textContent = '(no output)';
+        return;
+      }
+      outputFiles = data.files || [];
+      document.getElementById('outputMeta').textContent =
+        `Batch ${data.batch_id} | Plan ${data.plan} | ${outputFiles.length} files | ${data.batch_mnt_path}`;
+      const rows = outputFiles.map((f, i) => `
+        <tr>
+          <td class="mono">${f.relative_path}</td>
+          <td>${f.size_bytes}</td>
+          <td>${fmtTs(f.updated_at)}</td>
+          <td><button onclick="showOutputPreview(${i})">Preview</button></td>
+        </tr>
+      `).join('');
+      document.getElementById('outputFiles').innerHTML = `
+        <table>
+          <thead><tr><th>File</th><th>Bytes</th><th>Updated</th><th></th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="4" class="k">(no files)</td></tr>'}</tbody>
+        </table>
+      `;
+      showOutputPreview(0);
     }
 
     refreshOptions().catch(console.error);
@@ -1965,14 +2414,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
         brain = load_brain_state(self.shared_path)
         active = brain.get("active_batches", {}) if isinstance(brain.get("active_batches"), dict) else {}
         plans = discover_plans(self.shared_path)
+        recent_batches = discover_recent_batches(self.shared_path, active)
         plan_defaults = {p: default_plan_config(self.shared_path, p) for p in plans}
-        plan_inputs = {p: plan_input_help(self.shared_path, p) for p in plans}
+        plan_starters = {p: discover_plan_starters(self.shared_path, p) for p in plans}
+        plan_input_files = {p: discover_plan_input_files(self.shared_path, p) for p in plans}
+        plan_default_starter = {p: ("plan.md" if "plan.md" in plan_starters[p] else (plan_starters[p][0] if plan_starters[p] else "")) for p in plans}
+        plan_inputs = {
+            p: {starter: plan_input_help(self.shared_path, p, starter) for starter in plan_starters[p]}
+            for p in plans
+        }
+        active_meta = []
+        for batch_id, meta in active.items():
+            if not isinstance(meta, dict):
+                continue
+            active_meta.append(
+                {
+                    "batch_id": batch_id,
+                    "plan": meta.get("plan", ""),
+                    "started_at": meta.get("started_at", ""),
+                }
+            )
+        active_meta.sort(key=lambda x: str(x.get("started_at") or ""), reverse=True)
         return {
             "ok": True,
             "active_batches": sorted(active.keys()),
+            "active_batches_meta": active_meta,
             "resumable_batches": sorted(active.keys()),
+            "recent_batches": recent_batches,
             "plans": plans,
             "plan_defaults": plan_defaults,
+            "plan_starters": plan_starters,
+            "plan_input_files": plan_input_files,
+            "plan_default_starter": plan_default_starter,
             "plan_inputs": plan_inputs,
         }
 
@@ -1983,6 +2456,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         cmd = f"python3 {local_kill} {batch_id} --keep-workers --keep-models --no-default-warm"
         out = run_shell(cmd, timeout_s=240)
         out["message"] = f"Killed batch {batch_id}" if out.get("ok") else f"Failed to kill batch {batch_id}"
+        return out
+
+    def _kill_all_active(self) -> dict[str, Any]:
+        local_kill = Path(__file__).resolve().parent / "kill_plan.py"
+        cmd = f"python3 {local_kill} --keep-workers --keep-models --no-default-warm"
+        out = run_shell(cmd, timeout_s=300)
+        out["message"] = "Killed all active batches" if out.get("ok") else "Failed to kill all active batches"
         return out
 
     def _return_default(self) -> dict[str, Any]:
@@ -2024,7 +2504,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "cmd": "ssh gpu bash -s",
             }
 
-    def _start_plan(self, plan_name: str, config_json: str) -> dict[str, Any]:
+    def _start_plan(self, plan_name: str, config_json: str, starter_file: str = "") -> dict[str, Any]:
         if not plan_name:
             return {"ok": False, "message": "plan_name is required"}
         plans = set(discover_plans(self.shared_path))
@@ -2039,14 +2519,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return {"ok": False, "message": f"invalid config JSON: {e}"}
 
         cfg_payload = json.dumps(cfg_obj, separators=(",", ":"))
-        plan_path = f"/mnt/shared/plans/{plan_name}"
+        plan_path = f"/mnt/shared/plans/shoulders/{plan_name}"
         cfg_tmp = f"/tmp/dashboard_submit_{plan_name}.json"
+        starter_arg = starter_file.strip()
+        starter_opt = f" --plan-file {shlex.quote(starter_arg)}" if starter_arg else ""
         script = (
             "set -e\n"
             f"cat > {cfg_tmp} <<'__CFG__'\n"
             f"{cfg_payload}\n"
             "__CFG__\n"
-            f"python3 /mnt/shared/agents/submit.py {plan_path} --config \"$(cat {cfg_tmp})\"\n"
+            f"python3 /mnt/shared/agents/submit.py {plan_path}{starter_opt} --config \"$(cat {cfg_tmp})\"\n"
             f"rm -f {cfg_tmp}\n"
         )
         try:
@@ -2073,7 +2555,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "cmd": "ssh gpu bash -s",
                 "error": "timeout after 120s",
             }
-        out["message"] = f"Submitted plan {plan_name}" if out.get("ok") else f"Failed to submit plan {plan_name}"
+        display_starter = starter_arg or "plan.md"
+        out["message"] = (
+            f"Submitted plan {plan_name} ({display_starter})"
+            if out.get("ok")
+            else f"Failed to submit plan {plan_name} ({display_starter})"
+        )
         return out
 
     def _resume_plan(self, batch_id: str) -> dict[str, Any]:
@@ -2107,6 +2594,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             out["message"] = f"Failed to resume batch {batch_id} ({plan_name})"
         return out
 
+    def _batch_outputs(self, batch_id: str) -> dict[str, Any]:
+        if not batch_id:
+            return {"ok": False, "message": "batch_id is required"}
+        return collect_batch_outputs(self.shared_path, batch_id)
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/status":
@@ -2130,17 +2622,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/control/kill_plan":
             self._send_json(self._kill_plan(str(payload.get("batch_id", "")).strip()))
             return
+        if parsed.path == "/api/control/kill_all_active":
+            self._send_json(self._kill_all_active())
+            return
         if parsed.path == "/api/control/return_default":
             self._send_json(self._return_default())
             return
         if parsed.path == "/api/control/resume_plan":
             self._send_json(self._resume_plan(str(payload.get("batch_id", "")).strip()))
             return
+        if parsed.path == "/api/control/batch_outputs":
+            self._send_json(self._batch_outputs(str(payload.get("batch_id", "")).strip()))
+            return
         if parsed.path == "/api/control/start_plan":
             self._send_json(
                 self._start_plan(
                     str(payload.get("plan_name", "")).strip(),
                     str(payload.get("config_json", "")).strip(),
+                    str(payload.get("starter_file", "")).strip(),
                 )
             )
             return
