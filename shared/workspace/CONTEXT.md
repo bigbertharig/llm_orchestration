@@ -72,6 +72,8 @@ All docs live in `shared/workspace/` (on the shared drive, synced to git).
 Hardware is auto-discovered by `setup.py` and stored in `config.json`. Run `python setup.py` on any rig to scan GPUs, suggest brain/worker assignment, and generate the config.
 
 - `config.json` defines: brain GPU(s), worker GPUs, models, ports, resource limits
+- Context defaults are role-scoped via `brain_context_tokens` and `worker_context_tokens`
+- Worker liveness during long tasks is controlled by `timeouts.task_heartbeat_interval_seconds`
 - `config.template.json` shows the schema
 - Models are stored on the shared drive and loaded into Ollama on demand
 
