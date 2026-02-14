@@ -16,6 +16,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -78,6 +79,11 @@ class CpuAgent:
             self.poll_interval = 5
         self.worker_timeout = int(self.config.get("timeouts", {}).get("worker_task_seconds", 0))
         self.worker_timeout = None if self.worker_timeout <= 0 else self.worker_timeout
+        self.task_heartbeat_interval = int(
+            self.config.get("timeouts", {}).get("task_heartbeat_interval_seconds", 15)
+        )
+        if self.task_heartbeat_interval <= 0:
+            self.task_heartbeat_interval = 15
         self.resource_limits = self.config.get("resource_limits", {})
         cpu_agent_limits = self.config.get("cpu_agent", {}).get("resource_limits", {})
         effective_cpu_limits = dict(self.resource_limits)
@@ -380,9 +386,28 @@ class CpuAgent:
             agent_name=self.agent_name,
             heartbeat_callback=self._write_task_heartbeat,
         )
-        res = executor.run_bash(cmd, timeout=task.get("timeout_seconds") or self.worker_timeout)
-        self._active_task_pid = executor.active_process.pid if executor.active_process else None
+        stop_hb = threading.Event()
+
+        def _heartbeat_loop() -> None:
+            # Keep heartbeats fresh while long-running commands are active.
+            while not stop_hb.is_set():
+                if executor.active_process:
+                    self._active_task_pid = executor.active_process.pid
+                self._write_task_heartbeat()
+                self._write_cpu_heartbeat(state="running")
+                if stop_hb.wait(self.task_heartbeat_interval):
+                    break
+
+        hb_thread = threading.Thread(target=_heartbeat_loop, name=f"{self.agent_name}-task-hb", daemon=True)
+        hb_thread.start()
+        try:
+            res = executor.run_bash(cmd, timeout=task.get("timeout_seconds") or self.worker_timeout)
+        finally:
+            stop_hb.set()
+            hb_thread.join(timeout=2)
+        self._active_task_pid = executor.active_process.pid if executor.active_process else self._active_task_pid
         self._write_task_heartbeat()
+        self._write_cpu_heartbeat(state="running")
         return {
             "success": res.success,
             "output": res.output,

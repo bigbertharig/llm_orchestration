@@ -58,9 +58,12 @@ def task_sort_key(task: dict[str, Any]) -> str:
 
 def to_task_view(task: dict[str, Any]) -> dict[str, Any]:
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    error_text = (result.get("output") or task.get("blocked_reason") or "")
+    error_text = " ".join(str(error_text).split())
     return {
         "task_id": task.get("task_id"),
         "name": task.get("name"),
+        "executor": task.get("executor") or "worker",
         "task_class": task.get("task_class") or "-",
         "type": task.get("type"),
         "batch_id": task.get("batch_id"),
@@ -70,7 +73,7 @@ def to_task_view(task: dict[str, Any]) -> dict[str, Any]:
         "created_at": task.get("created_at"),
         "started_at": task.get("started_at"),
         "completed_at": task.get("completed_at"),
-        "error": (result.get("output") or task.get("blocked_reason") or "")[:220],
+        "error": error_text[:220],
     }
 
 
@@ -233,6 +236,59 @@ def load_brain_state(shared_path: Path) -> dict[str, Any]:
     return load_json(shared_path / "brain" / "state.json") or {}
 
 
+def load_brain_heartbeat(shared_path: Path) -> dict[str, Any]:
+    # Prefer unified worker-style heartbeat path, fallback to legacy brain path.
+    return (
+        load_json(shared_path / "heartbeats" / "brain.json")
+        or load_json(shared_path / "brain" / "heartbeat.json")
+        or {}
+    )
+
+
+def load_gpu_telemetry() -> dict[int, dict[str, Any]]:
+    """Best-effort live GPU telemetry keyed by GPU index."""
+    result: dict[int, dict[str, Any]] = {}
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,temperature.gpu,utilization.gpu,power.draw,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        return result
+
+    if proc.returncode != 0:
+        return result
+
+    for line in proc.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 6:
+            continue
+        try:
+            gid = int(parts[0])
+            temp_c = int(float(parts[1]))
+            util_pct = int(float(parts[2]))
+            power_w = float(parts[3])
+            mem_used = int(float(parts[4]))
+            mem_total = int(float(parts[5]))
+        except Exception:
+            continue
+        result[gid] = {
+            "gpu_temp_c": temp_c,
+            "gpu_util": util_pct,
+            "power_w": power_w,
+            "vram_used_mb": mem_used,
+            "vram_total_mb": mem_total,
+        }
+    return result
+
+
 def count_by_batch(tasks: dict[str, list[dict[str, Any]]], batch_id: str) -> dict[str, int]:
     return {
         "queue": sum(1 for t in tasks["queue"] if t.get("batch_id") == batch_id),
@@ -272,6 +328,7 @@ def build_batch_chain(tasks_by_lane: dict[str, list[dict[str, Any]]], batch_id: 
 
     # Build item-stage status map from task names like stage_contact_0019.
     item_stage_status: dict[str, dict[str, str]] = {}
+    stage_types: dict[str, str] = {}
     stages: set[str] = set()
     edges: set[tuple[str, str]] = set()
 
@@ -280,6 +337,21 @@ def build_batch_chain(tasks_by_lane: dict[str, list[dict[str, Any]]], batch_id: 
         if stage and item:
             stages.add(stage)
             item_stage_status.setdefault(item, {})[stage] = lane_of.get(name, "unknown")
+            executor = str(task.get("executor", "worker")).lower()
+            task_class = str(task.get("task_class", "")).lower()
+            if executor == "brain":
+                stage_type = "brain"
+            elif task_class == "script":
+                stage_type = "gpu"
+            elif task_class in {"cpu", "llm", "meta"}:
+                stage_type = task_class
+            else:
+                stage_type = "-"
+            if stage_type != "-":
+                prev = stage_types.get(stage)
+                # Keep strongest signal if mixed data appears.
+                if prev is None or prev == "-" or stage_type == "brain":
+                    stage_types[stage] = stage_type
 
             for dep in task.get("depends_on", []) or []:
                 dep_stage, dep_item = extract_stage_item(dep)
@@ -321,6 +393,7 @@ def build_batch_chain(tasks_by_lane: dict[str, list[dict[str, Any]]], batch_id: 
 
     return {
         "stage_order": stage_order,
+        "stage_types": {s: stage_types.get(s, "-") for s in stage_order},
         "rows": rows,
         "row_count": len(items),
     }
@@ -332,6 +405,9 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
     lanes["private"] = private_tasks
 
     brain = load_brain_state(shared_path)
+    brain_hb = load_brain_heartbeat(shared_path)
+    gpu_telemetry = load_gpu_telemetry()
+    configured_brain_model = config.get("brain", {}).get("model") if isinstance(config.get("brain"), dict) else None
     active_batches = brain.get("active_batches", {}) if isinstance(brain.get("active_batches"), dict) else {}
 
     workers = load_worker_rows(shared_path, lanes["processing"])
@@ -347,24 +423,56 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
         if matched:
             row = dict(matched)
             row["note"] = "heartbeat"
+            row["model"] = (
+                brain_hb.get("loaded_model")
+                or (brain_hb.get("loaded_models") or [None])[0]
+                or configured_brain_model
+                or "-"
+            )
             brain_gpus.append(row)
         else:
+            updated_at = brain_hb.get("last_updated")
+            telem = gpu_telemetry.get(gpu_id, {})
+            hb_gpus = brain_hb.get("brain_gpus") if isinstance(brain_hb.get("brain_gpus"), dict) else {}
+            hb_gpu = hb_gpus.get(str(gpu_id), {}) if isinstance(hb_gpus.get(str(gpu_id), {}), dict) else {}
+            hb_age_s = heartbeat_age_seconds(updated_at if isinstance(updated_at, str) else None)
+            gpu_temp = telem.get("gpu_temp_c")
+            if gpu_temp is None:
+                gpu_temp = hb_gpu.get("gpu_temp_c")
+            gpu_util = telem.get("gpu_util")
+            if gpu_util is None:
+                gpu_util = hb_gpu.get("gpu_util")
+            power_w = telem.get("power_w")
+            if power_w is None:
+                power_w = hb_gpu.get("power_w")
+            vram_used = telem.get("vram_used_mb")
+            if vram_used is None:
+                vram_used = hb_gpu.get("vram_used_mb")
+            vram_total = telem.get("vram_total_mb")
+            if vram_total is None:
+                vram_total = hb_gpu.get("vram_total_mb")
             brain_gpus.append({
+                "model": (
+                    brain_hb.get("loaded_model")
+                    or (brain_hb.get("loaded_models") or [None])[0]
+                    or configured_brain_model
+                    or "-"
+                ),
                 "name": f"brain-gpu-{gpu_id}",
                 "gpu_id": gpu_id,
                 "type": "gpu",
-                "state": "no_heartbeat",
-                "host": "-",
-                "updated_at": None,
-                "age_s": None,
-                "gpu_temp_c": None,
-                "cpu_temp_c": None,
-                "gpu_util": None,
-                "power_w": None,
-                "vram_used_mb": None,
-                "vram_total_mb": None,
+                "state": "online" if brain_hb else "no_heartbeat",
+                "host": brain_hb.get("host") or brain_hb.get("hostname", "-"),
+                "updated_at": updated_at if isinstance(updated_at, str) else None,
+                "age_s": hb_age_s,
+                "gpu_temp_c": gpu_temp,
+                "cpu_temp_c": brain_hb.get("cpu_temp_c"),
+                "gpu_util": gpu_util,
+                "power_w": power_w,
+                "vram_used_mb": vram_used,
+                "vram_total_mb": vram_total,
                 "holding": [],
-                "note": "configured brain GPU has no worker heartbeat",
+                "note": "brain heartbeat + nvidia-smi" if brain_hb else "configured brain GPU has no worker heartbeat",
             })
 
     alerts: list[dict[str, Any]] = []
@@ -443,7 +551,10 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "generated_at": datetime.now().isoformat(),
-        "counts": {k: len(v) for k, v in lanes.items()},
+        # Keep tab/card counts aligned with the same filtered lane source
+        # that drives the visible list tables.
+        "counts": {k: len(v) for k, v in lane_source.items()},
+        "counts_all": {k: len(v) for k, v in lanes.items()},
         "active_batches": batches,
         "batch_chains": batch_chains,
         "workers": workers,
@@ -617,7 +728,34 @@ HTML = """<!doctype html>
     .pill.meta { background: rgba(203,166,247,.16); color: var(--meta); }
     .pill.script { background: rgba(116,199,236,.16); color: var(--script); }
     .pill.taskcpu { background: rgba(148,226,213,.16); color: var(--taskcpu); }
+    .pill.brain { background: rgba(255,107,107,.14); color: #ff9a9a; }
+    .pill.worker { background: rgba(74,214,109,.14); color: #7be495; }
     .mono { font-family: \"JetBrains Mono\", \"Consolas\", monospace; }
+    .clip {
+      display: inline-block;
+      max-width: 100%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: top;
+    }
+    .copyable { cursor: copy; }
+    .copy-toast {
+      position: fixed;
+      right: 14px;
+      bottom: 14px;
+      background: #16324a;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 12px;
+      z-index: 9999;
+      opacity: 0;
+      transition: opacity .18s ease;
+      pointer-events: none;
+    }
+    .copy-toast.show { opacity: 1; }
     .lane-title { display: flex; justify-content: space-between; align-items: baseline; }
     .lane-count { color: var(--muted); font-size: 12px; }
     .chain-box { margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
@@ -697,8 +835,9 @@ HTML = """<!doctype html>
     </div>
 
     <div class=\"section card\">
-      <h3>Workers (status + held tasks)</h3>
-      <div id=\"workers\"></div>
+      <h3>Workers</h3>
+      <div class=\"tabs\" id=\"workerTabs\"></div>
+      <div id=\"workerTable\"></div>
     </div>
 
     <div class=\"section card\">
@@ -709,21 +848,83 @@ HTML = """<!doctype html>
 
   <script>
     const fmt = (x) => x === null || x === undefined || x === '' ? '-' : x;
+    const esc = (x) => String(x)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\"/g, '&quot;');
+    const oneLine = (x) => String(fmt(x)).replace(/\\s+/g, ' ').trim() || '-';
+    function truncCell(value, maxLen = 60, mono = false) {
+      const raw = oneLine(value);
+      const shown = raw.length > maxLen ? `${raw.slice(0, Math.max(1, maxLen - 1))}…` : raw;
+      const cls = mono ? 'mono clip' : 'clip';
+      return `<span class=\"${cls} copyable\" title=\"${esc(raw)}\" data-copy=\"${esc(raw)}\">${esc(shown)}</span>`;
+    }
+    let copyToastTimer = null;
+    function showCopyToast(msg) {
+      let el = document.getElementById('copyToast');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'copyToast';
+        el.className = 'copy-toast';
+        document.body.appendChild(el);
+      }
+      el.textContent = msg;
+      el.classList.add('show');
+      if (copyToastTimer) clearTimeout(copyToastTimer);
+      copyToastTimer = setTimeout(() => el.classList.remove('show'), 900);
+    }
+    async function copyText(text) {
+      const val = String(text || '');
+      if (!val) return;
+      try {
+        await navigator.clipboard.writeText(val);
+      } catch (_) {
+        const ta = document.createElement('textarea');
+        ta.value = val;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      showCopyToast('Copied full text');
+    }
+    function bindCopyables(containerSelector) {
+      document.querySelectorAll(`${containerSelector} .copyable`).forEach(el => {
+        el.addEventListener('click', () => copyText(el.getAttribute('data-copy') || ''));
+      });
+    }
     const laneOrder = ['queue', 'processing', 'private', 'complete', 'failed'];
     let activeLane = 'processing';
+    let activeWorkerTab = 'cpu';
     const chainState = {};
     const batchState = { batch: '', plan: '', sort: 'started_desc' };
-    const laneState = { taskClass: '', task: '', worker: '', batch: '', error: '', sort: 'task_asc' };
+    const laneState = { taskClass: '', task: '', worker: '', executor: '', batch: '', error: '', sort: 'task_asc' };
 
     function typeBadge(type) {
       return `<span class=\"pill ${type}\">${type}</span>`;
     }
 
-    function classBadge(cls) {
+    function taskType(cls) {
       const norm = (cls || '').toLowerCase();
-      const map = { cpu: 'taskcpu', llm: 'llm', meta: 'meta', script: 'script' };
-      const key = map[norm] || 'script';
-      return `<span class=\"pill ${key}\">${fmt(cls)}</span>`;
+      if (norm === 'cpu') return 'cpu';
+      if (norm === 'llm') return 'llm';
+      if (norm === 'script') return 'gpu';
+      if (norm === 'meta') return 'meta';
+      return norm || '-';
+    }
+    function classBadge(cls) {
+      const type = taskType(cls);
+      const map = { cpu: 'taskcpu', llm: 'llm', gpu: 'script', meta: 'meta', brain: 'brain' };
+      const key = map[type] || 'script';
+      return `<span class=\"pill ${key}\">${String(type).toUpperCase()}</span>`;
+    }
+    function executorBadge(executor) {
+      const e = (executor || 'worker').toLowerCase() === 'brain' ? 'brain' : 'worker';
+      return `<span class=\"pill ${e}\">${e}</span>`;
     }
 
     function tempClass(cpu) {
@@ -773,25 +974,32 @@ HTML = """<!doctype html>
       const rows = alerts.slice(0, 40).map(a => [
         `<span class=\"${a.severity === 'bad' ? 'bad' : 'warn'}\">${a.severity}</span>`,
         fmt(a.worker),
-        fmt(a.message),
+        truncCell(a.message, 100, false),
         fmt(a.age_s),
       ]);
       document.getElementById('alerts').innerHTML = table(['Severity', 'Worker', 'Message', 'HB s'], rows);
+      bindCopyables('#alerts');
     }
 
     function renderTaskLane(targetId, items) {
-      const classes = [...new Set(items.map(t => (t.task_class || '').toLowerCase()).filter(Boolean))].sort();
+      const classes = [...new Set(items.map(t => taskType(t.task_class)).filter(Boolean))].sort();
+      const executors = [...new Set(items.map(t => (t.executor || 'worker').toLowerCase()).filter(Boolean))].sort();
       const sort = laneState.sort || 'task_asc';
+      const showRuntime = activeLane === 'processing';
+      const showCompletedAt = activeLane === 'complete';
+      const showQueuedAt = activeLane === 'queue';
 
       let filtered = items.filter(t => {
-        const cls = (t.task_class || '').toLowerCase();
+        const cls = taskType(t.task_class);
         const task = (t.name || '').toLowerCase();
         const worker = (t.assigned_to || '').toLowerCase();
+        const executor = (t.executor || 'worker').toLowerCase();
         const batch = (t.batch_id || '').toLowerCase();
         const err = (t.error || '').toLowerCase();
         if (laneState.taskClass && cls !== laneState.taskClass) return false;
         if (laneState.task && !task.includes(laneState.task.toLowerCase())) return false;
         if (laneState.worker && !worker.includes(laneState.worker.toLowerCase())) return false;
+        if (laneState.executor && executor !== laneState.executor.toLowerCase()) return false;
         if (laneState.batch && !batch.includes(laneState.batch.toLowerCase())) return false;
         if (laneState.error && !err.includes(laneState.error.toLowerCase())) return false;
         return true;
@@ -804,6 +1012,8 @@ HTML = """<!doctype html>
         if (sort === 'task_desc') return bval('name').localeCompare(aval('name'));
         if (sort === 'worker_asc') return aval('assigned_to').localeCompare(bval('assigned_to'));
         if (sort === 'worker_desc') return bval('assigned_to').localeCompare(aval('assigned_to'));
+        if (sort === 'executor_asc') return aval('executor').localeCompare(bval('executor'));
+        if (sort === 'executor_desc') return bval('executor').localeCompare(aval('executor'));
         if (sort === 'batch_asc') return aval('batch_id').localeCompare(bval('batch_id'));
         if (sort === 'batch_desc') return bval('batch_id').localeCompare(aval('batch_id'));
         if (sort === 'try_desc') return (Number(b.attempts || 0) - Number(a.attempts || 0));
@@ -811,19 +1021,52 @@ HTML = """<!doctype html>
         return 0;
       });
 
+      const runtimeText = (startedAt) => {
+        if (!startedAt) return '-';
+        const dt = new Date(startedAt);
+        if (Number.isNaN(dt.getTime())) return '-';
+        const sec = Math.max(0, Math.floor((Date.now() - dt.getTime()) / 1000));
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = sec % 60;
+        if (h > 0) return `${h}h ${m}m ${s}s`;
+        if (m > 0) return `${m}m ${s}s`;
+        return `${s}s`;
+      };
+      const completedAtText = (completedAt) => {
+        if (!completedAt) return '-';
+        const raw = String(completedAt).trim();
+        // Prefer local display always (same basis as the top clock).
+        // Normalize common ISO-ish variants before parsing.
+        const normalized = raw.includes('T') ? raw : raw.replace(' ', 'T');
+        const dt = new Date(normalized);
+        if (Number.isNaN(dt.getTime())) return '-';
+        return dt.toLocaleString(undefined, { hour12: false });
+      };
+      const queuedAtValue = (t) =>
+        t.stale_requeued_at ||
+        t.requeued_at ||
+        t.last_attempt_at ||
+        t.created_at ||
+        '';
+
       const rows = filtered.map(t => [
         classBadge(t.task_class),
-        fmt(t.name),
-        fmt(t.assigned_to),
+        truncCell(t.name, 42, false),
+        truncCell(t.assigned_to, 24, false),
+        executorBadge(t.executor),
         `<span class=\"mono\">${fmt(t.batch_id)}</span>`,
         fmt(t.attempts),
-        `<span class=\"mono\">${fmt(t.error)}</span>`
+        ...(showQueuedAt ? [ `<span class=\"mono\">${completedAtText(queuedAtValue(t))}</span>` ] : []),
+        ...(showRuntime ? [ `<span class=\"mono\">${runtimeText(t.started_at)}</span>` ] : []),
+        ...(showCompletedAt ? [ `<span class=\"mono\">${completedAtText(t.completed_at || t.started_at)}</span>` ] : []),
+        truncCell(t.error, 96, true)
       ]);
       const sortArrow = (ascKey, descKey) => sort === ascKey ? ' ↑' : (sort === descKey ? ' ↓' : '');
       const controls = `
         <div class=\"filter-bar\">
           <span class=\"k\">showing ${filtered.length} of ${items.length}</span>
-          <label class=\"filter-field k\">Class
+          <label class=\"filter-field k\">Type
             <select id=\"laneFilterClass\">
               <option value=\"\">all</option>
               ${classes.map(c => `<option value=\"${c}\" ${laneState.taskClass === c ? 'selected' : ''}>${c}</option>`).join('')}
@@ -831,17 +1074,27 @@ HTML = """<!doctype html>
           </label>
           <label class=\"filter-field k\">Task <input id=\"laneFilterTask\" value=\"${laneState.task}\" placeholder=\"contains\" /></label>
           <label class=\"filter-field k\">Worker <input id=\"laneFilterWorker\" value=\"${laneState.worker}\" placeholder=\"contains\" /></label>
+          <label class=\"filter-field k\">Executor
+            <select id=\"laneFilterExecutor\">
+              <option value=\"\">all</option>
+              ${executors.map(e => `<option value=\"${e}\" ${laneState.executor === e ? 'selected' : ''}>${e}</option>`).join('')}
+            </select>
+          </label>
           <label class=\"filter-field k\">Batch <input id=\"laneFilterBatch\" value=\"${laneState.batch}\" placeholder=\"contains\" /></label>
           <label class=\"filter-field k\">Error <input id=\"laneFilterError\" value=\"${laneState.error}\" placeholder=\"contains\" /></label>
           <span class=\"k\">Click headers to sort</span>
         </div>
       `;
       const headers = [
-        `<th data-sort=\"class\">Class${sortArrow('class_asc', 'class_desc')}</th>`,
+        `<th data-sort=\"class\">Type${sortArrow('class_asc', 'class_desc')}</th>`,
         `<th data-sort=\"task\">Task${sortArrow('task_asc', 'task_desc')}</th>`,
         `<th data-sort=\"worker\">Worker${sortArrow('worker_asc', 'worker_desc')}</th>`,
+        `<th data-sort=\"executor\">Executor${sortArrow('executor_asc', 'executor_desc')}</th>`,
         `<th data-sort=\"batch\">Batch${sortArrow('batch_asc', 'batch_desc')}</th>`,
         `<th data-sort=\"try\">Try${sortArrow('try_asc', 'try_desc')}</th>`,
+        ...(showQueuedAt ? ['<th>Queued At</th>'] : []),
+        ...(showRuntime ? ['<th>Runtime</th>'] : []),
+        ...(showCompletedAt ? ['<th>Completed At</th>'] : []),
         `<th>Error</th>`
       ].join('');
       const laneTable = rows.length
@@ -863,6 +1116,7 @@ HTML = """<!doctype html>
             class: ['class_asc', 'class_desc'],
             task: ['task_asc', 'task_desc'],
             worker: ['worker_asc', 'worker_desc'],
+            executor: ['executor_asc', 'executor_desc'],
             batch: ['batch_asc', 'batch_desc'],
             try: ['try_asc', 'try_desc'],
           };
@@ -874,8 +1128,10 @@ HTML = """<!doctype html>
       bind('laneFilterClass', 'taskClass');
       bind('laneFilterTask', 'task');
       bind('laneFilterWorker', 'worker');
+      bind('laneFilterExecutor', 'executor');
       bind('laneFilterBatch', 'batch');
       bind('laneFilterError', 'error');
+      bindCopyables(`#${targetId}`);
     }
 
     function renderBatches(activeBatches) {
@@ -914,7 +1170,7 @@ HTML = """<!doctype html>
         `<span class=\"mono\">${b.id}</span>`,
         fmt(b.plan),
         fmt(b.stage),
-        fmt(b.complete),
+        `<span class=\"mono\">${fmt(b.complete)}/${fmt(b.total)}</span>`,
         fmt(b.queue),
         fmt(b.processing),
         fmt(b.failed),
@@ -1006,6 +1262,68 @@ HTML = """<!doctype html>
       renderTaskLane('laneTable', lanes[activeLane] || []);
     }
 
+    function renderWorkerTabs(workers) {
+      const gpuWorkers = workers.filter(w => w.type === 'gpu');
+      const cpuWorkers = workers.filter(w => w.type === 'cpu');
+      const tabs = [
+        { key: 'gpu', label: 'GPU', count: gpuWorkers.length },
+        { key: 'cpu', label: 'CPU', count: cpuWorkers.length },
+      ];
+      const html = tabs.map(t => {
+        const cls = t.key === activeWorkerTab ? 'tab-btn active' : 'tab-btn';
+        return `<button class=\"${cls}\" data-wtab=\"${t.key}\">${t.label} (${t.count})</button>`;
+      }).join('');
+      const container = document.getElementById('workerTabs');
+      container.innerHTML = html;
+      container.querySelectorAll('button[data-wtab]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          activeWorkerTab = btn.getAttribute('data-wtab');
+          renderWorkerTabs(workers);
+        });
+      });
+      const active = activeWorkerTab === 'gpu' ? gpuWorkers : cpuWorkers;
+      renderWorkerTable(active, activeWorkerTab);
+    }
+
+    function renderWorkerTable(workers, type) {
+      if (type === 'gpu') {
+        const vram = (w) => (w.vram_used_mb !== null && w.vram_total_mb !== null)
+          ? `${w.vram_used_mb}/${w.vram_total_mb}` : '-';
+        const rows = workers.map(w => [
+          fmt(w.name),
+          fmt(w.state),
+          fmt(w.host),
+          `<span class=\"${tempClass(w.cpu_temp_c)}\">${fmt(w.cpu_temp_c)}</span>`,
+          fmt(w.gpu_temp_c),
+          fmt(w.gpu_util),
+          fmt(w.power_w),
+          vram(w),
+          fmt(w.thermal_cause && w.thermal_cause !== 'none' ? w.thermal_cause : '-'),
+          truncCell((w.holding || []).slice(0,2).join(' | ') || '-', 64, true),
+          `<span class=\"${hbClass(w.age_s)}\">${fmt(w.age_s)}</span>`
+        ]);
+        document.getElementById('workerTable').innerHTML = table(
+          ['Name', 'State', 'Host', 'CPU C', 'GPU C', 'GPU %', 'W', 'VRAM', 'Thermal', 'Holding', 'HB s'],
+          rows
+        );
+      } else {
+        const rows = workers.map(w => [
+          fmt(w.name),
+          fmt(w.state),
+          fmt(w.host),
+          `<span class=\"${tempClass(w.cpu_temp_c)}\">${fmt(w.cpu_temp_c)}</span>`,
+          fmt(w.thermal_cause && w.thermal_cause !== 'none' ? w.thermal_cause : '-'),
+          truncCell((w.holding || []).slice(0,2).join(' | ') || '-', 64, true),
+          `<span class=\"${hbClass(w.age_s)}\">${fmt(w.age_s)}</span>`
+        ]);
+        document.getElementById('workerTable').innerHTML = table(
+          ['Name', 'State', 'Host', 'CPU C', 'Thermal', 'Holding', 'HB s'],
+          rows
+        );
+      }
+      bindCopyables('#workerTable');
+    }
+
     function laneChip(lane) {
       if (!lane || lane === '-') return '<span class=\"chip missing\">-</span>';
       return `<span class=\"chip ${lane}\">${lane}</span>`;
@@ -1018,10 +1336,11 @@ HTML = """<!doctype html>
       const laneRank = { '-': 0, queue: 1, private: 2, processing: 3, complete: 4, failed: 5 };
       Object.entries(chains).forEach(([batchId, chain]) => {
         const stages = chain.stage_order || [];
+        const stageTypes = chain.stage_types || {};
         if (!stages.length) return;
         const totalRows = chain.row_count || (chain.rows || []).length;
         if (!chainState[batchId]) {
-          chainState[batchId] = { collapsed: false, page: 1, sortKey: 'item', sortDir: 'asc' };
+          chainState[batchId] = { collapsed: true, page: 1, sortKey: 'item', sortDir: 'asc' };
         }
         const st = chainState[batchId];
         const totalPages = Math.max(1, Math.ceil(totalRows / perPage));
@@ -1049,7 +1368,11 @@ HTML = """<!doctype html>
         const arrow = (key) => (sortKey === key ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '');
         const headers = [
           `<th data-batch=\"${batchId}\" data-sort=\"item\">Item${arrow('item')}</th>`,
-          ...stages.map(s => `<th data-batch=\"${batchId}\" data-sort=\"${s}\">${s}${arrow(s)}</th>`)
+          ...stages.map(s => {
+            const stype = stageTypes[s] || '-';
+            const badge = stype && stype !== '-' ? classBadge(stype) : '<span class=\"k\">-</span>';
+            return `<th data-batch=\"${batchId}\" data-sort=\"${s}\">${s}${arrow(s)}<div style=\"margin-top:4px\">${badge}</div></th>`;
+          })
         ];
         const chainTable = visibleRows.length
           ? `
@@ -1088,7 +1411,7 @@ HTML = """<!doctype html>
         btn.addEventListener('click', () => {
           const action = btn.getAttribute('data-action');
           const batchId = btn.getAttribute('data-batch');
-          const st = chainState[batchId] || { collapsed: false, page: 1, sortKey: 'item', sortDir: 'asc' };
+          const st = chainState[batchId] || { collapsed: true, page: 1, sortKey: 'item', sortDir: 'asc' };
           const total = (chains[batchId]?.row_count) || 0;
           const pages = Math.max(1, Math.ceil(total / perPage));
           if (action === 'toggle') st.collapsed = !st.collapsed;
@@ -1103,7 +1426,7 @@ HTML = """<!doctype html>
         th.addEventListener('click', () => {
           const batchId = th.getAttribute('data-batch');
           const key = th.getAttribute('data-sort');
-          const st = chainState[batchId] || { collapsed: false, page: 1, sortKey: 'item', sortDir: 'asc' };
+          const st = chainState[batchId] || { collapsed: true, page: 1, sortKey: 'item', sortDir: 'asc' };
           if (st.sortKey === key) {
             st.sortDir = st.sortDir === 'asc' ? 'desc' : 'asc';
           } else {
@@ -1126,7 +1449,7 @@ HTML = """<!doctype html>
 
       const batchRows = Object.entries(data.active_batches).map(([id, b]) => {
         const c = b.counts;
-        const total = Math.max(b.total_hint || 0, c.queue + c.processing + c.complete + c.failed);
+        const total = Math.max(b.total_hint || 0, c.queue + c.processing + c.private + c.complete + c.failed);
         let stage = 'idle';
         let stageRank = 0;
         if (c.failed > 0) { stage = 'failed'; stageRank = 4; }
@@ -1159,41 +1482,26 @@ HTML = """<!doctype html>
           : '-';
         const thermal = w.thermal_cause && w.thermal_cause !== 'none' ? w.thermal_cause : '-';
         return [
-          fmt(w.gpu_id),
+          fmt(w.model),
           fmt(w.name),
           fmt(w.state),
+          vram,
+          `<span class=\"${tempClass(w.cpu_temp_c)}\">${fmt(w.cpu_temp_c)}</span>`,
           fmt(w.gpu_temp_c),
           fmt(w.gpu_util),
           fmt(w.power_w),
-          vram,
-          `<span class=\"${tempClass(w.cpu_temp_c)}\">${fmt(w.cpu_temp_c)}</span>`,
           fmt(thermal),
-          `<span class=\"${hbClass(w.age_s)}\">${fmt(w.age_s)}</span>`,
-          fmt(w.note)
+          truncCell(w.note, 48, false),
+          `<span class=\"${hbClass(w.age_s)}\">${fmt(w.age_s)}</span>`
         ];
       });
       document.getElementById('brainGpus').innerHTML = table(
-        ['GPU', 'Name', 'State', 'GPU C', 'GPU %', 'W', 'VRAM MB', 'CPU C', 'Thermal', 'HB s', 'Note'],
+        ['Model', 'Name', 'State', 'VRAM', 'CPU C', 'GPU C', 'GPU %', 'W', 'Thermal', 'Note', 'HB'],
         brainRows
       );
+      bindCopyables('#brainGpus');
 
-      const workerRows = data.workers.map(w => [
-        typeBadge(w.type),
-        fmt(w.name),
-        fmt(w.state),
-        fmt(w.host),
-        `<span class=\"${tempClass(w.cpu_temp_c)}\">${fmt(w.cpu_temp_c)}</span>`,
-        fmt(w.gpu_temp_c),
-        fmt(w.gpu_util),
-        fmt(w.power_w),
-        fmt(w.thermal_cause && w.thermal_cause !== 'none' ? w.thermal_cause : '-'),
-        `<span class=\"mono\">${(w.holding || []).slice(0,2).join(' | ') || '-'}</span>`,
-        `<span class=\"${hbClass(w.age_s)}\">${fmt(w.age_s)}</span>`
-      ]);
-      document.getElementById('workers').innerHTML = table(
-        ['Type', 'Name', 'State', 'Host', 'CPU C', 'GPU C', 'GPU %', 'W', 'Thermal', 'Holding', 'HB s'],
-        workerRows
-      );
+      renderWorkerTabs(data.workers);
 
       renderAlerts(data.alerts || []);
       renderLaneTabs(data.counts, data.lanes);
@@ -1278,6 +1586,12 @@ CONTROLS_HTML = """<!doctype html>
         <button class=\"danger\" onclick=\"killPlan()\">Kill selected batch</button>
       </div>
       <div class=\"k\">Runs `kill_plan.py <batch_id>` and removes queued/processing/private tasks for that batch.</div>
+      <h3 style=\"margin-top:12px;\">Resume Plan</h3>
+      <div class=\"row\">
+        <select id=\"resumeBatch\"></select>
+        <button onclick=\"resumePlan()\">Resume selected batch</button>
+      </div>
+      <div class=\"k\">Submits the plan in resume mode for the selected batch ID.</div>
     </div>
 
     <div class=\"card\">
@@ -1352,18 +1666,30 @@ CONTROLS_HTML = """<!doctype html>
       planDefaults = data.plan_defaults || {};
       planInputs = data.plan_inputs || {};
       const kill = document.getElementById('killBatch');
+      const resume = document.getElementById('resumeBatch');
       kill.innerHTML = '';
+      resume.innerHTML = '';
       (data.active_batches || []).forEach(b => {
         const o = document.createElement('option');
         o.value = b;
         o.textContent = b;
         kill.appendChild(o);
+        const r = document.createElement('option');
+        r.value = b;
+        r.textContent = b;
+        resume.appendChild(r);
       });
       if (!kill.options.length) {
         const o = document.createElement('option');
         o.value = '';
         o.textContent = '(no active batches)';
         kill.appendChild(o);
+      }
+      if (!resume.options.length) {
+        const o = document.createElement('option');
+        o.value = '';
+        o.textContent = '(no resumable batches)';
+        resume.appendChild(o);
       }
 
       const plan = document.getElementById('planName');
@@ -1415,6 +1741,13 @@ CONTROLS_HTML = """<!doctype html>
       await refreshOptions();
     }
 
+    async function resumePlan() {
+      const batchId = document.getElementById('resumeBatch').value;
+      if (!batchId) return;
+      showResult(await api('/api/control/resume_plan', { batch_id: batchId }));
+      await refreshOptions();
+    }
+
     async function startPlan() {
       const planName = document.getElementById('planName').value;
       const configText = document.getElementById('planConfig').value;
@@ -1462,8 +1795,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return {}
 
     def _gpu_ssh(self, remote_cmd: str, timeout_s: int = 180) -> dict[str, Any]:
-        cmd = f"ssh -o BatchMode=yes gpu '{remote_cmd}'"
-        return run_shell(cmd, timeout_s=timeout_s)
+        cmd = ["ssh", "-o", "BatchMode=yes", "gpu", "bash", "-lc", remote_cmd]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+            return {
+                "ok": proc.returncode == 0,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[-4000:],
+                "stderr": proc.stderr[-4000:],
+                "cmd": " ".join(cmd),
+            }
+        except subprocess.TimeoutExpired as e:
+            return {
+                "ok": False,
+                "returncode": -1,
+                "stdout": (e.stdout or "")[-2000:] if isinstance(e.stdout, str) else "",
+                "stderr": (e.stderr or "")[-2000:] if isinstance(e.stderr, str) else "",
+                "cmd": " ".join(cmd),
+                "error": f"timeout after {timeout_s}s",
+            }
 
     def _control_options(self) -> dict[str, Any]:
         brain = load_brain_state(self.shared_path)
@@ -1474,6 +1829,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return {
             "ok": True,
             "active_batches": sorted(active.keys()),
+            "resumable_batches": sorted(active.keys()),
             "plans": plans,
             "plan_defaults": plan_defaults,
             "plan_inputs": plan_inputs,
@@ -1489,20 +1845,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return out
 
     def _return_default(self) -> dict[str, Any]:
-        # Keep this explicit and deterministic: one startup owner from GPU host.
-        remote_cmd = (
-            "pkill -f '/mnt/shared/agents/brain.py' || true; "
-            "pkill -f '/mnt/shared/agents/gpu.py' || true; "
-            "pkill -f '/mnt/shared/agents/startup.py' || true; "
-            "sleep 2; "
-            "nohup /home/bryan/ml-env/bin/python /mnt/shared/agents/startup.py --config /mnt/shared/agents/config.json "
-            ">> /mnt/shared/logs/startup-manual.log 2>&1 < /dev/null & "
-            "sleep 4; "
-            "pgrep -af '/mnt/shared/agents/startup.py|/mnt/shared/agents/brain.py|/mnt/shared/agents/gpu.py' || true"
+        # Pass commands via stdin so pkill can't match its own shell's cmdline.
+        script = (
+            "pkill -f /mnt/shared/agents/brain.py || true\n"
+            "pkill -f /mnt/shared/agents/gpu.py || true\n"
+            "pkill -f /mnt/shared/agents/startup.py || true\n"
+            "sleep 2\n"
+            "nohup /home/bryan/ml-env/bin/python /mnt/shared/agents/startup.py "
+            "--config /mnt/shared/agents/config.json "
+            ">> /mnt/shared/logs/startup-manual.log 2>&1 < /dev/null &\n"
+            "sleep 4\n"
+            "pgrep -af startup.py || true\n"
+            "pgrep -af brain.py || true\n"
+            "pgrep -af gpu.py || true\n"
         )
-        out = self._gpu_ssh(remote_cmd, timeout_s=240)
-        out["message"] = "Returned system to default startup state"
-        return out
+        try:
+            proc = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "gpu", "bash", "-s"],
+                input=script,
+                capture_output=True,
+                text=True,
+                timeout=240,
+            )
+            return {
+                "ok": proc.returncode == 0,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[-4000:],
+                "stderr": proc.stderr[-4000:],
+                "cmd": "ssh gpu bash -s (stdin: kill agents, restart startup.py)",
+                "message": "Returned system to default startup state",
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "message": "Returned system to default startup state",
+                "error": "timeout after 240s",
+                "cmd": "ssh gpu bash -s",
+            }
 
     def _start_plan(self, plan_name: str, config_json: str) -> dict[str, Any]:
         if not plan_name:
@@ -1518,13 +1897,73 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception as e:
             return {"ok": False, "message": f"invalid config JSON: {e}"}
 
-        cfg_inline = json.dumps(cfg_obj).replace("'", "'\"'\"'")
-        remote_cmd = (
-            f"python3 /mnt/shared/agents/submit.py /mnt/shared/plans/{plan_name} "
-            f"--config '{cfg_inline}'"
+        cfg_payload = json.dumps(cfg_obj, separators=(",", ":"))
+        plan_path = f"/mnt/shared/plans/{plan_name}"
+        cfg_tmp = f"/tmp/dashboard_submit_{plan_name}.json"
+        script = (
+            "set -e\n"
+            f"cat > {cfg_tmp} <<'__CFG__'\n"
+            f"{cfg_payload}\n"
+            "__CFG__\n"
+            f"python3 /mnt/shared/agents/submit.py {plan_path} --config \"$(cat {cfg_tmp})\"\n"
+            f"rm -f {cfg_tmp}\n"
         )
-        out = self._gpu_ssh(remote_cmd, timeout_s=120)
+        try:
+            proc = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "gpu", "bash", "-s"],
+                input=script,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            out = {
+                "ok": proc.returncode == 0,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[-4000:],
+                "stderr": proc.stderr[-4000:],
+                "cmd": "ssh gpu bash -s (stdin: write config JSON to temp file, run submit.py)",
+            }
+        except subprocess.TimeoutExpired as e:
+            out = {
+                "ok": False,
+                "returncode": -1,
+                "stdout": (e.stdout or "")[-2000:] if isinstance(e.stdout, str) else "",
+                "stderr": (e.stderr or "")[-2000:] if isinstance(e.stderr, str) else "",
+                "cmd": "ssh gpu bash -s",
+                "error": "timeout after 120s",
+            }
         out["message"] = f"Submitted plan {plan_name}" if out.get("ok") else f"Failed to submit plan {plan_name}"
+        return out
+
+    def _resume_plan(self, batch_id: str) -> dict[str, Any]:
+        if not batch_id:
+            return {"ok": False, "message": "batch_id is required"}
+
+        brain = load_brain_state(self.shared_path)
+        active = brain.get("active_batches", {}) if isinstance(brain.get("active_batches"), dict) else {}
+        meta = active.get(batch_id) if isinstance(active.get(batch_id), dict) else {}
+        if not meta:
+            return {"ok": False, "message": f"batch_id not found in active_batches: {batch_id}"}
+
+        plan_name = str(meta.get("plan") or "").strip()
+        if not plan_name:
+            plan_dir = str(meta.get("plan_dir") or "").strip()
+            if plan_dir:
+                plan_name = Path(plan_dir).name
+        if not plan_name:
+            return {"ok": False, "message": f"could not resolve plan name for batch {batch_id}"}
+
+        cfg = meta.get("config") if isinstance(meta.get("config"), dict) else {}
+        cfg = dict(cfg)
+        cfg["RUN_MODE"] = "resume"
+        cfg["BATCH_ID"] = batch_id
+        cfg_json = json.dumps(cfg)
+
+        out = self._start_plan(plan_name, cfg_json)
+        if out.get("ok"):
+            out["message"] = f"Resumed batch {batch_id} ({plan_name})"
+        else:
+            out["message"] = f"Failed to resume batch {batch_id} ({plan_name})"
         return out
 
     def do_GET(self) -> None:
@@ -1552,6 +1991,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/control/return_default":
             self._send_json(self._return_default())
+            return
+        if parsed.path == "/api/control/resume_plan":
+            self._send_json(self._resume_plan(str(payload.get("batch_id", "")).strip()))
             return
         if parsed.path == "/api/control/start_plan":
             self._send_json(
