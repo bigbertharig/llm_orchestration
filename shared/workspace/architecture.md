@@ -165,7 +165,8 @@ llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
     │                              # NFS-shared to GPU rig via ethernet
     │
     ├── agents/                    # Agent code (GPU rig runs these)
-    │   ├── brain.py               # Brain coordinator
+    │   ├── brain.py               # Brain coordinator (main loop + orchestration)
+    │   ├── brain_goal.py          # Goal-driven planning mixin for brain.py
     │   ├── gpu.py                 # GPU agent (one per physical GPU)
     │   ├── worker.py              # Worker subprocess (spawned by gpu.py)
     │   ├── executor.py            # Permission-aware command executor
@@ -229,6 +230,15 @@ llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
 ```
 
 **Dependency model:** Tasks specify `depends_on: [task1, task2]`. Brain releases a task to the public queue only when all its dependencies have completed successfully. This is like a Gantt chart - flexible ordering based on actual dependencies, not rigid phases.
+
+### Brain Module Layout
+
+Brain logic is now split into focused modules:
+
+- `shared/agents/brain.py` - orchestrator entrypoint (startup, main run loop, task handling, monitoring/resource decisions)
+- `shared/agents/brain_goal.py` - goal-driven execution helpers (goal parsing, incremental candidate spawning, validation loop, goal completion release)
+
+This keeps the runtime entrypoint readable while isolating high-churn goal-planning behavior in a dedicated module.
 
 ---
 
