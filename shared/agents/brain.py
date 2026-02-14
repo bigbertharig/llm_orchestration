@@ -47,9 +47,10 @@ logging.basicConfig(
 #   - cpu: Any worker (including RPi)
 #   - script: GPU workers only (no LLM needed, uses GPU for compute)
 #   - llm: GPU workers only (needs LLM model loaded)
+#   - brain: Brain-only tasks (always executed by brain, never by workers)
 #   - meta: Model load/unload tasks (inserted by brain, claimed by GPU workers)
 # =============================================================================
-VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'meta']
+VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'brain', 'meta']
 VALID_VRAM_POLICIES = ['default', 'infer', 'fixed']
 
 
@@ -1082,11 +1083,19 @@ class Brain(BrainGoalMixin):
         """
         definition_error = None
         if task_class is None:
-            definition_error = f"missing task_class (must be one of: cpu, script, llm)"
+            definition_error = f"missing task_class (must be one of: cpu, script, llm, brain)"
             task_class = "cpu"  # Placeholder so task structure is valid
         elif task_class not in VALID_TASK_CLASSES:
-            definition_error = f"invalid task_class '{task_class}' (must be one of: cpu, script, llm)"
+            definition_error = (
+                f"invalid task_class '{task_class}' (must be one of: cpu, script, llm, brain)"
+            )
             task_class = "cpu"  # Placeholder
+
+        # Keep brain routing strict and unambiguous.
+        if task_class == "brain" and executor != "brain":
+            executor = "brain"
+        if executor == "brain" and task_class != "brain":
+            task_class = "brain"
 
         task = {
             "task_id": str(uuid.uuid4()),
@@ -1095,7 +1104,7 @@ class Brain(BrainGoalMixin):
             "batch_id": batch_id,
             "name": task_name,
             "priority": priority,
-            "task_class": task_class,  # cpu, script, or llm
+            "task_class": task_class,  # cpu, script, llm, brain, or meta
             "depends_on": depends_on or [],
             "executor": executor,  # "brain" or "worker"
             "status": "pending",
@@ -1272,7 +1281,7 @@ Required JSON format:
         Expected format for each task:
         ### task_id
         - **executor**: brain|worker
-        - **task_class**: cpu|script|llm
+        - **task_class**: cpu|script|llm|brain
         - **command**: `shell command here`
         - **depends_on**: task1, task2
         - **foreach**: manifest.videos  (optional - expands to N tasks)
@@ -1506,7 +1515,7 @@ Required JSON format:
         })
 
         # Analyze task types for resource planning
-        class_counts = {"cpu": 0, "script": 0, "llm": 0}
+        class_counts = {"cpu": 0, "script": 0, "llm": 0, "brain": 0}
         missing_class = []
         for t in task_defs:
             tc = t.get("task_class")
@@ -1520,7 +1529,11 @@ Required JSON format:
             self.logger.warning(f"Tasks missing task_class (defaulting to cpu): {missing_class}")
 
         self.log_decision("PLAN_ANALYSIS",
-            f"Task breakdown: {class_counts['cpu']} cpu, {class_counts['script']} script, {class_counts['llm']} llm",
+            (
+                f"Task breakdown: {class_counts['cpu']} cpu, "
+                f"{class_counts['script']} script, {class_counts['llm']} llm, "
+                f"{class_counts['brain']} brain"
+            ),
             {"task_classes": class_counts})
 
         substituted_commands: List[str] = []
@@ -1761,6 +1774,7 @@ Required JSON format:
         """Handle a shell task (brain executes it directly)."""
         command = task.get("command", "")
         task_name = task.get("name", task["task_id"][:8])
+        task_class = str(task.get("task_class", "")).lower()
 
         self.log_decision("SHELL_EXECUTE", f"Executing: {task_name}", {
             "task_id": task["task_id"][:8],
@@ -1769,10 +1783,21 @@ Required JSON format:
 
         start_time = time.time()
         try:
+            env = os.environ.copy()
+            # Strict brain-task ownership: brain-class work always runs with
+            # brain model/runtime defaults (GPU 0 / brain ollama).
+            if task_class == "brain" or str(task.get("executor", "")).lower() == "brain":
+                env["BRAIN_MODEL"] = str(self.model)
+                env["BRAIN_OLLAMA_URL"] = str(self.config.get("ollama_host", "http://localhost:11434"))
+                # Compatibility bridge for scripts that still read WORKER_* vars.
+                env["WORKER_MODEL"] = env["BRAIN_MODEL"]
+                env["WORKER_OLLAMA_URL"] = env["BRAIN_OLLAMA_URL"]
+
             result = subprocess.run(
                 command,
                 shell=True,
                 executable='/bin/bash',
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=1800  # 30 min timeout
@@ -1848,7 +1873,8 @@ Required JSON format:
                         task = json.load(f)
 
                     task_type = task.get("type", "")
-                    executor = task.get("executor", "worker")
+                    executor = str(task.get("executor", "worker")).lower()
+                    task_class = str(task.get("task_class", "")).lower()
 
                     # Brain handles: execute_plan, decide, and tasks marked executor=brain
                     if task_type == "execute_plan":
@@ -1857,9 +1883,31 @@ Required JSON format:
                     elif task_type == "decide":
                         task_file.unlink()
                         self.handle_decide_task(task)
-                    elif executor == "brain" and task_type == "shell":
+                    elif (executor == "brain" or task_class == "brain") and task_type == "shell":
+                        task["executor"] = "brain"
+                        task["task_class"] = "brain"
                         task_file.unlink()
                         self.handle_shell_task(task)
+                    elif executor == "brain" or task_class == "brain":
+                        task_file.unlink()
+                        task["status"] = "failed"
+                        task["completed_at"] = datetime.now().isoformat()
+                        task["result"] = {
+                            "success": False,
+                            "error": (
+                                f"Unsupported brain task type '{task_type}'. "
+                                "Brain tasks must use type='shell' (or built-in 'execute_plan'/'decide')."
+                            ),
+                            "handler": "brain",
+                        }
+                        dest_file = self.failed_path / f"{task['task_id']}.json"
+                        with open(dest_file, "w") as f:
+                            json.dump(task, f, indent=2)
+                        self.log_decision(
+                            "BRAIN_TASK_INVALID",
+                            f"Rejected invalid brain task type: {task_type}",
+                            {"task_id": task.get("task_id", "")[:8], "name": task.get("name", "")},
+                        )
                     # Let workers handle other tasks
 
             except Exception as e:
