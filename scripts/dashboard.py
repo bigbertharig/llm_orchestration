@@ -303,10 +303,18 @@ def lane_view(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     return [to_task_view(t) for t in items[:limit]]
 
 
+def is_system_meta_task(task: dict[str, Any]) -> bool:
+    name = str(task.get("name") or "").lower()
+    return name.startswith("load_llm") or name.startswith("load_worker_model")
+
+
 def extract_stage_item(name: str | None) -> tuple[str | None, str | None]:
     if not name:
         return None, None
-    m = re.match(r"^(?P<stage>.+?)_(?P<item>(contact|chunk|item)_[0-9A-Za-z]+)$", name)
+    m = re.match(
+        r"^(?P<stage>.+?)_(?P<item>(contact|chunk|item|prospect|person|day)_[0-9A-Za-z]+)$",
+        name,
+    )
     if not m:
         return None, None
     return m.group("stage"), m.group("item")
@@ -331,6 +339,7 @@ def build_batch_chain(tasks_by_lane: dict[str, list[dict[str, Any]]], batch_id: 
     stage_types: dict[str, str] = {}
     stages: set[str] = set()
     edges: set[tuple[str, str]] = set()
+    global_edges: set[tuple[str, str]] = set()
 
     for name, task in by_name.items():
         stage, item = extract_stage_item(name)
@@ -357,6 +366,10 @@ def build_batch_chain(tasks_by_lane: dict[str, list[dict[str, Any]]], batch_id: 
                 dep_stage, dep_item = extract_stage_item(dep)
                 if dep_stage and (dep_item == item):
                     edges.add((dep_stage, stage))
+        else:
+            for dep in task.get("depends_on", []) or []:
+                if dep in by_name:
+                    global_edges.add((dep, name))
 
     # Topological-ish order from per-item edges. Fallback to alpha.
     if stages:
@@ -381,7 +394,48 @@ def build_batch_chain(tasks_by_lane: dict[str, list[dict[str, Any]]], batch_id: 
         else:
             stage_order = ordered
     else:
-        stage_order = []
+        # Fallback chain view for global stages (no per-item suffix yet),
+        # so users still see declared order like build_strategy -> execute_searches.
+        global_nodes = {
+            n
+            for n in by_name.keys()
+            if n
+            and n != "batch_summary"
+            and not n.startswith("load_llm")
+            and not n.startswith("load_worker_model")
+        }
+        if global_nodes:
+            indeg = {s: 0 for s in global_nodes}
+            children = {s: set() for s in global_nodes}
+            for a, b in global_edges:
+                if a in global_nodes and b in global_nodes and b not in children[a]:
+                    children[a].add(b)
+                    indeg[b] += 1
+            ready = sorted([s for s in global_nodes if indeg[s] == 0])
+            ordered = []
+            while ready:
+                s = ready.pop(0)
+                ordered.append(s)
+                for ch in sorted(children[s]):
+                    indeg[ch] -= 1
+                    if indeg[ch] == 0:
+                        ready.append(ch)
+                ready.sort()
+            stage_order = ordered if len(ordered) == len(global_nodes) else sorted(global_nodes)
+            for s in stage_order:
+                t = by_name.get(s, {})
+                executor = str(t.get("executor", "worker")).lower()
+                task_class = str(t.get("task_class", "")).lower()
+                if executor == "brain":
+                    stage_types[s] = "brain"
+                elif task_class == "script":
+                    stage_types[s] = "gpu"
+                elif task_class in {"cpu", "llm", "meta"}:
+                    stage_types[s] = task_class
+                else:
+                    stage_types[s] = "-"
+        else:
+            stage_order = []
 
     items = sorted(item_stage_status.keys())
     rows = []
@@ -411,6 +465,13 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
     active_batches = brain.get("active_batches", {}) if isinstance(brain.get("active_batches"), dict) else {}
 
     workers = load_worker_rows(shared_path, lanes["processing"])
+    brain_holding = []
+    for t in lanes.get("processing", []):
+        if str(t.get("executor", "worker")).lower() == "brain":
+            brain_holding.append(f"{t.get('name', t.get('task_id', '-'))} [processing]")
+    for t in lanes.get("queue", []):
+        if str(t.get("executor", "worker")).lower() == "brain":
+            brain_holding.append(f"{t.get('name', t.get('task_id', '-'))} [queue]")
     brain_gpu_ids = list(config.get("brain", {}).get("gpus", []))
     gpu_by_id = {}
     for w in workers:
@@ -423,6 +484,7 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
         if matched:
             row = dict(matched)
             row["note"] = "heartbeat"
+            row["holding"] = brain_holding[:]
             row["model"] = (
                 brain_hb.get("loaded_model")
                 or (brain_hb.get("loaded_models") or [None])[0]
@@ -471,7 +533,7 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
                 "power_w": power_w,
                 "vram_used_mb": vram_used,
                 "vram_total_mb": vram_total,
-                "holding": [],
+                "holding": brain_holding[:],
                 "note": "brain heartbeat + nvidia-smi" if brain_hb else "configured brain GPU has no worker heartbeat",
             })
 
@@ -554,7 +616,10 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
     if active_batch_ids:
         lane_source = {
             "queue": [t for t in lanes["queue"] if t.get("batch_id") in active_batch_ids],
-            "processing": [t for t in lanes["processing"] if t.get("batch_id") in active_batch_ids],
+            "processing": [
+                t for t in lanes["processing"]
+                if t.get("batch_id") in active_batch_ids or is_system_meta_task(t)
+            ],
             "private": [t for t in lanes["private"] if t.get("batch_id") in active_batch_ids],
             "complete": [t for t in lanes["complete"] if t.get("batch_id") in active_batch_ids],
             "failed": [t for t in lanes["failed"] if t.get("batch_id") in active_batch_ids],
@@ -792,6 +857,7 @@ HTML = """<!doctype html>
     .chip.failed { color:#ff6b6b; background:rgba(255,107,107,.15); }
     .chip.missing { color:#9db4c8; background:rgba(157,180,200,.12); }
     .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .plan-scope { margin-top: 8px; }
     .filter-bar { display:flex; gap:8px; flex-wrap:wrap; margin: 6px 0 8px; align-items:center; }
     .filter-field { display:flex; gap:4px; align-items:center; }
     .filter-field input, .filter-field select {
@@ -831,15 +897,14 @@ HTML = """<!doctype html>
 
     <div class=\"grid g5\" id=\"countCards\"></div>
 
-    <div class=\"section card\">
-      <h3>Alerts</h3>
-      <div id=\"alerts\"></div>
+    <div class=\"section card plan-scope\">
+      <h3>Plan Scope</h3>
+      <div id=\"planScope\"></div>
     </div>
 
     <div class=\"section card\">
-      <h3>Active Batches</h3>
-      <div id=\"batches\"></div>
-      <div id=\"batchChains\"></div>
+      <h3>Alerts</h3>
+      <div id=\"alerts\"></div>
     </div>
 
     <div class=\"section card\">
@@ -851,6 +916,12 @@ HTML = """<!doctype html>
       <h3>Workers</h3>
       <div class=\"tabs\" id=\"workerTabs\"></div>
       <div id=\"workerTable\"></div>
+    </div>
+
+    <div class=\"section card\">
+      <h3>Active Batches</h3>
+      <div id=\"batches\"></div>
+      <div id=\"batchChains\"></div>
     </div>
 
     <div class=\"section card\">
@@ -916,6 +987,8 @@ HTML = """<!doctype html>
     const chainState = {};
     const batchState = { batch: '', plan: '', sort: 'started_desc' };
     const laneState = { taskClass: '', task: '', worker: '', executor: '', batch: '', error: '', sort: 'task_asc' };
+    let latestStatus = null;
+    let visibleBatchIds = null;
 
     function typeBadge(type) {
       return `<span class=\"pill ${type}\">${type}</span>`;
@@ -929,7 +1002,10 @@ HTML = """<!doctype html>
       if (norm === 'meta') return 'meta';
       return norm || '-';
     }
-    function classBadge(cls) {
+    function classBadge(cls, executor = '') {
+      if (String(executor || '').toLowerCase() === 'brain') {
+        return `<span class=\"pill brain\">BRAIN</span>`;
+      }
       const type = taskType(cls);
       const map = { cpu: 'taskcpu', llm: 'llm', gpu: 'script', meta: 'meta', brain: 'brain' };
       const key = map[type] || 'script';
@@ -979,6 +1055,34 @@ HTML = """<!doctype html>
       `).join('');
     }
 
+    function renderPlanScope(activeBatches) {
+      const plans = [...new Set(activeBatches.map(b => b.plan).filter(Boolean))].sort();
+      if (batchState.plan && !plans.some(p => String(p).toLowerCase() === batchState.plan)) {
+        batchState.plan = '';
+      }
+      const html = `
+        <div class=\"filter-bar\">
+          <label class=\"filter-field k\">Selected Plan
+            <select id=\"globalPlanScope\">
+              <option value=\"\">all active plans</option>
+              ${plans.map(p => `<option value=\"${String(p).toLowerCase()}\" ${batchState.plan === String(p).toLowerCase() ? 'selected' : ''}>${p}</option>`).join('')}
+            </select>
+          </label>
+          <span class=\"k\">Applies to Active Batches and task lanes.</span>
+        </div>
+      `;
+      const el = document.getElementById('planScope');
+      el.innerHTML = html;
+      const sel = document.getElementById('globalPlanScope');
+      if (!sel) return;
+      const rerender = () => {
+        batchState.plan = sel.value || '';
+        if (latestStatus) refreshFromData(latestStatus);
+      };
+      sel.addEventListener('change', rerender);
+      sel.addEventListener('input', rerender);
+    }
+
     function renderAlerts(alerts) {
       if (!alerts || !alerts.length) {
         document.getElementById('alerts').innerHTML = '<div class=\"k\">(none)</div>';
@@ -992,6 +1096,11 @@ HTML = """<!doctype html>
       ]);
       document.getElementById('alerts').innerHTML = table(['Severity', 'Worker', 'Message', 'HB s'], rows);
       bindCopyables('#alerts');
+    }
+
+    function isSystemMetaTaskName(taskName) {
+      const n = String(taskName || '').toLowerCase();
+      return n.startsWith('load_llm') || n.startsWith('load_worker_model');
     }
 
     function renderTaskLane(targetId, items) {
@@ -1009,6 +1118,7 @@ HTML = """<!doctype html>
         const executor = (t.executor || 'worker').toLowerCase();
         const batch = (t.batch_id || '').toLowerCase();
         const err = (t.error || '').toLowerCase();
+        if (visibleBatchIds && !visibleBatchIds.has(t.batch_id || '') && !isSystemMetaTaskName(t.name)) return false;
         if (laneState.taskClass && cls !== laneState.taskClass) return false;
         if (laneState.task && !task.includes(laneState.task.toLowerCase())) return false;
         if (laneState.worker && !worker.includes(laneState.worker.toLowerCase())) return false;
@@ -1064,7 +1174,7 @@ HTML = """<!doctype html>
         '';
 
       const rows = filtered.map(t => [
-        classBadge(t.task_class),
+        classBadge(t.task_class, t.executor),
         truncCell(t.name, 42, false),
         truncCell(t.assigned_to, 24, false),
         executorBadge(t.executor),
@@ -1191,17 +1301,13 @@ HTML = """<!doctype html>
         fmt(b.private),
         fmt(b.started)
       ]);
+      visibleBatchIds = new Set(filtered.map(b => b.id));
       const sortArrow = (ascKey, descKey) => sort === ascKey ? ' ↑' : (sort === descKey ? ' ↓' : '');
       const controls = `
         <div class=\"filter-bar\">
           <span class=\"k\">showing ${filtered.length} of ${activeBatches.length}</span>
           <label class=\"filter-field k\">Batch <input id=\"batchFilterBatch\" value=\"${batchState.batch}\" placeholder=\"contains\" /></label>
-          <label class=\"filter-field k\">Plan
-            <select id=\"batchFilterPlan\">
-              <option value=\"\">all</option>
-              ${plans.map(p => `<option value=\"${String(p).toLowerCase()}\" ${batchState.plan === String(p).toLowerCase() ? 'selected' : ''}>${p}</option>`).join('')}
-            </select>
-          </label>
+          <span class=\"k\">Plan scope: ${batchState.plan ? batchState.plan : 'all active plans'}</span>
           <span class=\"k\">Click headers to sort</span>
         </div>
       `;
@@ -1224,8 +1330,13 @@ HTML = """<!doctype html>
       const bind = (id, key) => {
         const el = document.getElementById(id);
         if (!el) return;
-        el.addEventListener('input', () => { batchState[key] = el.value; renderBatches(activeBatches); });
-        el.addEventListener('change', () => { batchState[key] = el.value; renderBatches(activeBatches); });
+        const rerender = () => {
+          batchState[key] = el.value;
+          renderBatches(activeBatches);
+          if (latestStatus) renderBatchChains(latestStatus, visibleBatchIds);
+        };
+        el.addEventListener('input', rerender);
+        el.addEventListener('change', rerender);
       };
       document.querySelectorAll('#batches th[data-sort]').forEach(th => {
         th.style.cursor = 'pointer';
@@ -1246,10 +1357,11 @@ HTML = """<!doctype html>
           const pair = nextMap[key] || ['started_asc', 'started_desc'];
           batchState.sort = current === pair[0] ? pair[1] : pair[0];
           renderBatches(activeBatches);
+          if (latestStatus) renderBatchChains(latestStatus, visibleBatchIds);
         });
       });
       bind('batchFilterBatch', 'batch');
-      bind('batchFilterPlan', 'plan');
+      // Plan scope is controlled by the global selector (renderPlanScope).
     }
 
     function renderLaneTabs(counts, lanes) {
@@ -1344,12 +1456,13 @@ HTML = """<!doctype html>
       return `<span class=\"chip ${lane}\">${lane}</span>`;
     }
 
-    function renderBatchChains(data) {
+    function renderBatchChains(data, allowedBatchIds = null) {
       const perPage = 15;
       const out = [];
       const chains = data.batch_chains || {};
       const laneRank = { '-': 0, queue: 1, private: 2, processing: 3, complete: 4, failed: 5 };
       Object.entries(chains).forEach(([batchId, chain]) => {
+        if (allowedBatchIds && !allowedBatchIds.has(batchId)) return;
         const stages = chain.stage_order || [];
         const stageTypes = chain.stage_types || {};
         if (!stages.length) return;
@@ -1421,7 +1534,7 @@ HTML = """<!doctype html>
         `);
       });
       const container = document.getElementById('batchChains');
-      container.innerHTML = out.join('') || '<div class=\"k\">(no itemized dependency chains detected)</div>';
+      container.innerHTML = out.join('') || '<div class=\"k\">(no itemized dependency chains detected for current batch/plan filter)</div>';
       container.querySelectorAll('button[data-action]').forEach(btn => {
         btn.addEventListener('click', () => {
           const action = btn.getAttribute('data-action');
@@ -1433,7 +1546,7 @@ HTML = """<!doctype html>
           if (action === 'prev' && st.page > 1) st.page -= 1;
           if (action === 'next' && st.page < pages) st.page += 1;
           chainState[batchId] = st;
-          renderBatchChains(data);
+          renderBatchChains(data, allowedBatchIds);
         });
       });
       container.querySelectorAll('th[data-sort]').forEach(th => {
@@ -1450,15 +1563,13 @@ HTML = """<!doctype html>
           }
           st.page = 1;
           chainState[batchId] = st;
-          renderBatchChains(data);
+          renderBatchChains(data, allowedBatchIds);
         });
       });
     }
 
-    async function refresh() {
-      const res = await fetch('/api/status');
-      const data = await res.json();
-
+    function refreshFromData(data) {
+      latestStatus = data;
       document.getElementById('meta').textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
       document.getElementById('countCards').innerHTML = renderCountCards(data.counts);
 
@@ -1496,8 +1607,9 @@ HTML = """<!doctype html>
           started: fmt(b.started_at ? new Date(b.started_at).toLocaleTimeString() : '-')
         };
       });
+      renderPlanScope(batchRows);
       renderBatches(batchRows);
-      renderBatchChains(data);
+      renderBatchChains(data, visibleBatchIds);
 
       const brainRows = (data.brain_gpus || []).map(w => {
         const vram = (w.vram_used_mb !== null && w.vram_total_mb !== null)
@@ -1514,12 +1626,12 @@ HTML = """<!doctype html>
           fmt(w.gpu_util),
           fmt(w.power_w),
           fmt(thermal),
-          truncCell(w.note, 48, false),
+          truncCell((w.holding || []).slice(0,2).join(' | ') || '-', 64, true),
           `<span class=\"${hbClass(w.age_s)}\">${fmt(w.age_s)}</span>`
         ];
       });
       document.getElementById('brainGpus').innerHTML = table(
-        ['Model', 'Name', 'State', 'VRAM', 'CPU C', 'GPU C', 'GPU %', 'W', 'Thermal', 'Note', 'HB'],
+        ['Model', 'Name', 'State', 'VRAM', 'CPU C', 'GPU C', 'GPU %', 'W', 'Thermal', 'Holding', 'HB'],
         brainRows
       );
       bindCopyables('#brainGpus');
@@ -1528,6 +1640,12 @@ HTML = """<!doctype html>
 
       renderAlerts(data.alerts || []);
       renderLaneTabs(data.counts, data.lanes);
+    }
+
+    async function refresh() {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      refreshFromData(data);
     }
 
     refresh().catch(console.error);

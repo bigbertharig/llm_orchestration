@@ -45,6 +45,7 @@ VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'meta']
 
 # Timing
 EXTERNAL_HEARTBEAT_INTERVAL = 30  # seconds - filesystem heartbeat to brain
+ACTIVE_WORK_HEARTBEAT_INTERVAL = 5  # seconds - faster claims while work is active
 INTERNAL_POLL_INTERVAL = 5        # seconds - check worker status internally
 SIGNAL_CHECK_INTERVAL = 5         # seconds - check stop/abort signals
 
@@ -397,7 +398,7 @@ class GPUAgent:
                     "stream": False,
                     "keep_alive": self.worker_keep_alive,
                     "options": {
-                        "num_gpu": 1,
+                        "num_gpu": 999,
                         "num_ctx": self.worker_num_ctx,
                     }
                 },
@@ -441,7 +442,7 @@ class GPUAgent:
                         "keep_alive": self.worker_keep_alive,
                         "options": {
                             "num_predict": 4,
-                            "num_gpu": 1,
+                            "num_gpu": 999,
                             "num_ctx": self.worker_num_ctx,
                         }
                     },
@@ -931,6 +932,8 @@ class GPUAgent:
 
                 if task.get("executor") == "brain":
                     continue
+                if task.get("task_class") == "brain":
+                    continue
 
                 task_class = task.get("task_class", "cpu")
                 if task_class in tasks_by_class:
@@ -958,6 +961,10 @@ class GPUAgent:
 
                     with open(task_file) as f:
                         task = json.load(f)
+
+                    # Brain tasks are never claimable by GPU workers.
+                    if task.get("executor") == "brain" or task.get("task_class") == "brain":
+                        continue
 
                     task_class = task.get("task_class", "cpu")
                     vram_cost = self._get_task_vram_cost(task)
@@ -1447,6 +1454,18 @@ class GPUAgent:
             peak_vram_mb=0,
         ))
 
+    def _has_active_work(self) -> bool:
+        """Return True when the rig appears to be in an active batch."""
+        if self.active_workers or self.outbox:
+            return True
+
+        if next(self.queue_path.glob("*.json"), None):
+            return True
+        if next(self.processing_path.glob("*.json"), None):
+            return True
+
+        return False
+
     # =========================================================================
     # Main Loop
     # =========================================================================
@@ -1496,7 +1515,12 @@ class GPUAgent:
 
                 # --- External tick (every 30s OR all workers done with pending outbox) ---
                 all_done = len(self.active_workers) == 0 and len(self.outbox) > 0
-                external_due = (now - last_external) >= EXTERNAL_HEARTBEAT_INTERVAL
+                heartbeat_interval = (
+                    ACTIVE_WORK_HEARTBEAT_INTERVAL
+                    if self._has_active_work()
+                    else EXTERNAL_HEARTBEAT_INTERVAL
+                )
+                external_due = (now - last_external) >= heartbeat_interval
 
                 if external_due or all_done:
                     # 1. Flush completed results to filesystem
