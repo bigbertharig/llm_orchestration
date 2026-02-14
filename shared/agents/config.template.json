@@ -13,6 +13,8 @@
   "ollama_host": "http://localhost:11434",
   "brain_keep_alive": "30m",
   "worker_keep_alive": "30m",
+  "brain_context_tokens": 32768,
+  "worker_context_tokens": 8192,
 
   "brain": {
     "name": "brain",

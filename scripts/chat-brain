@@ -1,11 +1,60 @@
 #!/bin/bash
-# Chat with the brain model (qwen2.5-coder:32b on RTX 3090 Ti)
-# Usage: chat-brain         (in current terminal)
+# Chat with the configured brain model on the GPU rig.
+# Usage: chat-brain          (in current terminal)
 #        chat-brain --new    (opens new terminal window)
+#        chat-brain --no-init (skip startup prompt file)
+
+if [[ -n "${BRAIN_MODEL_OVERRIDE:-}" ]]; then
+    MODEL="$BRAIN_MODEL_OVERRIDE"
+else
+    MODEL="$(python3 - <<'PY'
+import json
+from pathlib import Path
+
+cfg = Path("/home/bryan/llm_orchestration/shared/agents/config.json")
+model = "qwen2.5:32b"
+try:
+    data = json.loads(cfg.read_text(encoding="utf-8"))
+    brain = data.get("brain", {})
+    val = brain.get("model")
+    if isinstance(val, str) and val.strip():
+        model = val.strip()
+except Exception:
+    pass
+print(model)
+PY
+)"
+fi
+
+REMOTE_CMD="ollama run ${MODEL}"
+INIT_FILE="${BRAIN_CHAT_INIT_FILE:-/home/bryan/Desktop/brain_chat_init.txt}"
+NO_INIT=0
+
+if [[ "$1" == "--no-init" ]]; then
+    NO_INIT=1
+    shift
+fi
 
 if [[ "$1" == "--new" ]]; then
-    lxterminal --title="Brain (qwen2.5-coder:32b)" -e "ssh -t gpu 'ollama run qwen2.5-coder:32b'" &
+    EXTRA=""
+    if [[ "$NO_INIT" -eq 1 ]]; then
+        EXTRA=" --no-init"
+    fi
+    lxterminal --title="Brain (${MODEL})" -e "/home/bryan/llm_orchestration/scripts/chat-brain${EXTRA}" &
     disown
 else
-    ssh -t gpu "ollama run qwen2.5-coder:32b"
+    if [[ "$NO_INIT" -eq 0 && -s "$INIT_FILE" ]]; then
+        echo "[chat-brain] injecting startup prompt from: $INIT_FILE"
+        INIT_PROMPT="$(python3 - "$INIT_FILE" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+text = p.read_text(encoding="utf-8", errors="ignore")
+lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+print(" ".join(lines))
+PY
+)"
+        { printf '%s\n' "$INIT_PROMPT"; cat; } | ssh -tt gpu "${REMOTE_CMD}"
+    else
+        ssh -t gpu "${REMOTE_CMD}"
+    fi
 fi

@@ -15,9 +15,11 @@ Usage:
 """
 
 import argparse
+import ast
 import json
 import os
 import re
+import shlex
 import socket
 import sys
 import time
@@ -106,6 +108,7 @@ class Brain:
         self.gpus = self.brain_config["gpus"]
         self.api_url = f"{self.config['ollama_host']}/api/generate"
         self.brain_keep_alive = str(self.config.get("brain_keep_alive", "-1"))
+        self.brain_num_ctx = int(self.config.get("brain_context_tokens", 8192))
 
         self.poll_interval = self.config["timeouts"]["poll_interval_seconds"]
         self.think_timeout = self.config["timeouts"]["brain_think_seconds"]
@@ -577,7 +580,10 @@ class Brain:
                     "model": self.model,
                     "prompt": full_prompt,
                     "stream": False,
-                    "keep_alive": self.brain_keep_alive
+                    "keep_alive": self.brain_keep_alive,
+                    "options": {
+                        "num_ctx": self.brain_num_ctx
+                    }
                 },
                 timeout=self.think_timeout
             )
@@ -885,6 +891,184 @@ class Brain:
             except Exception as e:
                 self.logger.error(f"Error updating dependents: {e}")
 
+    # =========================================================================
+    # Goal-Driven Plan Support
+    # =========================================================================
+
+    def _read_candidate_pool(self, goal: Dict) -> List:
+        """Read the candidate pool from manifest.json for a goal-driven batch."""
+        pool_path = goal.get("candidate_pool_path", "")
+        if not pool_path or ":" not in pool_path:
+            return []
+
+        file_path, json_path = pool_path.rsplit(":", 1)
+        try:
+            with open(file_path) as f:
+                data = json.load(f)
+        except Exception as e:
+            self.logger.error(f"Failed to read candidate pool {file_path}: {e}")
+            return []
+
+        items = data
+        for key in json_path.split("."):
+            if isinstance(items, dict) and key in items:
+                items = items[key]
+            else:
+                self.logger.error(f"JSON path '{json_path}' not found in {file_path}")
+                return []
+
+        return items if isinstance(items, list) else []
+
+    def _spawn_goal_candidates(self, batch_id: str, count: int):
+        """
+        Create per-candidate pipeline tasks for goal-driven plans.
+
+        Spawns `count` candidates from the pool, each getting the full
+        template pipeline (e.g., plan_person_queries → scrape_person → score_person).
+        Idempotent: skips candidates already in spawned_ids.
+        """
+        batch_meta = self.active_batches.get(batch_id, {})
+        goal = batch_meta.get("goal")
+        if not goal or goal["status"] not in ("active",):
+            return
+
+        # Throttle: don't exceed target
+        headroom = goal["target"] - goal["accepted"] - len(goal["in_flight_ids"])
+        count = min(count, headroom)
+        if count <= 0:
+            return
+
+        pool = self._read_candidate_pool(goal)
+        if not pool:
+            self.logger.warning(f"Goal batch {batch_id}: candidate pool is empty or unreadable")
+            return
+
+        variables = goal.get("variables", {})
+        templates = goal.get("templates", {})
+        if not templates:
+            return
+
+        # Sort templates by dependency depth for correct ordering
+        template_order = self._resolve_template_order(templates)
+
+        spawned_this_call = 0
+        while spawned_this_call < count and goal["next_index"] < len(pool):
+            idx = goal["next_index"]
+            item = pool[idx]
+            candidate_id = item.get("id", str(idx)) if isinstance(item, dict) else str(idx)
+
+            goal["next_index"] += 1
+
+            # Idempotency guard
+            if candidate_id in goal["spawned_ids"]:
+                continue
+
+            # Create tasks for each template in pipeline order
+            for template_name in template_order:
+                template = templates[template_name]
+                command = template.get("command", "")
+                depends_on_raw = list(template.get("depends_on", []))
+
+                # Substitute {ITEM.field} in command
+                if isinstance(item, dict):
+                    for key, value in item.items():
+                        command = command.replace(f"{{ITEM.{key}}}", str(value))
+                else:
+                    command = command.replace("{ITEM}", str(item))
+
+                # Substitute plan variables in command
+                for var, value in variables.items():
+                    command = command.replace(var, value)
+
+                # Build per-item dependencies
+                item_depends = []
+                for dep in depends_on_raw:
+                    dep_name = dep
+                    if isinstance(item, dict):
+                        for key, value in item.items():
+                            dep_name = dep_name.replace(f"{{ITEM.{key}}}", str(value))
+                    else:
+                        dep_name = dep_name.replace("{ITEM}", str(item))
+                    if dep_name and dep_name.lower() != "none":
+                        item_depends.append(dep_name)
+
+                task_name = f"{template_name}_{candidate_id}"
+
+                task = self.create_task(
+                    task_type="shell",
+                    command=command,
+                    batch_id=batch_id,
+                    task_name=task_name,
+                    priority=5,
+                    depends_on=item_depends,
+                    executor=template.get("executor", "worker"),
+                    task_class=template.get("task_class"),
+                    vram_estimate_mb=template.get("vram_estimate_mb"),
+                    vram_estimate_source=template.get("vram_estimate_source")
+                )
+                task["goal_candidate_id"] = candidate_id
+
+                # Add plan/batch path metadata if available
+                if batch_meta.get("plan_dir"):
+                    task["plan_path"] = batch_meta["plan_dir"]
+                if batch_meta.get("batch_dir"):
+                    task["batch_path"] = batch_meta["batch_dir"]
+                if batch_meta.get("env_manifest_path"):
+                    task["env_manifest_path"] = batch_meta["env_manifest_path"]
+
+                # Release if deps are met, otherwise keep private
+                satisfied = self.get_satisfied_task_ids(batch_id)
+                if all(d in satisfied for d in item_depends):
+                    self.save_to_public(task)
+                else:
+                    self.save_to_private(task)
+
+                self.log_decision("GOAL_TASK_CREATED",
+                    f"Goal candidate '{candidate_id}': created {task_name}",
+                    {"task_id": task["task_id"][:8], "candidate_id": candidate_id,
+                     "depends_on": item_depends})
+
+            goal["spawned_ids"].append(candidate_id)
+            goal["in_flight_ids"].append(candidate_id)
+            spawned_this_call += 1
+
+        if spawned_this_call > 0:
+            self.log_decision("GOAL_SPAWN",
+                f"Spawned {spawned_this_call} candidate pipeline(s) for batch {batch_id}",
+                {"spawned": spawned_this_call, "total_spawned": len(goal["spawned_ids"]),
+                 "in_flight": len(goal["in_flight_ids"]), "accepted": goal["accepted"],
+                 "next_index": goal["next_index"]})
+            self._save_brain_state()
+
+    def _resolve_template_order(self, templates: Dict) -> List[str]:
+        """
+        Sort goal templates by dependency depth so tasks are created in the
+        right order (upstream before downstream).
+        """
+        template_names = set(templates.keys())
+        order = []
+        remaining = dict(templates)
+
+        # Simple topological sort: emit templates whose deps are all resolved
+        for _ in range(len(templates) + 1):
+            if not remaining:
+                break
+            for name, tmpl in list(remaining.items()):
+                deps = tmpl.get("depends_on", [])
+                # Strip {ITEM.*} from deps for ordering purposes
+                base_deps = set()
+                for d in deps:
+                    base = re.sub(r'_\{ITEM\.[^}]+\}', '', d)
+                    if base in template_names:
+                        base_deps.add(base)
+                if base_deps.issubset(set(order)):
+                    order.append(name)
+                    del remaining[name]
+
+        # Any remaining (circular deps) just append
+        order.extend(remaining.keys())
+        return order
+
     def _check_batch_completion(self, batch_id: str):
         """Check if a batch is fully complete."""
         # Any tasks still in queue or processing?
@@ -1130,6 +1314,86 @@ Required JSON format:
         except Exception:
             return None, None
 
+    def _extract_python_scripts_from_command(self, command: str, plan_dir: Path) -> List[Path]:
+        scripts: List[Path] = []
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+        for i, tok in enumerate(tokens):
+            base = Path(tok).name.lower()
+            if base in {"python", "python3"} and i + 1 < len(tokens):
+                cand = tokens[i + 1].strip().strip("'\"")
+                if cand.endswith(".py"):
+                    p = Path(cand)
+                    if not p.is_absolute():
+                        p = (plan_dir / p).resolve()
+                    scripts.append(p)
+        return scripts
+
+    def _build_plan_env_manifest(self, plan_dir: Path, commands: List[str], batch_dir: Path) -> Path:
+        script_paths: List[Path] = []
+        for cmd in commands:
+            script_paths.extend(self._extract_python_scripts_from_command(cmd, plan_dir))
+
+        # De-duplicate while preserving order.
+        seen = set()
+        dedup_scripts: List[Path] = []
+        for p in script_paths:
+            s = str(p)
+            if s in seen:
+                continue
+            seen.add(s)
+            dedup_scripts.append(p)
+
+        stdlib = set(getattr(sys, "stdlib_module_names", set()))
+        local_modules: set[str] = set()
+        for py_file in plan_dir.rglob("*.py"):
+            local_modules.add(py_file.stem)
+        for init_file in plan_dir.rglob("__init__.py"):
+            local_modules.add(init_file.parent.name)
+
+        required_modules: set[str] = set()
+        scanned_scripts: List[str] = []
+        scan_errors: List[str] = []
+
+        for script_path in dedup_scripts:
+            scanned_scripts.append(str(script_path))
+            if not script_path.exists():
+                scan_errors.append(f"missing_script:{script_path}")
+                continue
+            try:
+                source = script_path.read_text(encoding="utf-8")
+                tree = ast.parse(source, filename=str(script_path))
+            except Exception as exc:
+                scan_errors.append(f"parse_error:{script_path}:{exc}")
+                continue
+
+            for node in ast.walk(tree):
+                mod = None
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        mod = alias.name.split(".")[0].strip()
+                        if mod and mod not in stdlib and mod not in local_modules and mod != "__future__":
+                            required_modules.add(mod)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    mod = node.module.split(".")[0].strip()
+                    if mod and mod not in stdlib and mod not in local_modules and mod != "__future__":
+                        required_modules.add(mod)
+
+        manifest = {
+            "generated_at": datetime.now().isoformat(),
+            "plan_dir": str(plan_dir.resolve()),
+            "batch_dir": str(batch_dir.resolve()),
+            "required_modules": sorted(required_modules),
+            "scripts_scanned": scanned_scripts,
+            "scan_errors": scan_errors,
+        }
+        manifest_path = batch_dir / "env_manifest.json"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        return manifest_path
+
     def _resolve_task_vram_estimate(self, task_def: Dict[str, Any], resolved_command: str) -> (Optional[int], Optional[str]):
         """Resolve script VRAM estimate from plan fields or one-time inference policy."""
         task_class = task_def.get("task_class")
@@ -1157,6 +1421,53 @@ Required JSON format:
     # =========================================================================
     # Plan Parsing and Execution
     # =========================================================================
+
+    def _parse_goal_section(self, plan_content: str) -> Optional[Dict[str, Any]]:
+        """
+        Parse the optional ## Goal section from a plan.md file.
+
+        Returns a dict with goal metadata if found, None otherwise.
+        Backward-compatible: plans without ## Goal are unaffected.
+        """
+        # Find the ## Goal section
+        goal_match = re.search(r'\n## Goal\s*\n(.*?)(?=\n## |\Z)', plan_content, re.DOTALL)
+        if not goal_match:
+            return None
+
+        goal_text = goal_match.group(1)
+        goal = {}
+
+        for line in goal_text.strip().split('\n'):
+            line = line.strip()
+            if line.startswith('- **type**:'):
+                goal["type"] = line.split(':', 1)[1].strip()
+            elif line.startswith('- **target**:'):
+                raw = line.split(':', 1)[1].strip()
+                goal["target"] = raw  # Keep as string; may contain {VAR}
+            elif line.startswith('- **tolerance**:'):
+                try:
+                    goal["tolerance"] = int(line.split(':', 1)[1].strip())
+                except ValueError:
+                    goal["tolerance"] = 2
+            elif line.startswith('- **max_attempts_multiplier**:'):
+                try:
+                    goal["max_attempts_multiplier"] = int(line.split(':', 1)[1].strip())
+                except ValueError:
+                    goal["max_attempts_multiplier"] = 5
+            elif line.startswith('- **tracked_task**:'):
+                goal["tracked_task"] = line.split(':', 1)[1].strip()
+
+        # Validate required fields
+        if not goal.get("type") or not goal.get("tracked_task"):
+            self.logger.warning("Goal section found but missing required fields (type, tracked_task)")
+            return None
+
+        # Defaults
+        goal.setdefault("tolerance", 2)
+        goal.setdefault("max_attempts_multiplier", 5)
+
+        self.log_decision("GOAL_PARSED", f"Parsed goal: type={goal['type']}, target={goal.get('target')}, tracked={goal['tracked_task']}", goal)
+        return goal
 
     def parse_plan_md(self, plan_content: str) -> List[Dict[str, Any]]:
         """
@@ -1372,9 +1683,30 @@ Required JSON format:
         # Parse plan.md directly
         task_defs = self.parse_plan_md(plan_content)
 
+        # Parse optional Goal section (backward-compatible)
+        goal_spec = self._parse_goal_section(plan_content)
+        if goal_spec:
+            # Resolve target variable (may be "{TARGET_COUNT}" or literal int)
+            raw_target = str(goal_spec.get("target", ""))
+            for var, value in variables.items():
+                raw_target = raw_target.replace(var, value)
+            try:
+                goal_spec["target"] = int(raw_target)
+            except ValueError:
+                self.logger.error(f"Goal target could not be resolved to int: {raw_target}")
+                goal_spec = None
+
+        if goal_spec:
+            # Mark foreach task_defs so check_and_release_tasks() intercepts them
+            tracked_task = goal_spec["tracked_task"]
+            for t in task_defs:
+                if t.get("foreach"):
+                    t["goal_driven"] = True
+
         self.log_decision("PLAN_PARSED", f"Parsed {len(task_defs)} tasks from plan.md", {
             "task_ids": [t["id"] for t in task_defs],
-            "batch_id": batch_id
+            "batch_id": batch_id,
+            "goal_driven": goal_spec is not None
         })
 
         # Analyze task types for resource planning
@@ -1394,6 +1726,23 @@ Required JSON format:
         self.log_decision("PLAN_ANALYSIS",
             f"Task breakdown: {class_counts['cpu']} cpu, {class_counts['script']} script, {class_counts['llm']} llm",
             {"task_classes": class_counts})
+
+        substituted_commands: List[str] = []
+        for task_def in task_defs:
+            cmd = task_def["command"]
+            for var, value in variables.items():
+                cmd = cmd.replace(var, value)
+            substituted_commands.append(cmd)
+
+        env_manifest_path = self._build_plan_env_manifest(
+            plan_dir=plan_dir,
+            commands=substituted_commands,
+            batch_dir=effective_batch_dir,
+        )
+        self.log_decision("PLAN_ENV_MANIFEST", "Generated plan environment manifest", {
+            "batch_id": batch_id,
+            "manifest_path": str(env_manifest_path),
+        })
 
         # Create tasks with variable substitution
         tasks_with_no_deps = []
@@ -1417,6 +1766,9 @@ Required JSON format:
                 vram_estimate_mb=vram_estimate_mb,
                 vram_estimate_source=vram_estimate_source
             )
+            task["plan_path"] = str(plan_dir.resolve())
+            task["batch_path"] = str(effective_batch_dir.resolve())
+            task["env_manifest_path"] = str(env_manifest_path.resolve())
 
             # Preserve foreach spec for later expansion
             if task_def.get("foreach"):
@@ -1426,6 +1778,9 @@ Required JSON format:
                     foreach_spec = foreach_spec.replace(var, value)
                 task["foreach"] = foreach_spec
                 task["batch_size"] = max(1, int(task_def.get("batch_size", 1)))
+                # Mark goal-driven foreach tasks for incremental expansion
+                if task_def.get("goal_driven"):
+                    task["goal_driven"] = True
 
             # Check for definition errors - send to failed/ immediately
             if task.get("definition_error"):
@@ -1456,7 +1811,32 @@ Required JSON format:
                 if not task_def.get("depends_on"):
                     tasks_with_no_deps.append(task)
 
-        # Auto-insert execution summary task (depends on all other tasks)
+        # For goal-driven plans, find the final non-foreach task for summary deps
+        compile_output_task_id = None
+        if goal_spec:
+            # Find last non-foreach task (e.g., compile_output)
+            non_foreach_tasks = [t for t in task_defs if not t.get("foreach")]
+            if non_foreach_tasks:
+                last_task_name = non_foreach_tasks[-1]["id"]
+                # Find its task_id from the created tasks
+                for task_file in self.private_tasks_path.glob("*.json"):
+                    try:
+                        with open(task_file) as f:
+                            t = json.load(f)
+                        if t.get("batch_id") == batch_id and t.get("name") == last_task_name:
+                            compile_output_task_id = t["task_id"]
+                            break
+                    except Exception:
+                        pass
+
+        # Auto-insert execution summary task
+        if goal_spec and compile_output_task_id:
+            # Goal-driven: summary depends on the final aggregation task only
+            summary_depends = [non_foreach_tasks[-1]["id"]]
+        else:
+            # Standard: summary depends on all tasks
+            summary_depends = [t["id"] for t in task_defs]
+
         all_task_ids = [t["id"] for t in task_defs]
         summary_command = f"python {self.shared_path}/scripts/generate_batch_summary.py --batch-id {batch_id} --plan-name {plan_dir.name} --plan-dir {plan_dir.resolve()}"
 
@@ -1466,10 +1846,13 @@ Required JSON format:
             batch_id=batch_id,
             task_name="batch_summary",
             priority=1,  # Low priority - runs at very end
-            depends_on=all_task_ids,  # Depends on everything
+            depends_on=summary_depends,
             executor="worker",
             task_class="cpu"
         )
+        summary_task["plan_path"] = str(plan_dir.resolve())
+        summary_task["batch_path"] = str(effective_batch_dir.resolve())
+        summary_task["env_manifest_path"] = str(env_manifest_path.resolve())
 
         self.save_to_private(summary_task)
         self.log_decision("TASK_CREATED", "Created automatic summary task (depends on all tasks)", {
@@ -1478,14 +1861,51 @@ Required JSON format:
         })
 
         # Track this batch (include paths for foreach expansion)
-        self.active_batches[batch_id] = {
+        batch_meta = {
             "plan": plan_dir.name,
             "plan_dir": str(plan_dir.resolve()),
             "batch_dir": str(batch_dir.resolve()),
+            "env_manifest_path": str(env_manifest_path.resolve()),
             "started_at": datetime.now().isoformat(),
             "config": config,
             "total_tasks": len(task_defs) + 1  # +1 for automatic summary task
         }
+
+        # Initialize goal state for goal-driven plans
+        if goal_spec:
+            target = goal_spec["target"]
+            multiplier = goal_spec["max_attempts_multiplier"]
+            batch_meta["goal"] = {
+                "goal_version": 1,
+                "type": goal_spec["type"],
+                "target": target,
+                "tolerance": goal_spec["tolerance"],
+                "max_attempts": target * multiplier,
+                "max_attempts_multiplier": multiplier,
+                "tracked_task": goal_spec["tracked_task"],
+                "query": config.get("QUERY", ""),
+                "candidate_pool_path": "",   # populated when manifest is ready
+                "candidates_total": 0,
+                "templates": {},             # populated when foreach deps are met
+                "variables": variables,
+                "compile_output_task_id": compile_output_task_id or "",
+                "accepted": 0,
+                "rejected": 0,
+                "in_flight_ids": [],
+                "accepted_ids": [],
+                "rejected_ids": [],
+                "spawned_ids": [],
+                "validated_task_ids": [],
+                "next_index": 0,
+                "status": "active",
+                "max_validations_per_cycle": 3,
+            }
+            self.log_decision("GOAL_INITIALIZED",
+                f"Goal-driven plan: target={target}, tolerance={goal_spec['tolerance']}, "
+                f"max_attempts={target * multiplier}, tracked={goal_spec['tracked_task']}",
+                batch_meta["goal"])
+
+        self.active_batches[batch_id] = batch_meta
         self._save_brain_state()
 
         # Release tasks with no dependencies immediately

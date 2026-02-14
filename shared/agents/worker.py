@@ -43,7 +43,8 @@ except AttributeError:
 
 def execute_task(task: Dict[str, Any], permissions_file: str,
                  gpu_name: str, ollama_url: str = None,
-                 model: str = None, task_timeout: int | None = None) -> Dict[str, Any]:
+                 model: str = None, task_timeout: int | None = None,
+                 worker_num_ctx: int = 8192) -> Dict[str, Any]:
     """
     Execute a single task and return the result.
 
@@ -108,7 +109,12 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
 
         response = requests.post(
             api_url,
-            json={"model": model, "prompt": full_prompt, "stream": False},
+            json={
+                "model": model,
+                "prompt": full_prompt,
+                "stream": False,
+                "options": {"num_ctx": worker_num_ctx},
+            },
             timeout=request_timeout
         )
         response.raise_for_status()
@@ -222,6 +228,7 @@ def main():
 
     configured_timeout = config.get("timeouts", {}).get("worker_task_seconds", 0)
     task_timeout = None if not configured_timeout or configured_timeout <= 0 else configured_timeout
+    worker_num_ctx = int(config.get("worker_context_tokens", 8192))
 
     # Get model name from GPU config
     model = None
@@ -251,6 +258,7 @@ def main():
         ollama_url=args.ollama_url,
         model=model,
         task_timeout=task_timeout,
+        worker_num_ctx=worker_num_ctx,
     )
 
     logger.info(f"Worker done: {'OK' if result.get('success') else 'FAIL'}")

@@ -212,6 +212,10 @@ def build_config(assignment, ollama, system):
         "shared_path": "../",
         "permissions_path": "permissions/",
         "ollama_host": ollama["host"],
+        "brain_keep_alive": "30m",
+        "worker_keep_alive": "30m",
+        "brain_context_tokens": 32768,
+        "worker_context_tokens": 8192,
         "brain": {
             "name": "brain",
             "model": assignment["brain"]["model"],

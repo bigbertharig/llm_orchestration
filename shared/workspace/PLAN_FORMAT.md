@@ -93,7 +93,7 @@ One or two sentences describing what this plan accomplishes.
 
 - **Purpose**: What this script does
 - **GPU**: yes
-- **VRAM estimate**: 1500 MB
+- **VRAM estimate**: infer first run, then set fixed from measured usage
 - **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/process_script.py --batch-id {BATCH_ID}`
 - **Output**: Description
 
@@ -113,6 +113,8 @@ Define tasks with explicit dependencies. The brain parses this section directly.
 - **task_class**: cpu
 - **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/init_script.py --batch-id {BATCH_ID} --input {INPUT_VAR}`
 - **depends_on**: none
+- **requires**: {INPUT_VAR}
+- **produces**: {BATCH_PATH}/manifest.json
 
 ### process
 - **executor**: worker
@@ -120,12 +122,16 @@ Define tasks with explicit dependencies. The brain parses this section directly.
 - **vram_policy**: infer
 - **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/process_script.py --batch-id {BATCH_ID}`
 - **depends_on**: init
+- **requires**: {BATCH_PATH}/manifest.json
+- **produces**: {BATCH_PATH}/results/{ITEM.id}/processed.json
 
 ### aggregate
-- **executor**: worker
+- **executor**: brain
 - **task_class**: cpu
 - **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/aggregate_script.py --batch-id {BATCH_ID}`
 - **depends_on**: process
+- **requires**: {BATCH_PATH}/results/{ITEM.id}/processed.json
+- **produces**: {BATCH_PATH}/output/final.json
 
 ## Notes
 
@@ -144,6 +150,8 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 - **task_class**: cpu|script|llm
 - **command**: `shell command here`
 - **depends_on**: task1, task2
+- **requires**: path1, path2
+- **produces**: path3, path4
 - **foreach**: {BATCH_PATH}/manifest.json:items  (optional)
 - **batch_size**: 4  (optional, foreach only)
 - **vram_policy**: default|infer|fixed  (optional, script tasks)
@@ -153,16 +161,49 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 | Field | Values | Description |
 |-------|--------|-------------|
 | `task_id` | Any unique name | Used for dependency references |
-| `executor` | `brain` or `worker` | Who runs this task |
+| `executor` | `brain` or `worker` | Who runs this task (routing control) |
 | `task_class` | `cpu`, `script`, or `llm` | **Required.** What resources the task needs (see below) |
 | `command` | Shell command in backticks | What to execute |
 | `depends_on` | Comma-separated task IDs or `none` | Tasks that must complete first |
+| `requires` | Comma-separated file paths/patterns | **Required.** Inputs this task expects to read |
+| `produces` | Comma-separated file paths/patterns | **Required.** Outputs this task is responsible for writing |
 | `foreach` | `path:jsonpath` | **Optional.** Expand to N tasks (see Foreach Expansion below) |
 | `batch_size` | Integer >= 1 | **Optional.** Group foreach items into micro-batch tasks (default `1`) |
 | `vram_policy` | `default`, `infer`, `fixed` | **Optional (script).** How brain sets script VRAM estimate |
 | `vram_estimate_mb` | Integer MB | **Optional (script).** Explicit VRAM estimate used when `fixed` |
 
-**Important:** All fields except `foreach` are required. If `task_class` is missing, the task goes to `failed/` immediately. The brain will attempt to auto-fix by inferring the class from command keywords, but plans should always specify it explicitly.
+**Important:** `executor`, `task_class`, `command`, `depends_on`, `requires`, and `produces` are required in every task. `foreach`, `batch_size`, `vram_policy`, and `vram_estimate_mb` are optional. If `task_class` is missing, the task goes to `failed/` immediately. The brain will attempt to auto-fix by inferring the class from command keywords, but plans should always specify it explicitly.
+
+### Executor Routing (Brain vs Worker)
+
+Use `executor` to control ownership of each task:
+
+- `executor: worker`
+  - Default for parallel per-item work and high-throughput stages.
+  - Claimed by GPU/CPU workers based on `task_class`.
+- `executor: brain`
+  - Reserved for orchestration-heavy steps, cross-item reasoning, and final synthesis.
+  - Claimed directly by the brain loop (never by workers).
+
+Recommended split:
+1. Initial setup/validation: `brain`
+2. Per-item processing (`foreach`): `worker`
+3. Mid-run quality gate/reconciliation: `brain`
+4. Final summary/decision: `brain`
+
+Rule of thumb:
+- If task logic is mostly "run this command N times", use `worker`.
+- If task logic is mostly "decide/aggregate/reconcile across many tasks", use `brain`.
+
+### Dataflow Contracts
+
+Use `requires` and `produces` to make task handoffs explicit and machine-checkable.
+
+- `requires` should list concrete files (or explicit patterns) that must exist before the task can run.
+- `produces` should list the outputs the task guarantees when successful.
+- For `foreach` tasks, use `{ITEM.field}` in paths to bind per-item artifacts.
+- Downstream tasks should `require` outputs from upstream tasks. If an output is never consumed, remove it or document why.
+- Keep contracts tight: list only files that matter for orchestration and validation.
 
 ### Task Classes
 
@@ -219,6 +260,18 @@ When documenting scripts in the `## Available Scripts` section, include a `VRAM 
 
 **VRAM Logging:**
 Workers log VRAM usage before and after script tasks to track actual vs estimated usage. This data helps tune future estimates.
+
+### Estimation Workflow (Recommended)
+
+Use a two-pass approach for script tasks:
+
+1. Start with `vram_policy: infer`.
+2. Run a small pilot batch and collect `max_vram_used_mb` from completed tasks.
+3. Set `vram_policy: fixed` with:
+   - `vram_estimate_mb = ceil(p95(max_vram_used_mb) * 1.2)`
+4. Re-test and adjust if OOM or under-utilization appears.
+
+This keeps plans dynamic at first, then stable and deterministic once measured on your actual hardware.
 
 ### Foreach Expansion
 

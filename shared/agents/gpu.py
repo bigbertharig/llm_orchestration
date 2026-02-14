@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -110,6 +111,7 @@ class GPUAgent:
         self.port = self.gpu_config.get("port")
         self.api_url = f"http://localhost:{self.port}/api/generate" if self.port else None
         self.worker_keep_alive = str(self.config.get("worker_keep_alive", "-1"))
+        self.worker_num_ctx = int(self.config.get("worker_context_tokens", 8192))
 
         # Permissions
         permissions_path = Path(self.config["permissions_path"])
@@ -143,6 +145,8 @@ class GPUAgent:
         # Stats
         self.stats = {"tasks_completed": 0, "tasks_failed": 0}
         self.last_external_heartbeat = 0
+        self.env_check_cache: Dict[str, Dict[str, Any]] = {}
+        self.env_block_reason: str | None = None
 
         # Ollama health tracking
         self.ollama_healthy = True
@@ -392,7 +396,10 @@ class GPUAgent:
                     "prompt": "Hello",
                     "stream": False,
                     "keep_alive": self.worker_keep_alive,
-                    "options": {"num_gpu": 1}
+                    "options": {
+                        "num_gpu": 1,
+                        "num_ctx": self.worker_num_ctx,
+                    }
                 },
                 timeout=600
             )
@@ -432,7 +439,11 @@ class GPUAgent:
                         "prompt": "READY?",
                         "stream": False,
                         "keep_alive": self.worker_keep_alive,
-                        "options": {"num_predict": 4, "num_gpu": 1}
+                        "options": {
+                            "num_predict": 4,
+                            "num_gpu": 1,
+                            "num_ctx": self.worker_num_ctx,
+                        }
                     },
                     timeout=30
                 )
@@ -836,6 +847,63 @@ class GPUAgent:
         # Unknown meta command: allow claim so it can fail explicitly.
         return True
 
+    def _resolve_env_manifest_path(self, task: Dict[str, Any]) -> Optional[Path]:
+        direct = task.get("env_manifest_path")
+        if isinstance(direct, str) and direct.strip():
+            p = Path(direct.strip())
+            if p.exists():
+                return p
+
+        batch_path = task.get("batch_path")
+        if isinstance(batch_path, str) and batch_path.strip():
+            p = Path(batch_path.strip()) / "env_manifest.json"
+            if p.exists():
+                return p
+
+        batch_id = str(task.get("batch_id", "")).strip()
+        if not batch_id:
+            return None
+        plans_dir = self.shared_path / "plans"
+        for candidate in plans_dir.glob(f"*/history/{batch_id}/env_manifest.json"):
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _check_task_env_requirements(self, task: Dict[str, Any]) -> tuple[bool, str]:
+        batch_id = str(task.get("batch_id", "")).strip()
+        if not batch_id:
+            return True, ""
+
+        manifest_path = self._resolve_env_manifest_path(task)
+        if not manifest_path:
+            return False, f"env manifest missing for batch {batch_id}"
+
+        cache_key = f"{batch_id}:{manifest_path}"
+        mtime = manifest_path.stat().st_mtime
+        cached = self.env_check_cache.get(cache_key)
+        if cached and cached.get("mtime") == mtime:
+            return bool(cached.get("ok")), str(cached.get("reason", ""))
+
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+        except Exception as exc:
+            reason = f"env manifest unreadable: {exc}"
+            self.env_check_cache[cache_key] = {"mtime": mtime, "ok": False, "reason": reason}
+            return False, reason
+
+        required = manifest.get("required_modules", [])
+        if not isinstance(required, list):
+            required = []
+        missing = [m for m in required if isinstance(m, str) and m and importlib.util.find_spec(m) is None]
+        if missing:
+            reason = f"missing modules: {', '.join(sorted(missing))}"
+            self.env_check_cache[cache_key] = {"mtime": mtime, "ok": False, "reason": reason}
+            return False, reason
+
+        self.env_check_cache[cache_key] = {"mtime": mtime, "ok": True, "reason": ""}
+        return True, ""
+
     def claim_tasks(self) -> List[Dict]:
         """
         Visit the board: claim as many tasks as fit within VRAM budget.
@@ -926,6 +994,22 @@ class GPUAgent:
                             f"Skipping llm task {task['task_id'][:8]}: model not loaded yet"
                         )
                         continue
+
+                    env_ok, env_reason = self._check_task_env_requirements(task)
+                    if not env_ok:
+                        self.env_block_reason = f"{task.get('batch_id', '-')}: {env_reason}"
+                        prior = task.get("env_blocked_reason")
+                        if prior != env_reason:
+                            task["env_blocked_reason"] = env_reason
+                            task["env_blocked_at"] = datetime.now().isoformat()
+                            with open(task_file, 'w') as f:
+                                json.dump(task, f, indent=2)
+                        self.logger.warning(
+                            f"Skipping task {task.get('task_id', '')[:8]} ({task.get('name', '')}) "
+                            f"- environment check failed: {env_reason}"
+                        )
+                        continue
+                    self.env_block_reason = None
 
                     # Budget check
                     if vram_cost > budget:
@@ -1218,6 +1302,7 @@ class GPUAgent:
             "thermal_pause_current_seconds": self.thermal_pause_current_seconds,
             "thermal_pause_attempts": self.thermal_pause_attempts,
             "last_thermal_event": self.last_thermal_event,
+            "env_block_reason": self.env_block_reason,
             "stats": self.stats,
         }
 
