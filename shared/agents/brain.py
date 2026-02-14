@@ -33,6 +33,8 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from filelock import FileLock, Timeout
 
+from brain_goal import BrainGoalMixin
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
@@ -51,7 +53,7 @@ VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'meta']
 VALID_VRAM_POLICIES = ['default', 'infer', 'fixed']
 
 
-class Brain:
+class Brain(BrainGoalMixin):
     def __init__(self, config_path: str):
         self.config_path = Path(config_path)
         self.config = self._load_config(config_path)
@@ -671,8 +673,15 @@ class Brain:
         for batch_id in list(self.active_batches.keys()):
             satisfied = self.get_satisfied_task_ids(batch_id)
             private_tasks = self.get_private_tasks(batch_id)
+            batch_meta = self.active_batches.get(batch_id, {})
+            goal = batch_meta.get("goal")
+
+            # For goal-driven batches, add virtual _goal_complete if goal is done
+            if goal and goal.get("status") in ("complete", "exhausted"):
+                satisfied.add("_goal_complete")
 
             all_released = True
+            goal_templates_saved_this_cycle = False
             for task in private_tasks:
                 depends_on = task.get("depends_on", [])
                 # Foreach templates may include per-item dependency placeholders.
@@ -690,16 +699,43 @@ class Brain:
                     # Check if this is a foreach task that needs expansion
                     foreach_spec = task.get("foreach")
                     if foreach_spec:
-                        # Expand the foreach task into N tasks
-                        expanded_names = self._expand_foreach_task(task, batch_id)
-                        if expanded_names:
-                            # Remove the template task
+                        if task.get("goal_driven") and goal:
+                            # Goal-driven foreach: save template, don't expand all at once
+                            template_name = task.get("name", "")
+                            goal["templates"][template_name] = {
+                                "command": task.get("command", ""),
+                                "depends_on": task.get("depends_on", []),
+                                "executor": task.get("executor", "worker"),
+                                "task_class": task.get("task_class"),
+                                "foreach": foreach_spec,
+                                "batch_size": task.get("batch_size", 1),
+                                "vram_estimate_mb": task.get("vram_estimate_mb"),
+                                "vram_estimate_source": task.get("vram_estimate_source"),
+                            }
+                            # Remove the template task from private
                             if task_file.exists():
                                 task_file.unlink()
-                            # Update any tasks that depend on this one to depend on ALL expanded tasks
-                            self._update_foreach_dependents(batch_id, task.get("name"), expanded_names)
+
+                            # Rewrite compile_output deps: replace this template name
+                            # with virtual _goal_complete dependency
+                            self._replace_goal_dep(batch_id, template_name)
+
+                            goal_templates_saved_this_cycle = True
+                            self.log_decision("GOAL_TEMPLATE_SAVED",
+                                f"Saved goal template '{template_name}' (foreach intercepted)",
+                                {"batch_id": batch_id, "template": template_name,
+                                 "templates_saved": len(goal["templates"])})
                         else:
-                            all_released = False
+                            # Standard foreach: expand all items at once
+                            expanded_names = self._expand_foreach_task(task, batch_id)
+                            if expanded_names:
+                                # Remove the template task
+                                if task_file.exists():
+                                    task_file.unlink()
+                                # Update any tasks that depend on this one to depend on ALL expanded tasks
+                                self._update_foreach_dependents(batch_id, task.get("name"), expanded_names)
+                            else:
+                                all_released = False
                     else:
                         # Regular task - release to public queue
                         if task_file.exists():
@@ -709,6 +745,10 @@ class Brain:
                     all_released = False
                     pending_deps = [d for d in template_depends if d not in satisfied]
                     self.logger.debug(f"Task {task.get('name')} waiting on: {pending_deps}")
+
+            # After saving goal templates, check if we should spawn initial wave
+            if goal_templates_saved_this_cycle and goal:
+                self._maybe_spawn_initial_wave(batch_id)
 
             # Check if batch is complete (no private tasks, no public/processing tasks)
             if all_released and len(private_tasks) > 0:
@@ -894,203 +934,6 @@ class Brain:
     # =========================================================================
     # Goal-Driven Plan Support
     # =========================================================================
-
-    def _read_candidate_pool(self, goal: Dict) -> List:
-        """Read the candidate pool from manifest.json for a goal-driven batch."""
-        pool_path = goal.get("candidate_pool_path", "")
-        if not pool_path or ":" not in pool_path:
-            return []
-
-        file_path, json_path = pool_path.rsplit(":", 1)
-        try:
-            with open(file_path) as f:
-                data = json.load(f)
-        except Exception as e:
-            self.logger.error(f"Failed to read candidate pool {file_path}: {e}")
-            return []
-
-        items = data
-        for key in json_path.split("."):
-            if isinstance(items, dict) and key in items:
-                items = items[key]
-            else:
-                self.logger.error(f"JSON path '{json_path}' not found in {file_path}")
-                return []
-
-        return items if isinstance(items, list) else []
-
-    def _spawn_goal_candidates(self, batch_id: str, count: int):
-        """
-        Create per-candidate pipeline tasks for goal-driven plans.
-
-        Spawns `count` candidates from the pool, each getting the full
-        template pipeline (e.g., plan_person_queries → scrape_person → score_person).
-        Idempotent: skips candidates already in spawned_ids.
-        """
-        batch_meta = self.active_batches.get(batch_id, {})
-        goal = batch_meta.get("goal")
-        if not goal or goal["status"] not in ("active",):
-            return
-
-        # Throttle: don't exceed target
-        headroom = goal["target"] - goal["accepted"] - len(goal["in_flight_ids"])
-        count = min(count, headroom)
-        if count <= 0:
-            return
-
-        pool = self._read_candidate_pool(goal)
-        if not pool:
-            self.logger.warning(f"Goal batch {batch_id}: candidate pool is empty or unreadable")
-            return
-
-        variables = goal.get("variables", {})
-        templates = goal.get("templates", {})
-        if not templates:
-            return
-
-        # Sort templates by dependency depth for correct ordering
-        template_order = self._resolve_template_order(templates)
-
-        spawned_this_call = 0
-        while spawned_this_call < count and goal["next_index"] < len(pool):
-            idx = goal["next_index"]
-            item = pool[idx]
-            candidate_id = item.get("id", str(idx)) if isinstance(item, dict) else str(idx)
-
-            goal["next_index"] += 1
-
-            # Idempotency guard
-            if candidate_id in goal["spawned_ids"]:
-                continue
-
-            # Create tasks for each template in pipeline order
-            for template_name in template_order:
-                template = templates[template_name]
-                command = template.get("command", "")
-                depends_on_raw = list(template.get("depends_on", []))
-
-                # Substitute {ITEM.field} in command
-                if isinstance(item, dict):
-                    for key, value in item.items():
-                        command = command.replace(f"{{ITEM.{key}}}", str(value))
-                else:
-                    command = command.replace("{ITEM}", str(item))
-
-                # Substitute plan variables in command
-                for var, value in variables.items():
-                    command = command.replace(var, value)
-
-                # Build per-item dependencies
-                item_depends = []
-                for dep in depends_on_raw:
-                    dep_name = dep
-                    if isinstance(item, dict):
-                        for key, value in item.items():
-                            dep_name = dep_name.replace(f"{{ITEM.{key}}}", str(value))
-                    else:
-                        dep_name = dep_name.replace("{ITEM}", str(item))
-                    if dep_name and dep_name.lower() != "none":
-                        item_depends.append(dep_name)
-
-                task_name = f"{template_name}_{candidate_id}"
-
-                task = self.create_task(
-                    task_type="shell",
-                    command=command,
-                    batch_id=batch_id,
-                    task_name=task_name,
-                    priority=5,
-                    depends_on=item_depends,
-                    executor=template.get("executor", "worker"),
-                    task_class=template.get("task_class"),
-                    vram_estimate_mb=template.get("vram_estimate_mb"),
-                    vram_estimate_source=template.get("vram_estimate_source")
-                )
-                task["goal_candidate_id"] = candidate_id
-
-                # Add plan/batch path metadata if available
-                if batch_meta.get("plan_dir"):
-                    task["plan_path"] = batch_meta["plan_dir"]
-                if batch_meta.get("batch_dir"):
-                    task["batch_path"] = batch_meta["batch_dir"]
-                if batch_meta.get("env_manifest_path"):
-                    task["env_manifest_path"] = batch_meta["env_manifest_path"]
-
-                # Release if deps are met, otherwise keep private
-                satisfied = self.get_satisfied_task_ids(batch_id)
-                if all(d in satisfied for d in item_depends):
-                    self.save_to_public(task)
-                else:
-                    self.save_to_private(task)
-
-                self.log_decision("GOAL_TASK_CREATED",
-                    f"Goal candidate '{candidate_id}': created {task_name}",
-                    {"task_id": task["task_id"][:8], "candidate_id": candidate_id,
-                     "depends_on": item_depends})
-
-            goal["spawned_ids"].append(candidate_id)
-            goal["in_flight_ids"].append(candidate_id)
-            spawned_this_call += 1
-
-        if spawned_this_call > 0:
-            self.log_decision("GOAL_SPAWN",
-                f"Spawned {spawned_this_call} candidate pipeline(s) for batch {batch_id}",
-                {"spawned": spawned_this_call, "total_spawned": len(goal["spawned_ids"]),
-                 "in_flight": len(goal["in_flight_ids"]), "accepted": goal["accepted"],
-                 "next_index": goal["next_index"]})
-            self._save_brain_state()
-
-    def _resolve_template_order(self, templates: Dict) -> List[str]:
-        """
-        Sort goal templates by dependency depth so tasks are created in the
-        right order (upstream before downstream).
-        """
-        template_names = set(templates.keys())
-        order = []
-        remaining = dict(templates)
-
-        # Simple topological sort: emit templates whose deps are all resolved
-        for _ in range(len(templates) + 1):
-            if not remaining:
-                break
-            for name, tmpl in list(remaining.items()):
-                deps = tmpl.get("depends_on", [])
-                # Strip {ITEM.*} from deps for ordering purposes
-                base_deps = set()
-                for d in deps:
-                    base = re.sub(r'_\{ITEM\.[^}]+\}', '', d)
-                    if base in template_names:
-                        base_deps.add(base)
-                if base_deps.issubset(set(order)):
-                    order.append(name)
-                    del remaining[name]
-
-        # Any remaining (circular deps) just append
-        order.extend(remaining.keys())
-        return order
-
-    def _check_batch_completion(self, batch_id: str):
-        """Check if a batch is fully complete."""
-        # Any tasks still in queue or processing?
-        for path in [self.queue_path, self.processing_path]:
-            for task_file in path.glob("*.json"):
-                try:
-                    with open(task_file) as f:
-                        task = json.load(f)
-                        if task.get("batch_id") == batch_id:
-                            return  # Still has pending tasks
-                except:
-                    pass
-
-        # Any private tasks left?
-        if self.get_private_tasks(batch_id):
-            return
-
-        # Batch is complete
-        self.log_decision("BATCH_COMPLETE", f"Batch {batch_id} finished successfully",
-                          {"batch_id": batch_id, "plan": self.active_batches.get(batch_id, {}).get("plan")})
-        del self.active_batches[batch_id]
-        self._save_brain_state()
 
     def get_satisfied_task_ids(self, batch_id: str) -> set:
         """
@@ -1421,53 +1264,6 @@ Required JSON format:
     # =========================================================================
     # Plan Parsing and Execution
     # =========================================================================
-
-    def _parse_goal_section(self, plan_content: str) -> Optional[Dict[str, Any]]:
-        """
-        Parse the optional ## Goal section from a plan.md file.
-
-        Returns a dict with goal metadata if found, None otherwise.
-        Backward-compatible: plans without ## Goal are unaffected.
-        """
-        # Find the ## Goal section
-        goal_match = re.search(r'\n## Goal\s*\n(.*?)(?=\n## |\Z)', plan_content, re.DOTALL)
-        if not goal_match:
-            return None
-
-        goal_text = goal_match.group(1)
-        goal = {}
-
-        for line in goal_text.strip().split('\n'):
-            line = line.strip()
-            if line.startswith('- **type**:'):
-                goal["type"] = line.split(':', 1)[1].strip()
-            elif line.startswith('- **target**:'):
-                raw = line.split(':', 1)[1].strip()
-                goal["target"] = raw  # Keep as string; may contain {VAR}
-            elif line.startswith('- **tolerance**:'):
-                try:
-                    goal["tolerance"] = int(line.split(':', 1)[1].strip())
-                except ValueError:
-                    goal["tolerance"] = 2
-            elif line.startswith('- **max_attempts_multiplier**:'):
-                try:
-                    goal["max_attempts_multiplier"] = int(line.split(':', 1)[1].strip())
-                except ValueError:
-                    goal["max_attempts_multiplier"] = 5
-            elif line.startswith('- **tracked_task**:'):
-                goal["tracked_task"] = line.split(':', 1)[1].strip()
-
-        # Validate required fields
-        if not goal.get("type") or not goal.get("tracked_task"):
-            self.logger.warning("Goal section found but missing required fields (type, tracked_task)")
-            return None
-
-        # Defaults
-        goal.setdefault("tolerance", 2)
-        goal.setdefault("max_attempts_multiplier", 5)
-
-        self.log_decision("GOAL_PARSED", f"Parsed goal: type={goal['type']}, target={goal.get('target')}, tracked={goal['tracked_task']}", goal)
-        return goal
 
     def parse_plan_md(self, plan_content: str) -> List[Dict[str, Any]]:
         """
@@ -3448,6 +3244,9 @@ JSON only:"""
 
                 # 2. Check and release tasks whose dependencies are met
                 self.check_and_release_tasks()
+
+                # 2b. Process goal-driven plan validations
+                self._process_goal_validations()
 
                 # 3. Handle failed tasks (retry logic)
                 self.handle_failed_tasks()
