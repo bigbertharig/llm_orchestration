@@ -87,13 +87,16 @@ class Brain(BrainGoalMixin):
 
         # Brain state and private task list
         self.brain_path = self.shared_path / "brain"
+        self.heartbeats_path = self.shared_path / "heartbeats"
         self.private_tasks_path = self.brain_path / "private_tasks"
         self.escalations_path = self.brain_path / "escalations"
         self.state_file = self.brain_path / "state.json"
+        self.brain_heartbeat_file = self.brain_path / "heartbeat.json"
+        self.brain_heartbeat_file_unified = self.heartbeats_path / "brain.json"
 
         # Ensure directories exist
         for path in [self.queue_path, self.processing_path, self.complete_path,
-                     self.failed_path, self.brain_path, self.private_tasks_path,
+                     self.failed_path, self.brain_path, self.heartbeats_path, self.private_tasks_path,
                      self.escalations_path]:
             path.mkdir(parents=True, exist_ok=True)
         self.brain_lock_file = self.brain_path / "brain_agent.lock"
@@ -269,6 +272,26 @@ class Brain(BrainGoalMixin):
         }
         with open(self.state_file, 'w') as f:
             json.dump(state, f, indent=2)
+
+    def _write_brain_heartbeat(self):
+        """Publish brain heartbeat for dashboard/status consumers."""
+        try:
+            hb = {
+                "worker_type": "brain",
+                "name": "brain",
+                "hostname": socket.gethostname(),
+                "state": "online" if self.running else "stopping",
+                "last_updated": datetime.now().isoformat(timespec="seconds"),
+                "brain_gpus": self.gpus,
+                "active_batches": len(self.active_batches),
+                "brain_pids": {"pid": os.getpid()},
+            }
+            with open(self.brain_heartbeat_file, "w", encoding="utf-8") as f:
+                json.dump(hb, f, indent=2)
+            with open(self.brain_heartbeat_file_unified, "w", encoding="utf-8") as f:
+                json.dump(hb, f, indent=2)
+        except Exception as e:
+            self.logger.warning(f"Failed to write brain heartbeat: {e}")
 
     # =========================================================================
     # Logging
@@ -1491,14 +1514,22 @@ Required JSON format:
         # Parse optional Goal section (backward-compatible)
         goal_spec = self._parse_goal_section(plan_content)
         if goal_spec:
-            # Resolve target variable (may be "{TARGET_COUNT}" or literal int)
-            raw_target = str(goal_spec.get("target", ""))
-            for var, value in variables.items():
-                raw_target = raw_target.replace(var, value)
+            # Resolve goal numeric fields from literals or {VARS}
+            def _resolve_goal_int(field: str) -> int:
+                raw_val = str(goal_spec.get(field, ""))
+                for var, value in variables.items():
+                    raw_val = raw_val.replace(var, value)
+                try:
+                    return int(raw_val)
+                except ValueError:
+                    self.logger.error(f"Goal {field} could not be resolved to int: {raw_val}")
+                    raise
+
             try:
-                goal_spec["target"] = int(raw_target)
+                goal_spec["target"] = _resolve_goal_int("target")
+                goal_spec["tolerance"] = _resolve_goal_int("tolerance")
+                goal_spec["max_attempts_multiplier"] = _resolve_goal_int("max_attempts_multiplier")
             except ValueError:
-                self.logger.error(f"Goal target could not be resolved to int: {raw_target}")
                 goal_spec = None
 
         if goal_spec:
@@ -1804,9 +1835,32 @@ Required JSON format:
             )
             elapsed = time.time() - start_time
             success = result.returncode == 0
-            output = result.stdout
-            if result.stderr:
-                output += f"\n[stderr: {result.stderr}]"
+            stdout_text = result.stdout or ""
+            stderr_text = result.stderr or ""
+            output = stdout_text
+            if stderr_text:
+                output += f"\n[stderr: {stderr_text}]"
+
+            error_text = ""
+            if not success:
+                stderr_lines = [ln.strip() for ln in stderr_text.splitlines() if ln.strip()]
+                if stderr_lines:
+                    error_text = stderr_lines[-1][:400]
+                else:
+                    error_text = f"command exited with return code {result.returncode}"
+
+            command_lc = str(command).lower()
+            task_name_lc = str(task_name).lower()
+            fatal_marker = "fatal:" in (stdout_text + "\n" + stderr_text).lower()
+            critical_stage = (
+                "identify_people.py" in command_lc
+                or task_name_lc == "identify_people"
+                or "parse_input.py" in command_lc
+                or task_name_lc == "parse_input"
+            )
+            error_type = "fatal" if (not success and (fatal_marker or critical_stage)) else "worker"
+            if not success and task_class == "brain":
+                error_type = "brain_task_failure"
 
             task["status"] = "complete" if success else "failed"
             task["result"] = {
@@ -1814,19 +1868,34 @@ Required JSON format:
                 "output": output,
                 "return_code": result.returncode,
                 "handler": "brain",
-                "elapsed_seconds": round(elapsed, 1)
+                "elapsed_seconds": round(elapsed, 1),
+                "error": error_text,
+                "error_type": error_type,
             }
         except subprocess.TimeoutExpired:
             elapsed = time.time() - start_time
             task["status"] = "failed"
-            task["result"] = {"success": False, "error": "Command timed out", "handler": "brain", "elapsed_seconds": round(elapsed, 1)}
+            task["result"] = {
+                "success": False,
+                "error": "Command timed out",
+                "error_type": "worker",
+                "handler": "brain",
+                "elapsed_seconds": round(elapsed, 1),
+            }
         except Exception as e:
             elapsed = time.time() - start_time
             task["status"] = "failed"
-            task["result"] = {"success": False, "error": str(e), "handler": "brain", "elapsed_seconds": round(elapsed, 1)}
+            task["result"] = {
+                "success": False,
+                "error": str(e),
+                "error_type": "worker",
+                "handler": "brain",
+                "elapsed_seconds": round(elapsed, 1),
+            }
 
         task["completed_at"] = datetime.now().isoformat()
-        dest_file = self.complete_path / f"{task['task_id']}.json"
+        dest_base = self.complete_path if task["result"].get("success") else self.failed_path
+        dest_file = dest_base / f"{task['task_id']}.json"
         with open(dest_file, 'w') as f:
             json.dump(task, f, indent=2)
 
@@ -1839,7 +1908,9 @@ Required JSON format:
         else:
             self.log_decision("SHELL_FAILED", f"FAILED: {task_name} ({elapsed}s)", {
                 "task_id": task["task_id"][:8],
-                "error": task["result"].get("error", "")[:200]
+                "error": task["result"].get("error", "")[:200],
+                "return_code": task["result"].get("return_code"),
+                "error_type": task["result"].get("error_type", "worker"),
             })
 
     def handle_decide_task(self, task: Dict[str, Any]):
@@ -2084,6 +2155,108 @@ JSON only:"""
         task_file.unlink(missing_ok=True)
         self.save_to_public(task)
 
+    def _abort_batch(self, batch_id: str, reason: str, source_task: Dict[str, Any]):
+        """Terminate a batch and move pending tasks to failed/abandoned."""
+        if not batch_id:
+            return
+
+        now = datetime.now().isoformat()
+        batch_meta = self.active_batches.get(batch_id, {})
+        aborted_count = 0
+        source_task_id = source_task.get("task_id")
+
+        for lane in (self.queue_path, self.private_tasks_path):
+            for task_file in lane.glob("*.json"):
+                try:
+                    with open(task_file) as f:
+                        task = json.load(f)
+                except Exception:
+                    continue
+
+                if task.get("batch_id") != batch_id:
+                    continue
+                if source_task_id and task.get("task_id") == source_task_id:
+                    continue
+
+                task["status"] = "abandoned"
+                task["completed_at"] = now
+                task["abandoned_reason"] = "batch_aborted_after_fatal_task"
+                task["result"] = {
+                    "success": False,
+                    "error": f"Batch aborted: {reason}",
+                    "error_type": "batch_aborted",
+                    "handler": "brain",
+                }
+                try:
+                    task_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+                dest_file = self.failed_path / f"{task.get('task_id')}.json"
+                with open(dest_file, "w") as f:
+                    json.dump(task, f, indent=2)
+                aborted_count += 1
+
+        for task_file in self.processing_path.glob("*.json"):
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+            except Exception:
+                continue
+            if task.get("batch_id") != batch_id:
+                continue
+            worker_name = task.get("assigned_to") or task.get("worker")
+            task_id = task.get("task_id", "")
+            if worker_name and task_id:
+                self._send_abort_signal(worker_name, task_id, reason="batch_aborted")
+
+        if batch_meta:
+            goal = batch_meta.get("goal")
+            if isinstance(goal, dict):
+                goal["status"] = "failed"
+                goal["failed_at"] = now
+                goal["failure_reason"] = reason
+            batch_meta["status"] = "failed"
+            batch_meta["failed_at"] = now
+            batch_meta["failure_reason"] = reason
+
+        batch_dir = batch_meta.get("batch_dir")
+        if batch_dir:
+            try:
+                out = Path(batch_dir) / "results" / "batch_failure.json"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with open(out, "w") as f:
+                    json.dump(
+                        {
+                            "batch_id": batch_id,
+                            "status": "failed",
+                            "failed_at": now,
+                            "reason": reason,
+                            "source_task": source_task.get("name", ""),
+                            "source_task_id": source_task.get("task_id", ""),
+                            "abandoned_tasks": aborted_count,
+                        },
+                        f,
+                        indent=2,
+                    )
+            except Exception as e:
+                self.logger.warning(f"Failed writing batch failure artifact for {batch_id}: {e}")
+
+        self.log_decision(
+            "BATCH_ABORTED",
+            f"Aborted batch {batch_id} due to fatal task failure",
+            {
+                "batch_id": batch_id,
+                "source_task": source_task.get("name", ""),
+                "source_task_id": str(source_task.get("task_id", ""))[:8],
+                "reason": reason[:300],
+                "abandoned_tasks": aborted_count,
+            },
+        )
+        if batch_id in self.active_batches:
+            del self.active_batches[batch_id]
+        self._save_brain_state()
+
     def _requeue_upstream_scrape_for_person(self, batch_id: str, person_id: str) -> bool:
         if not batch_id or not person_id:
             return False
@@ -2121,9 +2294,35 @@ JSON only:"""
                 result = task.get("result", {})
                 error_type = result.get("error_type", "worker")  # Default to worker failure
 
+                if task.get("status") == "abandoned":
+                    continue
+
                 # Use task memory fields (attempts, workers_attempted)
                 attempts = task.get("attempts", 0)
                 workers = task.get("workers_attempted", [])
+
+                if str(task.get("task_class", "")).lower() == "brain":
+                    reason = (
+                        str(result.get("error", "")).strip()
+                        or str(result.get("output", "")).strip()[:400]
+                        or "brain task failed"
+                    )
+                    self.log_decision(
+                        "BRAIN_TASK_ABORT",
+                        f"Brain task failure triggers batch abort: {task.get('name', '')}",
+                        {
+                            "task_id": str(task.get("task_id", ""))[:8],
+                            "batch_id": task.get("batch_id", ""),
+                            "reason": reason[:300],
+                        },
+                    )
+                    self._abort_batch(task.get("batch_id", ""), reason, task)
+                    task["status"] = "abandoned"
+                    task["abandoned_reason"] = "brain_task_failed_abort_batch"
+                    task["result"]["error_type"] = "brain_task_failure_handled"
+                    with open(task_file, "w") as f:
+                        json.dump(task, f, indent=2)
+                    continue
 
                 # Recoverable blocked tasks are re-queued automatically.
                 if task.get("status") == "blocked_cloud" or task.get("cloud_escalated", False):
@@ -2154,6 +2353,20 @@ JSON only:"""
                                 }
                             )
                         continue
+                    continue
+
+                if error_type == "fatal":
+                    reason = (
+                        str(result.get("error", "")).strip()
+                        or str(result.get("output", "")).strip()[:400]
+                        or "fatal task failure"
+                    )
+                    self._abort_batch(task.get("batch_id", ""), reason, task)
+                    task["status"] = "abandoned"
+                    task["abandoned_reason"] = "batch_aborted_after_fatal_task"
+                    task["result"]["error_type"] = "fatal_handled"
+                    with open(task_file, "w") as f:
+                        json.dump(task, f, indent=2)
                     continue
 
                 if error_type == "definition":
@@ -3306,6 +3519,7 @@ JSON only:"""
 
             total_startup = _time.time() - start_time
             self.logger.info(f"[STARTUP] Brain ready (total: {total_startup:.1f}s)")
+            self._write_brain_heartbeat()
 
             # Signal ready to launcher
             flag_dir = Path("/tmp/llm-orchestration-flags")
@@ -3333,6 +3547,7 @@ JSON only:"""
 
                 # Save state periodically
                 self._save_brain_state()
+                self._write_brain_heartbeat()
 
                 time.sleep(self.poll_interval)
 
@@ -3340,6 +3555,7 @@ JSON only:"""
             self.logger.info("Shutting down...")
         finally:
             self._save_brain_state()
+            self._write_brain_heartbeat()
             self.stop_ollama()
 
     def stop(self):
