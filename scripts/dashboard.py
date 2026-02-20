@@ -16,6 +16,10 @@ from urllib.parse import urlparse
 HEARTBEAT_WARN_S = 60
 HEARTBEAT_BAD_S = 120
 HEARTBEAT_MAX_S = 600
+CONFIG_KEY_RE = re.compile(r"^[A-Z0-9_]{1,64}$")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+INLINE_FILE_KEYS = ("QUERY_FILE", "REQUEST_FILE", "INPUT_FILE", "PROMPT_FILE", "CLAIM_FILE")
+GITHUB_URL_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 
 
 def load_config(config_path: Path) -> dict[str, Any]:
@@ -127,6 +131,35 @@ def heartbeat_age_seconds(last_updated: str | None) -> int | None:
         return int((datetime.now() - dt).total_seconds())
     except Exception:
         return None
+
+
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    normalized = raw if "T" in raw else raw.replace(" ", "T")
+    try:
+        return datetime.fromisoformat(normalized)
+    except Exception:
+        return None
+
+
+def format_duration_short(total_seconds: int | float | None) -> str:
+    if total_seconds is None:
+        return "unknown"
+    try:
+        seconds = max(0, int(total_seconds))
+    except Exception:
+        return "unknown"
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
 
 
 def classify_thermal_cause(reasons: Any) -> str:
@@ -269,44 +302,66 @@ def file_mtime_iso(path: Path) -> str | None:
 def load_gpu_telemetry() -> dict[int, dict[str, Any]]:
     """Best-effort live GPU telemetry keyed by GPU index."""
     result: dict[int, dict[str, Any]] = {}
+    query_cmd = [
+        "nvidia-smi",
+        "--query-gpu=index,temperature.gpu,utilization.gpu,power.draw,memory.used,memory.total",
+        "--format=csv,noheader,nounits",
+    ]
+
+    def parse_output(text: str) -> None:
+        nonlocal result
+        for line in text.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 6:
+                continue
+            try:
+                gid = int(parts[0])
+                temp_c = int(float(parts[1]))
+                util_pct = int(float(parts[2]))
+                power_w = float(parts[3])
+                mem_used = int(float(parts[4]))
+                mem_total = int(float(parts[5]))
+            except Exception:
+                continue
+            result[gid] = {
+                "gpu_temp_c": temp_c,
+                "gpu_util": util_pct,
+                "power_w": power_w,
+                "vram_used_mb": mem_used,
+                "vram_total_mb": mem_total,
+            }
+
+    # First preference: local nvidia-smi (dashboard running on GPU rig).
     try:
         proc = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,temperature.gpu,utilization.gpu,power.draw,memory.used,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
+            query_cmd,
             capture_output=True,
             text=True,
             timeout=3,
             check=False,
         )
+        if proc.returncode == 0 and proc.stdout.strip():
+            parse_output(proc.stdout)
     except Exception:
+        pass
+
+    if result:
         return result
 
-    if proc.returncode != 0:
-        return result
+    # Fallback: dashboard on Pi/CPU host, query GPU rig via SSH.
+    try:
+        proc = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "gpu", *query_cmd],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            parse_output(proc.stdout)
+    except Exception:
+        pass
 
-    for line in proc.stdout.splitlines():
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 6:
-            continue
-        try:
-            gid = int(parts[0])
-            temp_c = int(float(parts[1]))
-            util_pct = int(float(parts[2]))
-            power_w = float(parts[3])
-            mem_used = int(float(parts[4]))
-            mem_total = int(float(parts[5]))
-        except Exception:
-            continue
-        result[gid] = {
-            "gpu_temp_c": temp_c,
-            "gpu_util": util_pct,
-            "power_w": power_w,
-            "vram_used_mb": mem_used,
-            "vram_total_mb": mem_total,
-        }
     return result
 
 
@@ -322,6 +377,152 @@ def count_by_batch(tasks: dict[str, list[dict[str, Any]]], batch_id: str) -> dic
 
 def lane_view(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     return [to_task_view(t) for t in items[:limit]]
+
+
+def collect_recent_batch_failure_alerts(
+    failed_tasks: list[dict[str, Any]],
+    window_seconds: int = 1800,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Surface recent batch-fatal signals even after active batch cards clear."""
+    best_by_batch: dict[str, tuple[int, dict[str, Any]]] = {}
+
+    for task in failed_tasks:
+        batch_id = str(task.get("batch_id") or "").strip()
+        if not batch_id:
+            continue
+
+        when = (
+            task.get("completed_at")
+            or task.get("last_attempt_at")
+            or task.get("started_at")
+            or task.get("created_at")
+        )
+        age_s = heartbeat_age_seconds(str(when) if when else None)
+        if age_s is None or age_s > window_seconds:
+            continue
+
+        status = str(task.get("status") or "").strip().lower()
+        if status not in {"failed", "abandoned", "error", "blocked_cloud"}:
+            continue
+
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        error_text = (
+            result.get("error")
+            or task.get("error")
+            or result.get("output")
+            or task.get("blocked_reason")
+            or ""
+        )
+        error_text = " ".join(str(error_text).split())
+        if not error_text:
+            continue
+
+        name = str(task.get("name") or task.get("task_id") or "task")
+        error_type = str(result.get("error_type") or "").strip().lower()
+        lowered = error_text.lower()
+
+        score = 0
+        if error_type == "brain_task_failure":
+            score += 6
+        if "batch aborted" in lowered:
+            score += 2
+        if any(x in lowered for x in ("can't open file", "query file not found", "fatal:")):
+            score += 4
+        if name in {"build_strategy", "identify_people", "execute_searches", "compile_output"}:
+            score += 2
+
+        snippet = error_text[:240]
+        alert = {
+            "severity": "bad",
+            "worker": batch_id,
+            "age_s": age_s,
+            "message": f"Batch {batch_id} failed at {name}: {snippet}",
+            "sticky": True,
+            "sticky_id": f"batch-failure:{batch_id}",
+        }
+
+        prev = best_by_batch.get(batch_id)
+        if prev is None or score > prev[0]:
+            best_by_batch[batch_id] = (score, alert)
+
+    alerts = [v[1] for v in best_by_batch.values()]
+    alerts.sort(key=lambda a: (a.get("age_s") is None, a.get("age_s") or 10**9))
+    return alerts[:limit]
+
+
+def collect_recent_batch_completion_alerts(
+    tasks_by_lane: dict[str, list[dict[str, Any]]],
+    window_seconds: int = 1800,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Surface recent completed batches with total runtime."""
+    complete_tasks = tasks_by_lane.get("complete", [])
+    if not complete_tasks:
+        return []
+
+    # Candidate batches are those with a recent completed task.
+    candidate_batch_ids: set[str] = set()
+    for task in complete_tasks:
+        batch_id = str(task.get("batch_id") or "").strip()
+        if not batch_id or batch_id.lower() == "system":
+            continue
+        when = task.get("completed_at") or task.get("started_at") or task.get("created_at")
+        age_s = heartbeat_age_seconds(str(when) if when else None)
+        if age_s is not None and age_s <= window_seconds:
+            candidate_batch_ids.add(batch_id)
+
+    alerts: list[dict[str, Any]] = []
+    for batch_id in sorted(candidate_batch_ids):
+        counts = count_by_batch(tasks_by_lane, batch_id)
+        # Must actually be done: no active queue/processing/private.
+        if counts["queue"] > 0 or counts["processing"] > 0 or counts["private"] > 0:
+            continue
+        # Skip batches with failures so failure alert remains primary.
+        if counts["failed"] > 0:
+            continue
+        if counts["complete"] <= 0:
+            continue
+
+        batch_tasks = [
+            t for t in (tasks_by_lane.get("complete", []) + tasks_by_lane.get("failed", []))
+            if str(t.get("batch_id") or "").strip() == batch_id
+        ]
+        if not batch_tasks:
+            continue
+
+        start_candidates: list[datetime] = []
+        end_candidates: list[datetime] = []
+        for task in batch_tasks:
+            start_dt = parse_iso_datetime(task.get("created_at")) or parse_iso_datetime(task.get("started_at"))
+            end_dt = parse_iso_datetime(task.get("completed_at")) or parse_iso_datetime(task.get("last_attempt_at"))
+            if start_dt:
+                start_candidates.append(start_dt)
+            if end_dt:
+                end_candidates.append(end_dt)
+
+        if not end_candidates:
+            continue
+        start_dt = min(start_candidates) if start_candidates else None
+        end_dt = max(end_candidates)
+        runtime_s = int((end_dt - start_dt).total_seconds()) if start_dt else None
+        age_s = heartbeat_age_seconds(end_dt.isoformat())
+
+        alerts.append({
+            "severity": "ok",
+            "worker": batch_id,
+            "age_s": age_s,
+            "message": (
+                f"Batch {batch_id} complete in {format_duration_short(runtime_s)} "
+                f"({counts['complete']} tasks)"
+            ),
+            "sticky": True,
+            "sticky_id": f"batch-complete:{batch_id}",
+            "runtime_s": runtime_s,
+        })
+
+    alerts.sort(key=lambda a: (a.get("age_s") is None, a.get("age_s") or 10**9))
+    return alerts[:limit]
 
 
 def is_system_meta_task(task: dict[str, Any]) -> bool:
@@ -619,15 +820,26 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
             "age_s": None,
         })
 
+    # Keep recent batch-fatal/completion events visible even if batch cards collapsed.
+    alerts.extend(collect_recent_batch_failure_alerts(lanes["failed"]))
+    alerts.extend(collect_recent_batch_completion_alerts(lanes))
+
     batches: dict[str, Any] = {}
     batch_chains: dict[str, Any] = {}
+    engaged_batch_ids: set[str] = set()
     for batch_id, meta in active_batches.items():
         counts = count_by_batch(lanes, batch_id)
+        is_engaged = (counts["queue"] + counts["processing"] + counts["private"] + counts["failed"]) > 0
+        if not is_engaged:
+            # Hide stale/idle leftovers that linger in brain state.
+            continue
         batch_info: dict[str, Any] = {
             "plan": meta.get("plan"),
             "started_at": meta.get("started_at"),
             "total_hint": meta.get("total_tasks"),
             "counts": counts,
+            "priority": meta.get("priority", "normal"),
+            "preemptible": meta.get("preemptible", True),
         }
         # Include goal progress if this is a goal-driven batch
         goal = meta.get("goal")
@@ -643,20 +855,20 @@ def summarize(shared_path: Path, config: dict[str, Any]) -> dict[str, Any]:
             }
         batches[batch_id] = batch_info
         batch_chains[batch_id] = build_batch_chain(lanes, batch_id)
+        engaged_batch_ids.add(batch_id)
 
     # Keep lane tables focused on currently active batches so historical
     # completes don't swamp the dashboard.
-    active_batch_ids = set(active_batches.keys())
-    if active_batch_ids:
+    if engaged_batch_ids:
         lane_source = {
-            "queue": [t for t in lanes["queue"] if t.get("batch_id") in active_batch_ids],
+            "queue": [t for t in lanes["queue"] if t.get("batch_id") in engaged_batch_ids],
             "processing": [
                 t for t in lanes["processing"]
-                if t.get("batch_id") in active_batch_ids or is_system_meta_task(t)
+                if t.get("batch_id") in engaged_batch_ids or is_system_meta_task(t)
             ],
-            "private": [t for t in lanes["private"] if t.get("batch_id") in active_batch_ids],
-            "complete": [t for t in lanes["complete"] if t.get("batch_id") in active_batch_ids],
-            "failed": [t for t in lanes["failed"] if t.get("batch_id") in active_batch_ids],
+            "private": [t for t in lanes["private"] if t.get("batch_id") in engaged_batch_ids],
+            "complete": [t for t in lanes["complete"] if t.get("batch_id") in engaged_batch_ids],
+            "failed": [t for t in lanes["failed"] if t.get("batch_id") in engaged_batch_ids],
         }
     else:
         lane_source = lanes
@@ -896,6 +1108,66 @@ def collect_batch_outputs(shared_path: Path, batch_id: str, max_files: int = 40)
     }
 
 
+def sanitize_text(value: Any, *, max_len: int = 12000, single_line: bool = False) -> str:
+    text = str(value or "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = CONTROL_CHAR_RE.sub("", text)
+    text = text[:max_len]
+    if single_line:
+        text = " ".join(text.split())
+    return text.strip()
+
+
+def sanitize_config_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return sanitize_text(value, max_len=4000, single_line=False)
+    raise ValueError("config values must be scalar JSON types (string/number/bool/null)")
+
+
+def sanitize_config_object(raw_cfg: dict[str, Any]) -> dict[str, Any]:
+    if len(raw_cfg) > 120:
+        raise ValueError("too many config keys (max 120)")
+    out: dict[str, Any] = {}
+    for k, v in raw_cfg.items():
+        if not isinstance(k, str):
+            raise ValueError("config keys must be strings")
+        key = k.strip().upper()
+        if not CONFIG_KEY_RE.fullmatch(key):
+            raise ValueError(f"invalid config key: {k!r}")
+        out[key] = sanitize_config_value(v)
+    return out
+
+
+def normalize_github_url(url: str) -> str:
+    normalized = sanitize_text(url, max_len=300, single_line=True)
+    m = GITHUB_URL_RE.match(normalized)
+    if not m:
+        raise ValueError("repo URL must be https://github.com/<owner>/<repo>")
+    owner, repo = m.group(1), m.group(2)
+    return f"https://github.com/{owner}/{repo}"
+
+
+def write_inline_input_file(shared_path: Path, plan_name: str, text: str) -> str:
+    runtime_dir = (
+        shared_path
+        / "plans"
+        / "shoulders"
+        / plan_name
+        / "input"
+        / ".submit_runtime"
+        / "dashboard"
+    )
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    path = runtime_dir / f"inline_{stamp}.md"
+    payload = text + ("\n" if text and not text.endswith("\n") else "")
+    path.write_text(payload, encoding="utf-8")
+    rel = path.relative_to(shared_path)
+    return f"/mnt/shared/{rel.as_posix()}"
+
+
 def default_plan_config(shared_path: Path, plan_name: str) -> dict[str, Any]:
     if plan_name == "research_assistant":
         return {
@@ -906,6 +1178,8 @@ def default_plan_config(shared_path: Path, plan_name: str) -> dict[str, Any]:
             "SEARCH_DEPTH": "basic",
             "OUTPUT_FORMAT": "both",
             "RUN_MODE": "fresh",
+            "PRIORITY": "normal",
+            "PREEMPTIBLE": True,
         }
     if plan_name == "dc_integration":
         return {
@@ -913,8 +1187,26 @@ def default_plan_config(shared_path: Path, plan_name: str) -> dict[str, Any]:
             "SOURCE_ID": "source_name",
             "OUTPUT_FOLDER": "/mnt/shared/plans/shoulders/dc_integration/output",
             "RUN_MODE": "fresh",
+            "PRIORITY": "normal",
+            "PREEMPTIBLE": True,
         }
-    return {"RUN_MODE": "fresh"}
+    if plan_name == "github_analyzer":
+        return {
+            "REPO_PATH": "",
+            "REPO_URL": "",
+            "CLAIMED_BEHAVIOR": "",
+            "ANALYSIS_DEPTH": "standard",
+            "HOT_WORKERS": "auto",
+            "WORKER_MODEL": "qwen2.5:7b",
+            "WORKER_SHARDS": "5",
+            "WORKER_CONTEXT_TOKENS": "8192",
+            "WORKER_CONTEXT_UTILIZATION": "0.75",
+            "BRAIN_MODEL": "qwen2.5:32b",
+            "RUN_MODE": "fresh",
+            "PRIORITY": "normal",
+            "PREEMPTIBLE": True,
+        }
+    return {"RUN_MODE": "fresh", "PRIORITY": "normal", "PREEMPTIBLE": True}
 
 
 def plan_input_help(shared_path: Path, plan_name: str, starter_file: str | None = None) -> list[dict[str, str]]:
@@ -1111,11 +1403,6 @@ HTML = """<!doctype html>
 
     <div class=\"grid g5\" id=\"countCards\"></div>
 
-    <div class=\"section card plan-scope\">
-      <h3>Plan Scope</h3>
-      <div id=\"planScope\"></div>
-    </div>
-
     <div class=\"section card\">
       <h3>Alerts</h3>
       <div id=\"alerts\"></div>
@@ -1197,12 +1484,30 @@ HTML = """<!doctype html>
     }
     const laneOrder = ['queue', 'processing', 'private', 'complete', 'failed'];
     let activeLane = 'processing';
-    let activeWorkerTab = 'cpu';
+    let activeWorkerTab = 'gpu';
     const chainState = {};
     const batchState = { batch: '', plan: '', sort: 'started_desc' };
     const laneState = { taskClass: '', task: '', worker: '', executor: '', batch: '', error: '', sort: 'task_asc' };
     let latestStatus = null;
     let visibleBatchIds = null;
+    let laneVisibleBatchIds = null;
+    const stickyAlertStoreKey = 'orchStickyAlertsV1';
+
+    function loadStickyAlerts() {
+      try {
+        const raw = localStorage.getItem(stickyAlertStoreKey);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return (parsed && typeof parsed === 'object') ? parsed : {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function saveStickyAlerts(map) {
+      try {
+        localStorage.setItem(stickyAlertStoreKey, JSON.stringify(map || {}));
+      } catch (_) {}
+    }
 
     function typeBadge(type) {
       return `<span class=\"pill ${type}\">${type}</span>`;
@@ -1269,46 +1574,63 @@ HTML = """<!doctype html>
       `).join('');
     }
 
-    function renderPlanScope(activeBatches) {
-      const plans = [...new Set(activeBatches.map(b => b.plan).filter(Boolean))].sort();
-      if (batchState.plan && !plans.some(p => String(p).toLowerCase() === batchState.plan)) {
-        batchState.plan = '';
-      }
-      const html = `
-        <div class=\"filter-bar\">
-          <label class=\"filter-field k\">Selected Plan
-            <select id=\"globalPlanScope\">
-              <option value=\"\">all active plans</option>
-              ${plans.map(p => `<option value=\"${String(p).toLowerCase()}\" ${batchState.plan === String(p).toLowerCase() ? 'selected' : ''}>${p}</option>`).join('')}
-            </select>
-          </label>
-          <span class=\"k\">Applies to Active Batches and task lanes.</span>
-        </div>
-      `;
-      const el = document.getElementById('planScope');
-      el.innerHTML = html;
-      const sel = document.getElementById('globalPlanScope');
-      if (!sel) return;
-      const rerender = () => {
-        batchState.plan = sel.value || '';
-        if (latestStatus) refreshFromData(latestStatus);
-      };
-      sel.addEventListener('change', rerender);
-      sel.addEventListener('input', rerender);
-    }
-
     function renderAlerts(alerts) {
-      if (!alerts || !alerts.length) {
+      const stickyMap = loadStickyAlerts();
+      const liveAlerts = Array.isArray(alerts) ? alerts : [];
+
+      // Promote server-declared sticky alerts into local persistent storage.
+      liveAlerts.forEach(a => {
+        const stickyId = a && a.sticky ? String(a.sticky_id || '') : '';
+        if (!stickyId) return;
+        const prev = stickyMap[stickyId] || {};
+        stickyMap[stickyId] = {
+          ...prev,
+          ...a,
+          sticky: true,
+          sticky_id: stickyId,
+          first_seen_at: prev.first_seen_at || new Date().toISOString(),
+          last_seen_at: new Date().toISOString(),
+        };
+      });
+      saveStickyAlerts(stickyMap);
+
+      const nonStickyLive = liveAlerts.filter(a => !(a && a.sticky && a.sticky_id));
+      const stickyRows = Object.values(stickyMap);
+      const merged = [...stickyRows, ...nonStickyLive];
+
+      if (!merged.length) {
         document.getElementById('alerts').innerHTML = '<div class=\"k\">(none)</div>';
         return;
       }
-      const rows = alerts.slice(0, 40).map(a => [
-        `<span class=\"${a.severity === 'bad' ? 'bad' : 'warn'}\">${a.severity}</span>`,
+
+      const rows = merged.slice(0, 60).map(a => {
+        const stickyId = a && a.sticky ? String(a.sticky_id || '') : '';
+        const action = stickyId
+          ? `<button class=\"small-btn\" data-clear-sticky=\"${esc(stickyId)}\">Clear</button>`
+          : '-';
+        const severity = String((a && a.severity) || 'warn').toLowerCase();
+        const sevClass = severity === 'bad' ? 'bad' : (severity === 'ok' ? 'ok' : 'warn');
+        return [
+        `<span class=\"${sevClass}\">${esc(severity)}</span>`,
         fmt(a.worker),
         truncCell(a.message, 100, false),
         fmt(a.age_s),
-      ]);
-      document.getElementById('alerts').innerHTML = table(['Severity', 'Worker', 'Message', 'HB s'], rows);
+        action,
+      ];
+      });
+
+      document.getElementById('alerts').innerHTML = table(['Severity', 'Worker', 'Message', 'HB s', 'Action'], rows);
+      document.querySelectorAll('#alerts button[data-clear-sticky]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.getAttribute('data-clear-sticky');
+          const cur = loadStickyAlerts();
+          if (id && cur[id]) {
+            delete cur[id];
+            saveStickyAlerts(cur);
+            renderAlerts((latestStatus && latestStatus.alerts) || []);
+          }
+        });
+      });
       bindCopyables('#alerts');
     }
 
@@ -1323,6 +1645,7 @@ HTML = """<!doctype html>
       const sort = laneState.sort || 'task_asc';
       const showRuntime = activeLane === 'processing';
       const showCompletedAt = activeLane === 'complete';
+      const showTimeTaken = activeLane === 'complete';
       const showQueuedAt = activeLane === 'queue';
 
       let filtered = items.filter(t => {
@@ -1332,7 +1655,7 @@ HTML = """<!doctype html>
         const executor = (t.executor || 'worker').toLowerCase();
         const batch = (t.batch_id || '').toLowerCase();
         const err = (t.error || '').toLowerCase();
-        if (visibleBatchIds && !visibleBatchIds.has(t.batch_id || '') && !isSystemMetaTaskName(t.name)) return false;
+        if (laneVisibleBatchIds && !laneVisibleBatchIds.has(t.batch_id || '') && !isSystemMetaTaskName(t.name)) return false;
         if (laneState.taskClass && cls !== laneState.taskClass) return false;
         if (laneState.task && !task.includes(laneState.task.toLowerCase())) return false;
         if (laneState.worker && !worker.includes(laneState.worker.toLowerCase())) return false;
@@ -1342,9 +1665,21 @@ HTML = """<!doctype html>
         return true;
       });
 
+      const getTimeTakenMs = (t) => {
+        if (!t.started_at || !t.completed_at) return -1;
+        const start = new Date(String(t.started_at).includes('T') ? t.started_at : String(t.started_at).replace(' ', 'T'));
+        const end = new Date(String(t.completed_at).includes('T') ? t.completed_at : String(t.completed_at).replace(' ', 'T'));
+        if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return -1;
+        return end.getTime() - start.getTime();
+      };
+      const getQueuedAt = (t) => t.stale_requeued_at || t.requeued_at || t.last_attempt_at || t.created_at || '';
       filtered.sort((a, b) => {
         const aval = (key) => String(a[key] || '').toLowerCase();
         const bval = (key) => String(b[key] || '').toLowerCase();
+        const atype = taskType(a.task_class);
+        const btype = taskType(b.task_class);
+        if (sort === 'class_asc') return atype.localeCompare(btype);
+        if (sort === 'class_desc') return btype.localeCompare(atype);
         if (sort === 'task_asc') return aval('name').localeCompare(bval('name'));
         if (sort === 'task_desc') return bval('name').localeCompare(aval('name'));
         if (sort === 'worker_asc') return aval('assigned_to').localeCompare(bval('assigned_to'));
@@ -1353,8 +1688,18 @@ HTML = """<!doctype html>
         if (sort === 'executor_desc') return bval('executor').localeCompare(aval('executor'));
         if (sort === 'batch_asc') return aval('batch_id').localeCompare(bval('batch_id'));
         if (sort === 'batch_desc') return bval('batch_id').localeCompare(aval('batch_id'));
+        if (sort === 'queued_asc') return String(getQueuedAt(a)).localeCompare(String(getQueuedAt(b)));
+        if (sort === 'queued_desc') return String(getQueuedAt(b)).localeCompare(String(getQueuedAt(a)));
+        if (sort === 'started_asc') return aval('started_at').localeCompare(bval('started_at'));
+        if (sort === 'started_desc') return bval('started_at').localeCompare(aval('started_at'));
+        if (sort === 'timetaken_asc') return getTimeTakenMs(a) - getTimeTakenMs(b);
+        if (sort === 'timetaken_desc') return getTimeTakenMs(b) - getTimeTakenMs(a);
+        if (sort === 'completed_asc') return aval('completed_at').localeCompare(bval('completed_at'));
+        if (sort === 'completed_desc') return bval('completed_at').localeCompare(aval('completed_at'));
         if (sort === 'try_desc') return (Number(b.attempts || 0) - Number(a.attempts || 0));
         if (sort === 'try_asc') return (Number(a.attempts || 0) - Number(b.attempts || 0));
+        if (sort === 'error_asc') return aval('error').localeCompare(bval('error'));
+        if (sort === 'error_desc') return bval('error').localeCompare(aval('error'));
         return 0;
       });
 
@@ -1380,6 +1725,19 @@ HTML = """<!doctype html>
         if (Number.isNaN(dt.getTime())) return '-';
         return dt.toLocaleString(undefined, { hour12: false });
       };
+      const timeTakenText = (startedAt, completedAt) => {
+        if (!startedAt || !completedAt) return '-';
+        const start = new Date(String(startedAt).includes('T') ? startedAt : String(startedAt).replace(' ', 'T'));
+        const end = new Date(String(completedAt).includes('T') ? completedAt : String(completedAt).replace(' ', 'T'));
+        if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return '-';
+        const sec = Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = sec % 60;
+        if (h > 0) return `${h}h ${m}m ${s}s`;
+        if (m > 0) return `${m}m ${s}s`;
+        return `${s}s`;
+      };
       const queuedAtValue = (t) =>
         t.stale_requeued_at ||
         t.requeued_at ||
@@ -1393,10 +1751,11 @@ HTML = """<!doctype html>
         truncCell(t.assigned_to, 24, false),
         executorBadge(t.executor),
         `<span class=\"mono\">${fmt(t.batch_id)}</span>`,
-        fmt(t.attempts),
         ...(showQueuedAt ? [ `<span class=\"mono\">${completedAtText(queuedAtValue(t))}</span>` ] : []),
         ...(showRuntime ? [ `<span class=\"mono\">${runtimeText(t.started_at)}</span>` ] : []),
+        ...(showTimeTaken ? [ `<span class=\"mono\">${timeTakenText(t.started_at, t.completed_at)}</span>` ] : []),
         ...(showCompletedAt ? [ `<span class=\"mono\">${completedAtText(t.completed_at || t.started_at)}</span>` ] : []),
+        fmt(t.attempts),
         truncCell(t.error, 96, true)
       ]);
       const sortArrow = (ascKey, descKey) => sort === ascKey ? ' ↑' : (sort === descKey ? ' ↓' : '');
@@ -1428,11 +1787,12 @@ HTML = """<!doctype html>
         `<th data-sort=\"worker\">Worker${sortArrow('worker_asc', 'worker_desc')}</th>`,
         `<th data-sort=\"executor\">Executor${sortArrow('executor_asc', 'executor_desc')}</th>`,
         `<th data-sort=\"batch\">Batch${sortArrow('batch_asc', 'batch_desc')}</th>`,
+        ...(showQueuedAt ? [`<th data-sort=\"queued\">Queued At${sortArrow('queued_asc', 'queued_desc')}</th>`] : []),
+        ...(showRuntime ? [`<th data-sort=\"started\">Runtime${sortArrow('started_asc', 'started_desc')}</th>`] : []),
+        ...(showTimeTaken ? [`<th data-sort=\"timetaken\">Time Taken${sortArrow('timetaken_asc', 'timetaken_desc')}</th>`] : []),
+        ...(showCompletedAt ? [`<th data-sort=\"completed\">Completed At${sortArrow('completed_asc', 'completed_desc')}</th>`] : []),
         `<th data-sort=\"try\">Try${sortArrow('try_asc', 'try_desc')}</th>`,
-        ...(showQueuedAt ? ['<th>Queued At</th>'] : []),
-        ...(showRuntime ? ['<th>Runtime</th>'] : []),
-        ...(showCompletedAt ? ['<th>Completed At</th>'] : []),
-        `<th>Error</th>`
+        `<th data-sort=\"error\">Error${sortArrow('error_asc', 'error_desc')}</th>`
       ].join('');
       const laneTable = rows.length
         ? `<table><thead><tr>${headers}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`
@@ -1455,7 +1815,12 @@ HTML = """<!doctype html>
             worker: ['worker_asc', 'worker_desc'],
             executor: ['executor_asc', 'executor_desc'],
             batch: ['batch_asc', 'batch_desc'],
+            queued: ['queued_asc', 'queued_desc'],
+            started: ['started_asc', 'started_desc'],
+            timetaken: ['timetaken_asc', 'timetaken_desc'],
+            completed: ['completed_asc', 'completed_desc'],
             try: ['try_asc', 'try_desc'],
+            error: ['error_asc', 'error_desc'],
           };
           const pair = nextMap[key] || ['task_asc', 'task_desc'];
           laneState.sort = current === pair[0] ? pair[1] : pair[0];
@@ -1506,6 +1871,7 @@ HTML = """<!doctype html>
       const rows = filtered.map(b => [
         `<span class=\"mono\">${b.id}</span>`,
         fmt(b.plan),
+        fmt(b.priority),
         fmt(b.stage),
         `<span class=\"mono\">${fmt(b.complete)}/${fmt(b.total)}</span>`,
         fmt(b.goal),
@@ -1521,13 +1887,14 @@ HTML = """<!doctype html>
         <div class=\"filter-bar\">
           <span class=\"k\">showing ${filtered.length} of ${activeBatches.length}</span>
           <label class=\"filter-field k\">Batch <input id=\"batchFilterBatch\" value=\"${batchState.batch}\" placeholder=\"contains\" /></label>
-          <span class=\"k\">Plan scope: ${batchState.plan ? batchState.plan : 'all active plans'}</span>
+          <span class=\"k\">Expand one or more chain cards below to focus task lanes on those batches.</span>
           <span class=\"k\">Click headers to sort</span>
         </div>
       `;
       const headers = [
         `<th data-sort=\"batch\">Batch${sortArrow('batch_asc', 'batch_desc')}</th>`,
         `<th data-sort=\"plan\">Plan${sortArrow('plan_asc', 'plan_desc')}</th>`,
+        `<th>Priority</th>`,
         `<th data-sort=\"stage\">Stage${sortArrow('stage_asc', 'stage_desc')}</th>`,
         `<th data-sort=\"complete\">Complete${sortArrow('complete_asc', 'complete_desc')}</th>`,
         `<th>Goal</th>`,
@@ -1547,7 +1914,11 @@ HTML = """<!doctype html>
         const rerender = () => {
           batchState[key] = el.value;
           renderBatches(activeBatches);
-          if (latestStatus) renderBatchChains(latestStatus, visibleBatchIds);
+          if (latestStatus) {
+            renderBatchChains(latestStatus, visibleBatchIds);
+            syncLaneVisibleBatchIds(latestStatus);
+            renderLaneTabs(latestStatus.counts, latestStatus.lanes);
+          }
         };
         el.addEventListener('input', rerender);
         el.addEventListener('change', rerender);
@@ -1571,11 +1942,29 @@ HTML = """<!doctype html>
           const pair = nextMap[key] || ['started_asc', 'started_desc'];
           batchState.sort = current === pair[0] ? pair[1] : pair[0];
           renderBatches(activeBatches);
-          if (latestStatus) renderBatchChains(latestStatus, visibleBatchIds);
+          if (latestStatus) {
+            renderBatchChains(latestStatus, visibleBatchIds);
+            syncLaneVisibleBatchIds(latestStatus);
+            renderLaneTabs(latestStatus.counts, latestStatus.lanes);
+          }
         });
       });
       bind('batchFilterBatch', 'batch');
-      // Plan scope is controlled by the global selector (renderPlanScope).
+      // Lane scope follows expanded chain cards for focused analysis.
+    }
+
+    function syncLaneVisibleBatchIds(data) {
+      if (!visibleBatchIds) {
+        laneVisibleBatchIds = null;
+        return;
+      }
+      const chains = data.batch_chains || {};
+      const expanded = Object.keys(chains).filter(batchId => {
+        if (!visibleBatchIds.has(batchId)) return false;
+        const st = chainState[batchId];
+        return !!st && st.collapsed === false;
+      });
+      laneVisibleBatchIds = expanded.length ? new Set(expanded) : new Set(visibleBatchIds);
     }
 
     function renderLaneTabs(counts, lanes) {
@@ -1761,6 +2150,8 @@ HTML = """<!doctype html>
           if (action === 'next' && st.page < pages) st.page += 1;
           chainState[batchId] = st;
           renderBatchChains(data, allowedBatchIds);
+          syncLaneVisibleBatchIds(data);
+          renderLaneTabs(data.counts, data.lanes);
         });
       });
       container.querySelectorAll('th[data-sort]').forEach(th => {
@@ -1778,6 +2169,8 @@ HTML = """<!doctype html>
           st.page = 1;
           chainState[batchId] = st;
           renderBatchChains(data, allowedBatchIds);
+          syncLaneVisibleBatchIds(data);
+          renderLaneTabs(data.counts, data.lanes);
         });
       });
     }
@@ -1807,6 +2200,7 @@ HTML = """<!doctype html>
         return {
           id: id,
           plan: b.plan || '',
+          priority: b.priority || 'normal',
           stage: stage,
           stage_rank: stageRank,
           done_pct: total > 0 ? (c.complete / total) : 0,
@@ -1821,9 +2215,9 @@ HTML = """<!doctype html>
           started: fmt(b.started_at ? new Date(b.started_at).toLocaleTimeString() : '-')
         };
       });
-      renderPlanScope(batchRows);
       renderBatches(batchRows);
       renderBatchChains(data, visibleBatchIds);
+      syncLaneVisibleBatchIds(data);
 
       const brainRows = (data.brain_gpus || []).map(w => {
         const vram = (w.vram_used_mb !== null && w.vram_total_mb !== null)
@@ -1974,14 +2368,28 @@ CONTROLS_HTML = """<!doctype html>
       <div class=\"row\" style=\"margin-bottom:8px;\">
         <select id=\"planName\"></select>
         <select id=\"starterFile\"></select>
+        <label class=\"k\" style=\"display:flex;align-items:center;gap:6px;\">
+          <input id=\"highPriority\" type=\"checkbox\" />
+          High priority
+        </label>
       </div>
       <div class=\"start-grid\">
         <div>
-          <div class=\"row\" style=\"margin-bottom:6px;\">
-            <button onclick=\"applyFormToJson()\">Apply form to JSON</button>
-            <button onclick=\"loadJsonToForm()\">Load JSON into form</button>
+          <div id=\"quickInputsWrap\">
+          <div class=\"k\" style=\"margin-bottom:6px;\">Quick typed inputs</div>
+          <div class=\"field-grid\" style=\"margin-bottom:8px;\">
+            <div class=\"field-row\">
+              <div class=\"field-key\">REPO_URL (quick)</div>
+              <div><input id=\"quickRepoUrl\" placeholder=\"https://github.com/owner/repo\" /></div>
+            </div>
+            <div class=\"field-row\">
+              <div class=\"field-key\">CLAIMED_BEHAVIOR (quick)</div>
+              <div><textarea id=\"quickClaim\" placeholder=\"Paste what it claims to do...\" style=\"min-height:80px;\"></textarea></div>
+            </div>
+          </div>
           </div>
           <div id=\"planConfigForm\" class=\"field-grid\"></div>
+          <div style=\"display:none;\">
           <div class=\"k\" style=\"margin-top:8px;\">Advanced JSON (optional)</div>
           <textarea id=\"planConfig\">{
   "QUERY_FILE": "/mnt/shared/plans/shoulders/research_assistant/input/query.md",
@@ -1992,10 +2400,11 @@ CONTROLS_HTML = """<!doctype html>
   "OUTPUT_FORMAT": "both",
   "RUN_MODE": "fresh"
 }</textarea>
+          </div>
           <div class=\"row\" style=\"margin-top:8px;\">
             <button onclick=\"startPlan()\">Submit plan</button>
           </div>
-          <div class=\"k\">Uses `/mnt/shared/agents/submit.py` on GPU host.</div>
+          <div class=\"k\">Uses `/mnt/shared/agents/submit.py` on GPU host. Typed inputs are sanitized server-side.</div>
         </div>
         <div>
           <div class=\"k\">Input settings (with options)</div>
@@ -2029,6 +2438,24 @@ CONTROLS_HTML = """<!doctype html>
     let planInputs = {};
     let planInputFiles = {};
     let outputFiles = [];
+    let batchLabels = {};
+    const GLOBAL_HIDDEN_KEYS = new Set(['PRIORITY', 'PREEMPTIBLE']);
+    const PLAN_HIDDEN_KEYS = {
+      github_analyzer: [
+        'REPO_PATH',
+        'REPO_URL',
+        'CLAIMED_BEHAVIOR',
+        'ANALYSIS_DEPTH',
+        'HOT_WORKERS',
+        'WORKER_MODEL',
+        'WORKER_SHARDS',
+        'WORKER_CONTEXT_TOKENS',
+        'WORKER_CONTEXT_UTILIZATION',
+        'BRAIN_MODEL',
+        'PRIORITY',
+        'PREEMPTIBLE'
+      ]
+    };
 
     async function api(path, payload) {
       const res = await fetch(path, {
@@ -2068,6 +2495,26 @@ CONTROLS_HTML = """<!doctype html>
         .filter(Boolean);
     }
 
+    function hiddenConfigKeys(planName) {
+      const list = PLAN_HIDDEN_KEYS[planName] || [];
+      return new Set(list);
+    }
+
+    function visibleConfigKeys(planName, cfg) {
+      const hidden = hiddenConfigKeys(planName);
+      return Object.keys(cfg || {}).filter(k => !hidden.has(k) && !GLOBAL_HIDDEN_KEYS.has(k));
+    }
+
+    function setQuickInputsFromConfig(planName, cfg) {
+      const wrap = document.getElementById('quickInputsWrap');
+      const showQuick = planName === 'github_analyzer';
+      if (wrap) wrap.style.display = showQuick ? '' : 'none';
+      if (!showQuick) return;
+      const obj = (cfg && typeof cfg === 'object') ? cfg : {};
+      document.getElementById('quickRepoUrl').value = String(obj.REPO_URL || '');
+      document.getElementById('quickClaim').value = String(obj.CLAIMED_BEHAVIOR || '');
+    }
+
     function getCurrentConfig() {
       try {
         const obj = JSON.parse(document.getElementById('planConfig').value || '{}');
@@ -2088,7 +2535,16 @@ CONTROLS_HTML = """<!doctype html>
     }
 
     function applyFormToJson() {
-      const cfg = readFormConfig();
+      const planName = document.getElementById('planName').value;
+      const current = getCurrentConfig();
+      const formCfg = readFormConfig();
+      const cfg = { ...current, ...formCfg };
+      const hidden = hiddenConfigKeys(planName);
+      hidden.forEach(k => {
+        if (!(k in cfg) && (k in current)) {
+          cfg[k] = current[k];
+        }
+      });
       document.getElementById('planConfig').value = JSON.stringify(cfg, null, 2);
     }
 
@@ -2103,7 +2559,7 @@ CONTROLS_HTML = """<!doctype html>
       const helpList = perStarter[starterFile] || [];
       const helpByKey = {};
       helpList.forEach(x => { helpByKey[x.key] = x; });
-      const keys = Object.keys(cfg);
+      const keys = visibleConfigKeys(planName, cfg);
       const inputFiles = planInputFiles[planName] || [];
       const rows = keys.map(key => {
         const v = String(cfg[key] ?? '');
@@ -2145,13 +2601,13 @@ CONTROLS_HTML = """<!doctype html>
       `).join('');
     }
 
-    function fillBatchSelect(selectId, ids) {
+    function fillBatchSelect(selectId, ids, labels) {
       const el = document.getElementById(selectId);
       el.innerHTML = '';
       ids.forEach(b => {
         const o = document.createElement('option');
         o.value = b;
-        o.textContent = b;
+        o.textContent = (labels && labels[b]) ? labels[b] : b;
         el.appendChild(o);
       });
       if (!el.options.length) {
@@ -2170,6 +2626,7 @@ CONTROLS_HTML = """<!doctype html>
       planDefaultStarter = data.plan_default_starter || {};
       planInputs = data.plan_inputs || {};
       planInputFiles = data.plan_input_files || {};
+      batchLabels = data.batch_labels || {};
       renderActiveBatches(data.active_batches_meta || []);
 
       const ids = [];
@@ -2181,9 +2638,9 @@ CONTROLS_HTML = """<!doctype html>
         const b = r.batch_id;
         if (b && !seen.has(b)) { ids.push(b); seen.add(b); }
       });
-      fillBatchSelect('killBatch', ids);
-      fillBatchSelect('resumeBatch', ids);
-      fillBatchSelect('outputBatch', ids);
+      fillBatchSelect('killBatch', ids, batchLabels);
+      fillBatchSelect('resumeBatch', ids, batchLabels);
+      fillBatchSelect('outputBatch', ids, batchLabels);
 
       const plan = document.getElementById('planName');
       const starter = document.getElementById('starterFile');
@@ -2207,6 +2664,7 @@ CONTROLS_HTML = """<!doctype html>
       if (defaults) {
         document.getElementById('planConfig').value = JSON.stringify(defaults, null, 2);
       }
+      setQuickInputsFromConfig(planName, defaults || {});
       const starterSelect = document.getElementById('starterFile');
       starterSelect.innerHTML = '';
       const starters = planStarters[planName] || [];
@@ -2230,7 +2688,7 @@ CONTROLS_HTML = """<!doctype html>
       inputList.forEach(x => { help[x.key] = x; });
       const defaults = planDefaults[planName] || {};
       const src = Object.keys(defaults).length ? defaults : help;
-      const keys = Object.keys(src);
+      const keys = visibleConfigKeys(planName, src);
       const rows = keys.map(key => {
         const h = help[key] || {};
         const opts = h.options ? `<div class=\"field-help\">Options: ${h.options}</div>` : '';
@@ -2261,6 +2719,8 @@ CONTROLS_HTML = """<!doctype html>
 
     async function viewBatchInline(batchId) {
       document.getElementById('outputBatch').value = batchId;
+      const outputMeta = document.getElementById('outputMeta');
+      if (outputMeta) outputMeta.scrollIntoView({ behavior: 'smooth', block: 'start' });
       await loadBatchOutputs();
     }
 
@@ -2291,9 +2751,22 @@ CONTROLS_HTML = """<!doctype html>
     async function startPlan() {
       const planName = document.getElementById('planName').value;
       const starterFile = document.getElementById('starterFile').value;
-      applyFormToJson();
-      const configText = document.getElementById('planConfig').value;
-      showResult(await api('/api/control/start_plan', { plan_name: planName, starter_file: starterFile, config_json: configText }));
+      const highPriority = document.getElementById('highPriority').checked;
+      const quickRepoUrl = document.getElementById('quickRepoUrl').value;
+      const quickClaim = document.getElementById('quickClaim').value;
+      const cfg = { ...getCurrentConfig(), ...readFormConfig() };
+      if (quickRepoUrl && quickRepoUrl.trim()) cfg.REPO_URL = quickRepoUrl.trim();
+      if (quickClaim && quickClaim.trim()) cfg.CLAIMED_BEHAVIOR = quickClaim.trim();
+      cfg.PRIORITY = highPriority ? 'high' : 'normal';
+      cfg.PREEMPTIBLE = true;
+      const configText = JSON.stringify(cfg);
+      showResult(await api('/api/control/start_plan', {
+        plan_name: planName,
+        starter_file: starterFile,
+        config_json: configText,
+        repo_url: quickRepoUrl,
+        claimed_behavior: quickClaim
+      }));
       await refreshOptions();
     }
 
@@ -2424,16 +2897,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             for p in plans
         }
         active_meta = []
+        batch_labels: dict[str, str] = {}
         for batch_id, meta in active.items():
             if not isinstance(meta, dict):
                 continue
+            plan_name = str(meta.get("plan", "")).strip() or "unknown_plan"
             active_meta.append(
                 {
                     "batch_id": batch_id,
-                    "plan": meta.get("plan", ""),
+                    "plan": plan_name,
                     "started_at": meta.get("started_at", ""),
                 }
             )
+            batch_labels[batch_id] = f"{plan_name} | {batch_id}"
+        for row in recent_batches:
+            batch_id = str(row.get("batch_id", "")).strip()
+            if not batch_id:
+                continue
+            plan_name = str(row.get("plan", "")).strip() or "unknown_plan"
+            batch_labels.setdefault(batch_id, f"{plan_name} | {batch_id}")
         active_meta.sort(key=lambda x: str(x.get("started_at") or ""), reverse=True)
         return {
             "ok": True,
@@ -2447,6 +2929,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "plan_input_files": plan_input_files,
             "plan_default_starter": plan_default_starter,
             "plan_inputs": plan_inputs,
+            "batch_labels": batch_labels,
         }
 
     def _kill_plan(self, batch_id: str) -> dict[str, Any]:
@@ -2462,8 +2945,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
         local_kill = Path(__file__).resolve().parent / "kill_plan.py"
         cmd = f"python3 {local_kill} --keep-workers --keep-models --no-default-warm"
         out = run_shell(cmd, timeout_s=300)
+        cleaned = self._cleanup_stale_processing_heartbeats()
+        out["cleanup"] = cleaned
+        if cleaned.get("errors"):
+            out["stderr"] = f"{out.get('stderr', '')}\nheartbeat_cleanup_errors={cleaned.get('errors')}".strip()
         out["message"] = "Killed all active batches" if out.get("ok") else "Failed to kill all active batches"
         return out
+
+    def _cleanup_stale_processing_heartbeats(self) -> dict[str, Any]:
+        processing_dir = self.shared_path / "tasks" / "processing"
+        removed = 0
+        kept = 0
+        errors: list[str] = []
+        brain = load_brain_state(self.shared_path)
+        active_batches = set()
+        if isinstance(brain.get("active_batches"), dict):
+            active_batches = {str(k) for k in brain.get("active_batches", {}).keys()}
+
+        for hb in sorted(processing_dir.glob("*.heartbeat.json")):
+            task_json = hb.with_name(hb.name.replace(".heartbeat.json", ".json"))
+            task = load_json(task_json) if task_json.exists() else None
+            should_remove = False
+
+            if not task_json.exists() or not isinstance(task, dict):
+                should_remove = True
+            else:
+                batch_id = str(task.get("batch_id", "")).strip()
+                # Keep heartbeat only if its task still belongs to an active batch.
+                if not batch_id or batch_id not in active_batches:
+                    should_remove = True
+
+            if should_remove:
+                try:
+                    hb.unlink()
+                    removed += 1
+                except Exception as exc:
+                    errors.append(f"{hb.name}: {exc}")
+            else:
+                kept += 1
+
+        return {"removed": removed, "kept": kept, "errors": errors}
 
     def _return_default(self) -> dict[str, Any]:
         # Pass commands via stdin so pkill can't match its own shell's cmdline.
@@ -2504,12 +3025,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "cmd": "ssh gpu bash -s",
             }
 
-    def _start_plan(self, plan_name: str, config_json: str, starter_file: str = "") -> dict[str, Any]:
+    def _start_plan(
+        self,
+        plan_name: str,
+        config_json: str,
+        starter_file: str = "",
+        repo_url: str = "",
+        claimed_behavior: str = "",
+        inline_query_text: str = "",
+    ) -> dict[str, Any]:
         if not plan_name:
             return {"ok": False, "message": "plan_name is required"}
         plans = set(discover_plans(self.shared_path))
         if plan_name not in plans:
             return {"ok": False, "message": f"unknown plan: {plan_name}"}
+
+        starters = set(discover_plan_starters(self.shared_path, plan_name))
+        if starter_file and starter_file not in starters:
+            return {"ok": False, "message": f"invalid starter_file for {plan_name}: {starter_file}"}
 
         try:
             cfg_obj = json.loads(config_json) if config_json.strip() else {}
@@ -2517,6 +3050,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 raise ValueError("config JSON must be an object")
         except Exception as e:
             return {"ok": False, "message": f"invalid config JSON: {e}"}
+
+        try:
+            cfg_obj = sanitize_config_object(cfg_obj)
+        except Exception as e:
+            return {"ok": False, "message": f"invalid config values: {e}"}
+
+        try:
+            repo_url_clean = normalize_github_url(repo_url) if str(repo_url).strip() else ""
+        except Exception as e:
+            return {"ok": False, "message": f"invalid repo_url: {e}"}
+        claimed_clean = sanitize_text(claimed_behavior, max_len=8000, single_line=True) if str(claimed_behavior).strip() else ""
+        inline_clean = sanitize_text(inline_query_text, max_len=16000, single_line=False) if str(inline_query_text).strip() else ""
+
+        if repo_url_clean:
+            cfg_obj["REPO_URL"] = repo_url_clean
+            if plan_name == "github_analyzer":
+                cfg_obj["REPO_PATH"] = ""
+        if plan_name == "github_analyzer":
+            # Dashboard submissions are exploratory-only: keep in standard mode.
+            cfg_obj["ANALYSIS_DEPTH"] = "standard"
+        if claimed_clean:
+            cfg_obj["CLAIMED_BEHAVIOR"] = claimed_clean
+        if inline_clean:
+            inline_path = write_inline_input_file(self.shared_path, plan_name, inline_clean)
+            chosen_key = next((k for k in INLINE_FILE_KEYS if k in cfg_obj), "QUERY_FILE")
+            cfg_obj[chosen_key] = inline_path
 
         cfg_payload = json.dumps(cfg_obj, separators=(",", ":"))
         plan_path = f"/mnt/shared/plans/shoulders/{plan_name}"
@@ -2640,6 +3199,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     str(payload.get("plan_name", "")).strip(),
                     str(payload.get("config_json", "")).strip(),
                     str(payload.get("starter_file", "")).strip(),
+                    str(payload.get("repo_url", "")).strip(),
+                    str(payload.get("claimed_behavior", "")).strip(),
+                    str(payload.get("inline_query_text", "")).strip(),
                 )
             )
             return
