@@ -920,6 +920,16 @@ class GPUAgent:
 
         preferred = self._get_preferred_classes()
 
+        def _task_priority_key(task: Dict[str, Any]) -> tuple:
+            try:
+                priority = int(task.get("priority", 5))
+            except Exception:
+                priority = 5
+            created_at = str(task.get("created_at", "") or "")
+            task_id = str(task.get("task_id", "") or "")
+            # Higher priority first; older created_at first within same priority.
+            return (-priority, created_at, task_id)
+
         # Categorize available tasks
         tasks_by_class = {tc: [] for tc in VALID_TASK_CLASSES}
 
@@ -937,14 +947,15 @@ class GPUAgent:
 
                 task_class = task.get("task_class", "cpu")
                 if task_class in tasks_by_class:
-                    tasks_by_class[task_class].append(task_file)
+                    tasks_by_class[task_class].append((task_file, task))
             except Exception:
                 continue
 
         # Build ordered candidate list
         candidates = []
         for tc in preferred:
-            candidates.extend(tasks_by_class.get(tc, []))
+            ranked = sorted(tasks_by_class.get(tc, []), key=lambda x: _task_priority_key(x[1]))
+            candidates.extend(task_file for task_file, _ in ranked)
 
         # Claim tasks until budget is full
         claimed = []
@@ -952,10 +963,22 @@ class GPUAgent:
 
         for task_file in candidates:
             lock_file = str(task_file) + ".lock"
+            lock_path = Path(lock_file)
+            if lock_path.exists() and not os.access(lock_path, os.W_OK):
+                # Root-owned stale lock files can block non-root GPU workers.
+                # Remove and recreate under current worker user.
+                try:
+                    lock_path.unlink()
+                except Exception:
+                    continue
             lock = FileLock(lock_file, timeout=1)
 
             try:
                 with lock:
+                    try:
+                        os.chmod(lock_file, 0o666)
+                    except Exception:
+                        pass
                     if not task_file.exists():
                         continue
 

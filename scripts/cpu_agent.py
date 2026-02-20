@@ -323,8 +323,19 @@ class CpuAgent:
         for task_file in ranked_files:
             lock_path = Path(str(task_file) + ".lock")
             lock_path.parent.mkdir(parents=True, exist_ok=True)
+            if lock_path.exists() and not os.access(lock_path, os.W_OK):
+                # Stale lock files can be left behind by root-owned workers.
+                # Remove unwritable lock so non-root workers can proceed.
+                try:
+                    lock_path.unlink()
+                except Exception:
+                    continue
             try:
                 with open(lock_path, "w") as lock_f:
+                    try:
+                        os.chmod(lock_path, 0o666)
+                    except Exception:
+                        pass
                     try:
                         fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
