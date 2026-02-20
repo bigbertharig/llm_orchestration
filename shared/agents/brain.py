@@ -52,6 +52,12 @@ logging.basicConfig(
 # =============================================================================
 VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'brain', 'meta']
 VALID_VRAM_POLICIES = ['default', 'infer', 'fixed']
+PRIORITY_TIER_TO_VALUE = {
+    "low": 3,
+    "normal": 5,
+    "high": 8,
+    "urgent": 10,
+}
 
 
 class Brain(BrainGoalMixin):
@@ -731,6 +737,9 @@ class Brain(BrainGoalMixin):
                                 "depends_on": task.get("depends_on", []),
                                 "executor": task.get("executor", "worker"),
                                 "task_class": task.get("task_class"),
+                                "priority": task.get("priority", 5),
+                                "batch_priority": task.get("batch_priority", "normal"),
+                                "preemptible": task.get("preemptible", True),
                                 "foreach": foreach_spec,
                                 "batch_size": task.get("batch_size", 1),
                                 "vram_estimate_mb": task.get("vram_estimate_mb"),
@@ -896,8 +905,17 @@ class Brain(BrainGoalMixin):
                 executor=template_task.get("executor", "worker"),
                 task_class=template_task.get("task_class"),
                 vram_estimate_mb=template_task.get("vram_estimate_mb"),
-                vram_estimate_source=template_task.get("vram_estimate_source")
+                vram_estimate_source=template_task.get("vram_estimate_source"),
+                batch_priority=template_task.get("batch_priority", "normal"),
+                preemptible=template_task.get("preemptible", True),
             )
+            # Preserve execution context required by worker env checks and path-based scripts.
+            if template_task.get("plan_path"):
+                task["plan_path"] = template_task.get("plan_path")
+            if template_task.get("batch_path"):
+                task["batch_path"] = template_task.get("batch_path")
+            if template_task.get("env_manifest_path"):
+                task["env_manifest_path"] = template_task.get("env_manifest_path")
             task["batch_size"] = len(group)
             task["item_ids"] = group_item_ids
 
@@ -1093,12 +1111,32 @@ class Brain(BrainGoalMixin):
     # Task Creation
     # =========================================================================
 
+    def _normalize_batch_priority(self, raw_priority: Any) -> tuple[str, int]:
+        """Resolve batch priority tier to normalized label + numeric value."""
+        label = str(raw_priority or "normal").strip().lower()
+        if label not in PRIORITY_TIER_TO_VALUE:
+            label = "normal"
+        return label, PRIORITY_TIER_TO_VALUE[label]
+
+    def _normalize_preemptible(self, raw_value: Any) -> bool:
+        """Resolve PREEMPTIBLE config to bool (default true)."""
+        if isinstance(raw_value, bool):
+            return raw_value
+        if raw_value is None:
+            return True
+        text = str(raw_value).strip().lower()
+        if text in {"false", "0", "no", "off"}:
+            return False
+        return True
+
     def create_task(self, task_type: str, command: str, batch_id: str,
                     task_name: str = "", priority: int = 5,
                     depends_on: List[str] = None, executor: str = "worker",
                     task_class: str = None,
                     vram_estimate_mb: Optional[int] = None,
-                    vram_estimate_source: Optional[str] = None) -> Dict[str, Any]:
+                    vram_estimate_source: Optional[str] = None,
+                    batch_priority: str = "normal",
+                    preemptible: bool = True) -> Dict[str, Any]:
         """Create a new task.
 
         task_class must be specified in plan.md. If missing or invalid,
@@ -1127,6 +1165,8 @@ class Brain(BrainGoalMixin):
             "batch_id": batch_id,
             "name": task_name,
             "priority": priority,
+            "batch_priority": batch_priority,
+            "preemptible": bool(preemptible),
             "task_class": task_class,  # cpu, script, llm, brain, or meta
             "depends_on": depends_on or [],
             "executor": executor,  # "brain" or "worker"
@@ -1428,6 +1468,10 @@ Required JSON format:
 
         # Build variable substitution map
         config = dict(config_overrides or {})
+        batch_priority_label, batch_priority_value = self._normalize_batch_priority(config.get("PRIORITY", "normal"))
+        batch_preemptible = self._normalize_preemptible(config.get("PREEMPTIBLE", True))
+        config["PRIORITY"] = batch_priority_label
+        config["PREEMPTIBLE"] = batch_preemptible
 
         # Enforce explicit run mode contract for plans that use RUN_MODE.
         run_mode = str(config.get("RUN_MODE", "fresh")).strip().lower()
@@ -1542,7 +1586,9 @@ Required JSON format:
         self.log_decision("PLAN_PARSED", f"Parsed {len(task_defs)} tasks from plan.md", {
             "task_ids": [t["id"] for t in task_defs],
             "batch_id": batch_id,
-            "goal_driven": goal_spec is not None
+            "goal_driven": goal_spec is not None,
+            "batch_priority": batch_priority_label,
+            "batch_preemptible": batch_preemptible,
         })
 
         # Analyze task types for resource planning
@@ -1599,12 +1645,14 @@ Required JSON format:
                 command=command,
                 batch_id=batch_id,
                 task_name=task_def["id"],
-                priority=5,
+                priority=batch_priority_value,
                 depends_on=task_def.get("depends_on", []),
                 executor=task_def.get("executor", "worker"),
                 task_class=task_def.get("task_class"),
                 vram_estimate_mb=vram_estimate_mb,
-                vram_estimate_source=vram_estimate_source
+                vram_estimate_source=vram_estimate_source,
+                batch_priority=batch_priority_label,
+                preemptible=batch_preemptible,
             )
             task["plan_path"] = str(plan_dir.resolve())
             task["batch_path"] = str(effective_batch_dir.resolve())
@@ -1685,10 +1733,12 @@ Required JSON format:
             command=summary_command,
             batch_id=batch_id,
             task_name="batch_summary",
-            priority=1,  # Low priority - runs at very end
+            priority=max(1, batch_priority_value - 4),  # Lower than batch work; runs at end.
             depends_on=summary_depends,
             executor="worker",
-            task_class="cpu"
+            task_class="cpu",
+            batch_priority=batch_priority_label,
+            preemptible=batch_preemptible,
         )
         summary_task["plan_path"] = str(plan_dir.resolve())
         summary_task["batch_path"] = str(effective_batch_dir.resolve())
@@ -1711,7 +1761,9 @@ Required JSON format:
             "env_manifest_path": str(env_manifest_path.resolve()),
             "started_at": datetime.now().isoformat(),
             "config": config,
-            "total_tasks": len(task_defs) + 1  # +1 for automatic summary task
+            "total_tasks": len(task_defs) + 1,  # +1 for automatic summary task
+            "priority": batch_priority_label,
+            "preemptible": batch_preemptible,
         }
 
         # Initialize goal state for goal-driven plans
@@ -1806,6 +1858,9 @@ Required JSON format:
         command = task.get("command", "")
         task_name = task.get("name", task["task_id"][:8])
         task_class = str(task.get("task_class", "")).lower()
+        task_id = str(task.get("task_id", ""))
+        processing_file = self.processing_path / f"{task_id}.json"
+        task_hb_file = self.processing_path / f"{task_id}.heartbeat.json"
 
         self.log_decision("SHELL_EXECUTE", f"Executing: {task_name}", {
             "task_id": task["task_id"][:8],
@@ -1813,6 +1868,14 @@ Required JSON format:
         })
 
         start_time = time.time()
+        now_iso = datetime.now().isoformat()
+        task["status"] = "processing"
+        task["assigned_to"] = self.name
+        task["started_at"] = task.get("started_at") or now_iso
+        task["last_attempt_at"] = now_iso
+        with open(processing_file, "w") as f:
+            json.dump(task, f, indent=2)
+
         try:
             env = os.environ.copy()
             # Strict brain-task ownership: brain-class work always runs with
@@ -1824,30 +1887,66 @@ Required JSON format:
                 env["WORKER_MODEL"] = env["BRAIN_MODEL"]
                 env["WORKER_OLLAMA_URL"] = env["BRAIN_OLLAMA_URL"]
 
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 command,
                 shell=True,
                 executable='/bin/bash',
                 env=env,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=1800  # 30 min timeout
             )
+            timeout_s = 1800  # 30 min timeout
+            heartbeat_interval_s = 5
+            next_hb = time.time()
+            timed_out = False
+
+            while True:
+                ret = proc.poll()
+                now = time.time()
+                if now >= next_hb:
+                    self._write_brain_heartbeat()
+                    hb = {
+                        "task_id": task_id,
+                        "worker": self.name,
+                        "updated_at": datetime.now().isoformat(),
+                        "state": "running",
+                    }
+                    with open(task_hb_file, "w") as f:
+                        json.dump(hb, f, indent=2)
+                    task["last_progress_at"] = hb["updated_at"]
+                    with open(processing_file, "w") as f:
+                        json.dump(task, f, indent=2)
+                    next_hb = now + heartbeat_interval_s
+                if ret is not None:
+                    break
+                if now - start_time > timeout_s:
+                    timed_out = True
+                    proc.kill()
+                    break
+                time.sleep(1)
+
+            try:
+                stdout_text, stderr_text = proc.communicate(timeout=15)
+            except Exception:
+                stdout_text = ""
+                stderr_text = "failed to collect process output after termination"
+
             elapsed = time.time() - start_time
-            success = result.returncode == 0
-            stdout_text = result.stdout or ""
-            stderr_text = result.stderr or ""
+            success = (not timed_out) and (proc.returncode == 0)
             output = stdout_text
             if stderr_text:
                 output += f"\n[stderr: {stderr_text}]"
 
             error_text = ""
-            if not success:
+            if timed_out:
+                error_text = "Command timed out"
+            elif not success:
                 stderr_lines = [ln.strip() for ln in stderr_text.splitlines() if ln.strip()]
                 if stderr_lines:
                     error_text = stderr_lines[-1][:400]
                 else:
-                    error_text = f"command exited with return code {result.returncode}"
+                    error_text = f"command exited with return code {proc.returncode}"
 
             command_lc = str(command).lower()
             task_name_lc = str(task_name).lower()
@@ -1866,21 +1965,11 @@ Required JSON format:
             task["result"] = {
                 "success": success,
                 "output": output,
-                "return_code": result.returncode,
+                "return_code": proc.returncode,
                 "handler": "brain",
                 "elapsed_seconds": round(elapsed, 1),
                 "error": error_text,
                 "error_type": error_type,
-            }
-        except subprocess.TimeoutExpired:
-            elapsed = time.time() - start_time
-            task["status"] = "failed"
-            task["result"] = {
-                "success": False,
-                "error": "Command timed out",
-                "error_type": "worker",
-                "handler": "brain",
-                "elapsed_seconds": round(elapsed, 1),
             }
         except Exception as e:
             elapsed = time.time() - start_time
@@ -1892,6 +1981,17 @@ Required JSON format:
                 "handler": "brain",
                 "elapsed_seconds": round(elapsed, 1),
             }
+        finally:
+            if processing_file.exists():
+                try:
+                    processing_file.unlink()
+                except Exception:
+                    pass
+            if task_hb_file.exists():
+                try:
+                    task_hb_file.unlink()
+                except Exception:
+                    pass
 
         task["completed_at"] = datetime.now().isoformat()
         dest_base = self.complete_path if task["result"].get("success") else self.failed_path
@@ -1928,7 +2028,40 @@ Required JSON format:
 
     def claim_brain_tasks(self):
         """Look for tasks that need brain processing."""
-        for task_file in self.queue_path.glob("*.json"):
+        def _task_priority_key(task: Dict[str, Any]) -> tuple:
+            try:
+                priority = int(task.get("priority", 5))
+            except Exception:
+                priority = 5
+            created_at = str(task.get("created_at", "") or "")
+            task_id = str(task.get("task_id", "") or "")
+            return (-priority, created_at, task_id)
+
+        ranked_task_files: List[Path] = []
+        staged: List[tuple[Path, Dict[str, Any]]] = []
+        for task_file in sorted(self.queue_path.glob("*.json")):
+            if str(task_file).endswith('.lock'):
+                continue
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+            except Exception:
+                continue
+            task_type = task.get("type", "")
+            executor = str(task.get("executor", "worker")).lower()
+            task_class = str(task.get("task_class", "")).lower()
+            is_brain_task = (
+                task_type in {"execute_plan", "decide"}
+                or executor == "brain"
+                or task_class == "brain"
+            )
+            if is_brain_task:
+                staged.append((task_file, task))
+
+        staged.sort(key=lambda x: _task_priority_key(x[1]))
+        ranked_task_files = [task_file for task_file, _ in staged]
+
+        for task_file in ranked_task_files:
             if str(task_file).endswith('.lock'):
                 continue
 
@@ -2674,7 +2807,7 @@ JSON only:"""
     # Resource Monitoring
     # =========================================================================
 
-    def _detect_stuck_tasks(self, running_gpus: Dict[str, Dict]) -> List[Dict]:
+    def _detect_stuck_tasks(self, running_workers: Dict[str, Dict]) -> List[Dict]:
         """
         Detect tasks with no progress beyond class-specific thresholds.
 
@@ -2697,7 +2830,7 @@ JSON only:"""
                     continue
 
                 assigned_to = task.get("assigned_to", "")
-                if not assigned_to or assigned_to not in running_gpus:
+                if not assigned_to or assigned_to not in running_workers:
                     # Orphan handling is done separately.
                     continue
 
@@ -2981,11 +3114,11 @@ JSON only:"""
                 }
             )
 
-    def _recover_orphaned_processing_tasks(self, running_gpus: Dict[str, Dict]):
+    def _recover_orphaned_processing_tasks(self, running_workers: Dict[str, Dict]):
         """
         Detect and recover orphaned processing tasks.
 
-        Orphaned = task in processing assigned to a GPU agent that is not running.
+        Orphaned = task in processing assigned to a worker that is not running.
         These should be escalated/requeued quickly instead of waiting for the
         20-minute stuck-task timeout.
         """
@@ -2998,7 +3131,7 @@ JSON only:"""
                     task = json.load(f)
 
                 assigned_to = task.get("assigned_to", "")
-                if not assigned_to or assigned_to in running_gpus:
+                if not assigned_to or assigned_to in running_workers:
                     continue
 
                 started_at_str = task.get("started_at") or task.get("last_attempt_at")
@@ -3053,7 +3186,7 @@ JSON only:"""
 
         if self.brain_only:
             # Still check for stuck tasks even without GPU agents
-            stuck_tasks = self._detect_stuck_tasks(running_gpus={})
+            stuck_tasks = self._detect_stuck_tasks(running_workers={})
             if stuck_tasks:
                 self._handle_stuck_tasks(stuck_tasks)
             return
@@ -3061,17 +3194,18 @@ JSON only:"""
         try:
             gpu_status = self._get_gpu_status()
             running_gpus = self._get_running_gpus()
+            running_workers = self._get_running_workers(running_gpus)
             queue_stats = self._analyze_task_queue()
 
             # Recover orphaned processing tasks promptly when a worker/gpu agent
             # disappears. This prevents long silent stalls.
-            orphan_recovered = self._recover_orphaned_processing_tasks(running_gpus)
+            orphan_recovered = self._recover_orphaned_processing_tasks(running_workers)
             if orphan_recovered:
                 queue_stats = self._analyze_task_queue()
                 queue_stats["orphan_recovered"] = orphan_recovered
 
             # P0: Check for stuck tasks (processing > 20 minutes)
-            stuck_tasks = self._detect_stuck_tasks(running_gpus)
+            stuck_tasks = self._detect_stuck_tasks(running_workers)
             queue_stats['stuck_tasks'] = len(stuck_tasks)
             queue_stats['thermal_wait_tasks'] = self.last_thermal_wait_count
             queue_stats['processing_count'] = len(list(self.processing_path.glob("*.json")))
@@ -3152,6 +3286,46 @@ JSON only:"""
                     del self.gpu_pids[gpu_name]
 
         return running
+
+    def _get_running_cpu_workers(self) -> Dict[str, Dict]:
+        """Return CPU workers with fresh heartbeats."""
+        running: Dict[str, Dict] = {}
+        cpus_path = self.shared_path / "cpus"
+        if not cpus_path.exists():
+            return running
+
+        now = datetime.now()
+        for hb_file in cpus_path.glob("*/heartbeat.json"):
+            try:
+                with open(hb_file) as f:
+                    hb = json.load(f)
+                worker_name = str(hb.get("name") or "").strip()
+                if not worker_name:
+                    continue
+                updated_at = hb.get("last_updated")
+                if not updated_at:
+                    continue
+                age = (now - datetime.fromisoformat(str(updated_at))).total_seconds()
+                if age >= self.heartbeat_stale_seconds:
+                    continue
+                running[worker_name] = {
+                    "type": "cpu",
+                    "host": hb.get("hostname"),
+                    "via_heartbeat": True,
+                }
+            except Exception:
+                continue
+
+        return running
+
+    def _get_running_workers(self, running_gpus: Dict[str, Dict] | None = None) -> Dict[str, Dict]:
+        """Return all running workers (GPU + CPU) using consistent freshness rules."""
+        workers: Dict[str, Dict] = {}
+        if running_gpus is None:
+            running_gpus = self._get_running_gpus()
+        workers.update(running_gpus)
+        workers.update(self._get_running_cpu_workers())
+        return workers
 
     def _analyze_task_queue(self) -> Dict:
         """Analyze pending tasks to determine resource needs."""
