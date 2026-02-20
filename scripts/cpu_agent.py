@@ -298,10 +298,29 @@ class CpuAgent:
             raise RuntimeError("preflight failed; python3 not available")
 
     def _claim_one_task(self) -> Optional[Dict[str, Any]]:
+        def _task_priority_key(task: Dict[str, Any]) -> tuple:
+            try:
+                priority = int(task.get("priority", 5))
+            except Exception:
+                priority = 5
+            created_at = str(task.get("created_at", "") or "")
+            task_id = str(task.get("task_id", "") or "")
+            return (-priority, created_at, task_id)
+
+        ranked_files: list[Path] = []
+        staged: list[tuple[Path, Dict[str, Any]]] = []
         for task_file in sorted(self.queue_path.glob("*.json")):
             if task_file.name.endswith(".lock") or task_file.name.endswith(".heartbeat.json"):
                 continue
+            try:
+                task = _load_json(task_file)
+            except Exception:
+                continue
+            staged.append((task_file, task))
+        staged.sort(key=lambda x: _task_priority_key(x[1]))
+        ranked_files = [task_file for task_file, _ in staged]
 
+        for task_file in ranked_files:
             lock_path = Path(str(task_file) + ".lock")
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -332,8 +351,10 @@ class CpuAgent:
                     task["started_at"] = now
 
                     dest = self.processing_path / task_file.name
+                    # Atomic claim: move queue file to processing while holding
+                    # queue lock so only one worker can own this task.
+                    os.replace(task_file, dest)
                     _write_json(dest, task)
-                    task_file.unlink()
                     return task
             except Exception:
                 continue

@@ -1492,6 +1492,7 @@ HTML = """<!doctype html>
     let visibleBatchIds = null;
     let laneVisibleBatchIds = null;
     const stickyAlertStoreKey = 'orchStickyAlertsV1';
+    const alertSeenStoreKey = 'orchAlertSeenV1';
 
     function loadStickyAlerts() {
       try {
@@ -1506,6 +1507,22 @@ HTML = """<!doctype html>
     function saveStickyAlerts(map) {
       try {
         localStorage.setItem(stickyAlertStoreKey, JSON.stringify(map || {}));
+      } catch (_) {}
+    }
+
+    function loadAlertSeenMap() {
+      try {
+        const raw = localStorage.getItem(alertSeenStoreKey);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return (parsed && typeof parsed === 'object') ? parsed : {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function saveAlertSeenMap(map) {
+      try {
+        localStorage.setItem(alertSeenStoreKey, JSON.stringify(map || {}));
       } catch (_) {}
     }
 
@@ -1576,6 +1593,7 @@ HTML = """<!doctype html>
 
     function renderAlerts(alerts) {
       const stickyMap = loadStickyAlerts();
+      const seenMap = loadAlertSeenMap();
       const liveAlerts = Array.isArray(alerts) ? alerts : [];
 
       // Promote server-declared sticky alerts into local persistent storage.
@@ -1597,13 +1615,57 @@ HTML = """<!doctype html>
       const nonStickyLive = liveAlerts.filter(a => !(a && a.sticky && a.sticky_id));
       const stickyRows = Object.values(stickyMap);
       const merged = [...stickyRows, ...nonStickyLive];
+      const nowMs = Date.now();
+      const activeKeys = new Set();
 
-      if (!merged.length) {
+      const alertKey = (a) => {
+        const stickyId = a && a.sticky ? String(a.sticky_id || '') : '';
+        if (stickyId) return `sticky:${stickyId}`;
+        const sev = String((a && a.severity) || 'warn').toLowerCase();
+        const worker = String((a && a.worker) || '');
+        const message = String((a && a.message) || '');
+        return `live:${sev}|${worker}|${message}`;
+      };
+
+      const ageText = (ts) => {
+        const d = new Date(ts || '');
+        if (Number.isNaN(d.getTime())) return '-';
+        const sec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = sec % 60;
+        if (h > 0) return `${h}h ${m}m ${s}s`;
+        if (m > 0) return `${m}m ${s}s`;
+        return `${s}s`;
+      };
+
+      const normalized = merged.map((a) => {
+        const key = alertKey(a);
+        activeKeys.add(key);
+        const prev = seenMap[key] || {};
+        const appearedAt = a.appeared_at || a.first_seen_at || prev.first_seen_at || new Date().toISOString();
+        seenMap[key] = {
+          ...prev,
+          first_seen_at: appearedAt,
+          last_seen_at: new Date().toISOString(),
+        };
+        return { ...a, appeared_at: appearedAt };
+      });
+
+      const maxSeenAgeMs = 7 * 24 * 3600 * 1000;
+      Object.keys(seenMap).forEach((k) => {
+        if (activeKeys.has(k)) return;
+        const lastSeen = new Date(String((seenMap[k] || {}).last_seen_at || '')).getTime();
+        if (!Number.isFinite(lastSeen) || (nowMs - lastSeen) > maxSeenAgeMs) delete seenMap[k];
+      });
+      saveAlertSeenMap(seenMap);
+
+      if (!normalized.length) {
         document.getElementById('alerts').innerHTML = '<div class=\"k\">(none)</div>';
         return;
       }
 
-      const rows = merged.slice(0, 60).map(a => {
+      const rows = normalized.slice(0, 60).map(a => {
         const stickyId = a && a.sticky ? String(a.sticky_id || '') : '';
         const action = stickyId
           ? `<button class=\"small-btn\" data-clear-sticky=\"${esc(stickyId)}\">Clear</button>`
@@ -1614,12 +1676,13 @@ HTML = """<!doctype html>
         `<span class=\"${sevClass}\">${esc(severity)}</span>`,
         fmt(a.worker),
         truncCell(a.message, 100, false),
-        fmt(a.age_s),
+        fmtTs(a.appeared_at),
+        ageText(a.appeared_at),
         action,
       ];
       });
 
-      document.getElementById('alerts').innerHTML = table(['Severity', 'Worker', 'Message', 'HB s', 'Action'], rows);
+      document.getElementById('alerts').innerHTML = table(['Severity', 'Worker', 'Message', 'Appeared', 'Age', 'Action'], rows);
       document.querySelectorAll('#alerts button[data-clear-sticky]').forEach(btn => {
         btn.addEventListener('click', () => {
           const id = btn.getAttribute('data-clear-sticky');
@@ -1955,6 +2018,12 @@ HTML = """<!doctype html>
 
     function syncLaneVisibleBatchIds(data) {
       if (!visibleBatchIds) {
+        laneVisibleBatchIds = null;
+        return;
+      }
+      // If no active/visible batches are present, do not hard-filter lanes;
+      // keep task lanes visible so processing rows do not "disappear".
+      if (visibleBatchIds.size === 0) {
         laneVisibleBatchIds = null;
         return;
       }

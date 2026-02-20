@@ -3131,7 +3131,39 @@ JSON only:"""
                     task = json.load(f)
 
                 assigned_to = task.get("assigned_to", "")
-                if not assigned_to or assigned_to in running_workers:
+                task_id = str(task.get("task_id", "")).strip()
+                if not assigned_to:
+                    continue
+                worker_state = running_workers.get(assigned_to)
+                task_hb_file = self.processing_path / f"{task_id}.heartbeat.json"
+
+                # Fast-path: worker no longer running at all.
+                if worker_state is None:
+                    is_orphan = True
+                else:
+                    # Worker is alive, but verify it still claims this task.
+                    active_task_ids = worker_state.get("active_task_ids", [])
+                    is_claimed = bool(task_id and task_id in active_task_ids)
+                    if is_claimed:
+                        continue
+
+                    # Worker heartbeat does not claim this task; only recover
+                    # once task heartbeat is stale to avoid false positives.
+                    hb_age = None
+                    if task_hb_file.exists():
+                        try:
+                            with open(task_hb_file) as f:
+                                hb = json.load(f)
+                            hb_updated = hb.get("updated_at")
+                            if hb_updated:
+                                hb_age = (datetime.now() - datetime.fromisoformat(str(hb_updated))).total_seconds()
+                        except Exception:
+                            hb_age = None
+                    if hb_age is not None and hb_age < orphan_threshold_seconds:
+                        continue
+                    is_orphan = True
+
+                if not is_orphan:
                     continue
 
                 started_at_str = task.get("started_at") or task.get("last_attempt_at")
@@ -3164,6 +3196,11 @@ JSON only:"""
                         "batch_id": task.get("batch_id"),
                         "previous_worker": assigned_to,
                         "elapsed_sec": int(elapsed),
+                        "worker_running": worker_state is not None,
+                        "worker_claimed_task": bool(
+                            worker_state is not None
+                            and task_id in (worker_state.get("active_task_ids", []) or [])
+                        ),
                         "action": "requeued"
                     }
                 )
@@ -3254,6 +3291,21 @@ JSON only:"""
         for gpu_name, gpu_config in self.gpu_agents.items():
             gpu_id = gpu_config["id"]
             port = gpu_config.get("port")
+            active_task_ids: list[str] = []
+            gpu_state: Dict[str, Any] = {}
+            heartbeat_file = self.shared_path / "gpus" / f"gpu_{gpu_id}" / "heartbeat.json"
+            if heartbeat_file.exists():
+                try:
+                    with open(heartbeat_file) as f:
+                        gpu_state = json.load(f)
+                    for at in gpu_state.get("active_tasks", []) or []:
+                        if not isinstance(at, dict):
+                            continue
+                        at_id = str(at.get("task_id") or "").strip()
+                        if at_id:
+                            active_task_ids.append(at_id)
+                except Exception:
+                    gpu_state = {}
 
             # Check process with regex pattern
             result = subprocess.run(
@@ -3263,22 +3315,26 @@ JSON only:"""
 
             if result.stdout.strip():
                 pid = int(result.stdout.strip().split('\n')[0])
-                running[gpu_name] = {"pid": pid, "gpu": gpu_id, "port": port}
+                running[gpu_name] = {
+                    "pid": pid,
+                    "gpu": gpu_id,
+                    "port": port,
+                    "active_task_ids": active_task_ids,
+                }
                 self.gpu_pids[gpu_name] = pid
             else:
                 # Fallback: check GPU heartbeat freshness
-                heartbeat_file = self.shared_path / "gpus" / f"gpu_{gpu_id}" / "heartbeat.json"
                 if heartbeat_file.exists():
                     try:
-                        with open(heartbeat_file) as f:
-                            gpu_state = json.load(f)
                         last_updated = gpu_state.get("last_updated")
                         if last_updated:
                             timestamp = datetime.fromisoformat(last_updated)
                             age = (datetime.now() - timestamp).total_seconds()
                             if age < self.heartbeat_stale_seconds:
                                 running[gpu_name] = {"pid": self.gpu_pids.get(gpu_name, 0),
-                                                     "gpu": gpu_id, "port": port, "via_heartbeat": True}
+                                                     "gpu": gpu_id, "port": port,
+                                                     "via_heartbeat": True,
+                                                     "active_task_ids": active_task_ids}
                     except Exception:
                         pass
 
@@ -3312,6 +3368,12 @@ JSON only:"""
                     "type": "cpu",
                     "host": hb.get("hostname"),
                     "via_heartbeat": True,
+                    "state": hb.get("state"),
+                    "active_task_ids": (
+                        [str(hb.get("active_task_id")).strip()]
+                        if str(hb.get("active_task_id") or "").strip()
+                        else []
+                    ),
                 }
             except Exception:
                 continue
