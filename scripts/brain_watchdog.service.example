@@ -1,0 +1,17 @@
+[Unit]
+Description=LLM Orchestration Brain Watchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bryan
+WorkingDirectory=/mnt/shared
+ExecStart=/usr/bin/python3 /mnt/shared/scripts/brain_watchdog.py --shared-path /mnt/shared --config /mnt/shared/agents/config.json --interval-seconds 20 --mismatch-cycles 3
+Restart=always
+RestartSec=3
+StandardOutput=append:/mnt/shared/logs/brain_watchdog.log
+StandardError=append:/mnt/shared/logs/brain_watchdog.log
+
+[Install]
+WantedBy=multi-user.target

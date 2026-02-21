@@ -271,9 +271,9 @@ def main():
     if not args.keep_models:
         unload_worker_models()
 
-    # Step 6: Restore default resting state (1+ warm workers) unless disabled
+    # Step 6: Restore default resting state (brain + configured warm workers) unless disabled
     if not args.no_default_warm:
-        warm_count = int(config.get("initial_hot_workers", 1))
+        warm_count = int(config.get("initial_hot_workers", 3))
         queue_default_warm_workers(max(0, warm_count))
 
     print("=" * 50)

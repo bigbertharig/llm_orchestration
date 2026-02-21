@@ -50,7 +50,7 @@
   ],
 
   "worker_mode": "cold",
-  "initial_hot_workers": 1,
+  "initial_hot_workers": 3,
   "max_hot_workers": 4,
 
   "timeouts": {

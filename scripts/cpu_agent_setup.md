@@ -12,12 +12,12 @@ for CPU shell commands when `~/ml-env/bin/activate` exists.
 
 ## One-shot Test
 ```bash
-python3 /home/bryan/llm_orchestration/scripts/cpu_agent.py --once --name cpu-pi-test
+python3 /media/bryan/shared/scripts/cpu_agent.py --config /media/bryan/shared/agents/config.json --once --name cpu-pi-test
 ```
 
 ## Continuous Run
 ```bash
-python3 /home/bryan/llm_orchestration/scripts/cpu_agent.py --name cpu-$(hostname)
+python3 /media/bryan/shared/scripts/cpu_agent.py --config /media/bryan/shared/agents/config.json --name cpu-$(hostname)
 ```
 
 ## Heartbeat
@@ -39,5 +39,5 @@ sudo systemctl enable --now cpu-agent.service
 3. Check:
 ```bash
 systemctl status cpu-agent.service --no-pager
-tail -n 100 /media/bryan/shared/logs/cpu_agent.log
+tail -n 100 /media/bryan/shared/logs/cpu_workers/cpu-agent-$(hostname).log
 ```
