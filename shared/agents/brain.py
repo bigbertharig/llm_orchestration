@@ -1435,6 +1435,78 @@ Required JSON format:
 
         return tasks
 
+    def _normalize_goal_task_list(self, raw: Any) -> List[str]:
+        if isinstance(raw, list):
+            items = raw
+        else:
+            items = str(raw or "").split(",")
+        normalized: List[str] = []
+        for item in items:
+            task_id = str(item or "").strip()
+            if task_id and task_id not in normalized:
+                normalized.append(task_id)
+        return normalized
+
+    def _toposort_subset(self, task_ids: List[str], task_defs: List[Dict[str, Any]]) -> List[str]:
+        tasks_by_id = {t["id"]: t for t in task_defs}
+        order_rank = {t["id"]: idx for idx, t in enumerate(task_defs)}
+        remaining = set(task_ids)
+        ordered: List[str] = []
+
+        while remaining:
+            progressed = False
+            for task_id in sorted(remaining, key=lambda k: order_rank.get(k, 10**9)):
+                deps = [
+                    d for d in tasks_by_id.get(task_id, {}).get("depends_on", [])
+                    if d in remaining
+                ]
+                if all(dep in ordered for dep in deps):
+                    ordered.append(task_id)
+                    remaining.remove(task_id)
+                    progressed = True
+            if not progressed:
+                ordered.extend(
+                    sorted(remaining, key=lambda k: order_rank.get(k, 10**9))
+                )
+                break
+        return ordered
+
+    def _infer_goal_discovery_order(
+        self, task_defs: List[Dict[str, Any]], explicit_tasks: List[str]
+    ) -> List[str]:
+        tasks_by_id = {t["id"]: t for t in task_defs}
+        non_foreach = {t["id"] for t in task_defs if not t.get("foreach")}
+
+        # Explicit list from goal/config wins, then gets topologically normalized.
+        if explicit_tasks:
+            selected = [task_id for task_id in explicit_tasks if task_id in non_foreach]
+            return self._toposort_subset(selected, task_defs)
+
+        foreach_ids = [t["id"] for t in task_defs if t.get("foreach")]
+        if not foreach_ids:
+            return []
+
+        ancestor_ids: set[str] = set()
+        stack = list(foreach_ids)
+        seen = set()
+        while stack:
+            current = stack.pop()
+            task = tasks_by_id.get(current)
+            if not task:
+                continue
+            for dep in task.get("depends_on", []):
+                if dep in seen:
+                    continue
+                seen.add(dep)
+                dep_task = tasks_by_id.get(dep)
+                if not dep_task:
+                    continue
+                if not dep_task.get("foreach"):
+                    ancestor_ids.add(dep)
+                stack.append(dep)
+
+        return self._toposort_subset(list(ancestor_ids), task_defs)
+
     def execute_plan(self, plan_path: str, config_overrides: dict = None) -> str:
         """
         Execute a plan by reading plan.md and generating tasks.
@@ -1576,6 +1648,13 @@ Required JSON format:
             except ValueError:
                 goal_spec = None
 
+        goal_discovery_order: List[str] = []
+        if goal_spec:
+            discovery_task_config = config.get("DISCOVERY_TASKS", goal_spec.get("discovery_tasks", []))
+            discovery_task_ids = self._normalize_goal_task_list(discovery_task_config)
+            goal_discovery_order = self._infer_goal_discovery_order(task_defs, discovery_task_ids)
+            goal_spec["discovery_tasks"] = goal_discovery_order
+
         if goal_spec:
             # Mark foreach task_defs so check_and_release_tasks() intercepts them
             tracked_task = goal_spec["tracked_task"]
@@ -1671,7 +1750,7 @@ Required JSON format:
                 # Mark goal-driven foreach tasks for incremental expansion
                 if task_def.get("goal_driven"):
                     task["goal_driven"] = True
-            elif goal_spec and task_def["id"] in ("build_strategy", "execute_searches", "identify_people"):
+            elif goal_spec and task_def["id"] in goal_discovery_order:
                 goal_discovery_templates[task_def["id"]] = {
                     "command": command,
                     "executor": task_def.get("executor", "worker"),
@@ -1780,23 +1859,49 @@ Required JSON format:
         if goal_spec:
             target = goal_spec["target"]
             multiplier = goal_spec["max_attempts_multiplier"]
+            def _resolve_goal_setting_int(config_key: str, goal_key: str, default: int, minimum: int = 0) -> int:
+                raw_val = config.get(config_key, goal_spec.get(goal_key, default))
+                raw_text = str(raw_val)
+                for var, value in variables.items():
+                    raw_text = raw_text.replace(var, value)
+                try:
+                    parsed = int(raw_text)
+                except ValueError:
+                    parsed = int(default)
+                return max(minimum, parsed)
+
             try:
                 configured_rounds = int(str(config.get("DISCOVERY_ROUNDS", "0") or "0"))
             except ValueError:
                 configured_rounds = 0
-            max_rounds = max(1, target * 2)
+            round_multiplier = _resolve_goal_setting_int(
+                "DISCOVERY_ROUND_MULTIPLIER", "discovery_round_multiplier", default=2, minimum=1
+            )
+            max_rounds = max(1, target * round_multiplier)
             if configured_rounds > 0:
                 goal_round_cap = min(max_rounds, configured_rounds)
             else:
                 goal_round_cap = max_rounds
-            prefill_divisor = 4
-            try:
-                prefill_divisor = int(str(config.get("DISCOVERY_PREFILL_DIVISOR", "4") or "4"))
-            except ValueError:
-                prefill_divisor = 4
-            prefill_divisor = max(1, prefill_divisor)
+            prefill_divisor = _resolve_goal_setting_int(
+                "DISCOVERY_PREFILL_DIVISOR", "discovery_prefill_divisor", default=4, minimum=1
+            )
             prefill_target_rounds = max(1, (target + prefill_divisor - 1) // prefill_divisor)
             prefill_target_rounds = min(goal_round_cap, prefill_target_rounds)
+            pool_multiplier = _resolve_goal_setting_int(
+                "DISCOVERY_POOL_MULTIPLIER", "discovery_pool_multiplier", default=1, minimum=1
+            )
+            pool_cap = _resolve_goal_setting_int(
+                "DISCOVERY_POOL_CAP", "discovery_pool_cap", default=0, minimum=0
+            )
+            discovery_pool_target = max(1, target * pool_multiplier)
+            if pool_cap > 0:
+                discovery_pool_target = min(discovery_pool_target, pool_cap)
+            refill_divisor = _resolve_goal_setting_int(
+                "DISCOVERY_REFILL_DIVISOR", "discovery_refill_divisor", default=4, minimum=1
+            )
+            max_validations_per_cycle = _resolve_goal_setting_int(
+                "MAX_VALIDATIONS_PER_CYCLE", "max_validations_per_cycle", default=3, minimum=1
+            )
             batch_meta["goal"] = {
                 "goal_version": 1,
                 "type": goal_spec["type"],
@@ -1822,19 +1927,28 @@ Required JSON format:
                 "next_index": 0,
                 "status": "active",
                 "phase": "fill_pool",
-                "max_validations_per_cycle": 3,
+                "max_validations_per_cycle": max_validations_per_cycle,
                 "discovery_round_cap": goal_round_cap,
                 "discovery_rounds_generated": 1,
                 # Round 1 tasks are created by plan parsing above; keep discovery
                 # idle so prefill can enqueue rounds 2..N immediately on first loop.
                 "discovery_in_progress": False,
                 "discovery_active_round": 0,
+                "discovery_round_multiplier": round_multiplier,
                 "discovery_prefill_divisor": prefill_divisor,
                 "discovery_prefill_target_rounds": prefill_target_rounds,
                 "discovery_prefill_scheduled_through": 1,
-                "discovery_pool_target": target,
-                "discovery_refill_watermark": max(1, (target + 3) // 4),
+                "discovery_pool_target": discovery_pool_target,
+                "discovery_refill_divisor": refill_divisor,
+                "discovery_refill_watermark": max(
+                    1, (discovery_pool_target + refill_divisor - 1) // refill_divisor
+                ),
                 "discovery_templates": goal_discovery_templates,
+                "discovery_task_order": goal_discovery_order,
+                "discovery_terminal_task": (
+                    goal_discovery_order[-1] if goal_discovery_order else ""
+                ),
+                "processed_discovery_task_ids": [],
                 "processed_identify_task_ids": [],
             }
             self.log_decision("GOAL_INITIALIZED",
@@ -1993,11 +2107,18 @@ Required JSON format:
             command_lc = str(command).lower()
             task_name_lc = str(task_name).lower()
             fatal_marker = "fatal:" in (stdout_text + "\n" + stderr_text).lower()
-            critical_stage = (
-                "identify_people.py" in command_lc
-                or task_name_lc == "identify_people"
-                or "parse_input.py" in command_lc
-                or task_name_lc == "parse_input"
+            critical_task_names = {
+                str(name).strip().lower()
+                for name in self.config.get("critical_task_names", [])
+                if str(name).strip()
+            }
+            critical_command_markers = [
+                str(marker).strip().lower()
+                for marker in self.config.get("critical_command_markers", [])
+                if str(marker).strip()
+            ]
+            critical_stage = task_name_lc in critical_task_names or any(
+                marker in command_lc for marker in critical_command_markers
             )
             error_type = "fatal" if (not success and (fatal_marker or critical_stage)) else "worker"
             if not success and task_class == "brain":

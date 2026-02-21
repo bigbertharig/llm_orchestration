@@ -113,7 +113,7 @@ class BrainGoalMixin:
         if not pool:
             # Zero-candidate rounds are expected occasionally in discovery mode.
             # Do not exhaust the batch here; keep goal active so discovery can
-            # schedule additional build_strategy/execute_searches/identify_people rounds.
+            # schedule additional discovery rounds.
             self.logger.warning(f"Goal batch {batch_id}: candidate pool is empty for current round")
             self.log_decision(
                 "GOAL_POOL_EMPTY",
@@ -320,11 +320,33 @@ class BrainGoalMixin:
         except ValueError:
             return None
 
+    def _task_name_matches_base(self, task_name: str, base_name: str) -> bool:
+        task_name = str(task_name or "")
+        base_name = str(base_name or "")
+        if not task_name or not base_name:
+            return False
+        return task_name == base_name or task_name.startswith(f"{base_name}_round_")
+
     def _process_goal_discovery_events(self, batch_id: str, goal: Dict[str, Any]) -> None:
         """
         Track completion of discovery-cycle tasks so we can safely schedule the next round.
         """
-        processed_ids = set(goal.get("processed_identify_task_ids", []))
+        processed_ids = set(
+            goal.get("processed_discovery_task_ids", goal.get("processed_identify_task_ids", []))
+        )
+        discovery_order = list(goal.get("discovery_task_order", []))
+        if not discovery_order:
+            templates = goal.get("discovery_templates", {})
+            if isinstance(templates, dict):
+                discovery_order = list(templates.keys())
+        if not discovery_order:
+            goal["processed_discovery_task_ids"] = list(processed_ids)
+            goal["processed_identify_task_ids"] = list(processed_ids)
+            return
+        discovery_terminal_task = str(
+            goal.get("discovery_terminal_task") or discovery_order[-1]
+        )
+        discovery_starter_task = str(discovery_order[0])
         for lane_name, lane_path in (("complete", self.complete_path), ("failed", self.failed_path)):
             for task_file in lane_path.glob("*.json"):
                 try:
@@ -338,25 +360,22 @@ class BrainGoalMixin:
                 if task_id in processed_ids:
                     continue
                 task_name = str(task.get("name", "") or "")
-                if not (
-                    task_name == "identify_people"
-                    or task_name.startswith("identify_people_round_")
-                    or task_name == "build_strategy"
-                    or task_name.startswith("build_strategy_round_")
+                if not any(
+                    self._task_name_matches_base(task_name, base_name) for base_name in discovery_order
                 ):
                     continue
                 processed_ids.add(task_id)
                 round_num = self._parse_round_suffix(task_name)
-                if round_num is None and task_name.startswith("build_strategy"):
+                if round_num is None and self._task_name_matches_base(task_name, discovery_starter_task):
                     round_num = 1
                 if round_num is not None:
                     goal["discovery_rounds_generated"] = max(
                         int(goal.get("discovery_rounds_generated", 1)),
                         int(round_num),
                     )
-                # End-of-discovery-cycle marker is identify_people terminal event
-                # (complete or failed) so strict identify failures do not stall rounds.
-                if task_name.startswith("identify_people"):
+                # End-of-discovery-cycle marker is terminal discovery task event
+                # (complete or failed) so strict task failures do not stall rounds.
+                if self._task_name_matches_base(task_name, discovery_terminal_task):
                     active_round = int(goal.get("discovery_active_round", 0) or 0)
                     if round_num is None or round_num == active_round:
                         goal["discovery_in_progress"] = False
@@ -382,6 +401,8 @@ class BrainGoalMixin:
                                 "candidates_total": int(goal.get("candidates_total", 0) or 0),
                             },
                         )
+        goal["processed_discovery_task_ids"] = list(processed_ids)
+        # Backward-compatible key used by older state snapshots.
         goal["processed_identify_task_ids"] = list(processed_ids)
 
     def _spawn_goal_headroom(self, batch_id: str, goal: Dict[str, Any]) -> int:
@@ -413,8 +434,10 @@ class BrainGoalMixin:
         templates = goal.get("discovery_templates", {})
         if not isinstance(templates, dict):
             return 0
-        required = ("build_strategy", "execute_searches", "identify_people")
-        if any(name not in templates for name in required):
+        required = list(goal.get("discovery_task_order", []))
+        if not required:
+            required = list(templates.keys())
+        if not required or any(name not in templates for name in required):
             return 0
 
         cap = int(goal.get("discovery_round_cap", 0) or 0)
@@ -439,9 +462,8 @@ class BrainGoalMixin:
 
         for round_num in range(start_round, end_round + 1):
             name_map = {
-                "build_strategy": self._round_task_name("build_strategy", round_num),
-                "execute_searches": self._round_task_name("execute_searches", round_num),
-                "identify_people": self._round_task_name("identify_people", round_num),
+                base_name: self._round_task_name(base_name, round_num)
+                for base_name in required
             }
             for base_name in required:
                 tpl = templates[base_name]
@@ -501,7 +523,7 @@ class BrainGoalMixin:
 
     def _maybe_schedule_next_discovery_round(self, batch_id: str, goal: Dict[str, Any], reason: str) -> bool:
         """
-        Enqueue one more build_strategy -> execute_searches -> identify_people chain.
+        Enqueue one more discovery chain round.
         """
         if goal.get("status") != "active":
             return False
@@ -510,8 +532,10 @@ class BrainGoalMixin:
         templates = goal.get("discovery_templates", {})
         if not isinstance(templates, dict):
             return False
-        required = ("build_strategy", "execute_searches", "identify_people")
-        if any(name not in templates for name in required):
+        required = list(goal.get("discovery_task_order", []))
+        if not required:
+            required = list(templates.keys())
+        if not required or any(name not in templates for name in required):
             return False
 
         cap = int(goal.get("discovery_round_cap", 0) or 0)
@@ -525,13 +549,9 @@ class BrainGoalMixin:
         batch_preemptible = bool(batch_meta.get("preemptible", True))
         satisfied = self.get_satisfied_task_ids(batch_id)
 
-        build_name = f"build_strategy_round_{next_round:04d}"
-        execute_name = f"execute_searches_round_{next_round:04d}"
-        identify_name = f"identify_people_round_{next_round:04d}"
         name_map = {
-            "build_strategy": build_name,
-            "execute_searches": execute_name,
-            "identify_people": identify_name,
+            base_name: self._round_task_name(base_name, next_round)
+            for base_name in required
         }
 
         created = []
@@ -1030,6 +1050,21 @@ class BrainGoalMixin:
                 goal["max_attempts_multiplier"] = line.split(':', 1)[1].strip()
             elif line.startswith('- **tracked_task**:'):
                 goal["tracked_task"] = line.split(':', 1)[1].strip()
+            elif line.startswith('- **discovery_tasks**:'):
+                raw = line.split(':', 1)[1].strip()
+                goal["discovery_tasks"] = [s.strip() for s in raw.split(',') if s.strip()]
+            elif line.startswith('- **discovery_round_multiplier**:'):
+                goal["discovery_round_multiplier"] = line.split(':', 1)[1].strip()
+            elif line.startswith('- **discovery_prefill_divisor**:'):
+                goal["discovery_prefill_divisor"] = line.split(':', 1)[1].strip()
+            elif line.startswith('- **discovery_pool_multiplier**:'):
+                goal["discovery_pool_multiplier"] = line.split(':', 1)[1].strip()
+            elif line.startswith('- **discovery_pool_cap**:'):
+                goal["discovery_pool_cap"] = line.split(':', 1)[1].strip()
+            elif line.startswith('- **discovery_refill_divisor**:'):
+                goal["discovery_refill_divisor"] = line.split(':', 1)[1].strip()
+            elif line.startswith('- **max_validations_per_cycle**:'):
+                goal["max_validations_per_cycle"] = line.split(':', 1)[1].strip()
 
         # Validate required fields
         if not goal.get("type") or not goal.get("tracked_task"):
