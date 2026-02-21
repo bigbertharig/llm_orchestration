@@ -20,6 +20,7 @@ import uuid
 import argparse
 import re
 import shutil
+import sys
 from pathlib import Path
 from datetime import datetime
 
@@ -34,6 +35,7 @@ SHARED_ALIASES = (
     "/home/bryan/llm_orchestration/shared",
     "/media/bryan/shared",
 )
+EXISTING_FILE_CONFIG_KEYS = ("QUERY_FILE",)
 
 
 def _to_runtime_shared_path(path_text: str) -> str:
@@ -52,6 +54,62 @@ def _normalize_config_paths(value):
     if isinstance(value, dict):
         return {k: _normalize_config_paths(v) for k, v in value.items()}
     return value
+
+
+def _shared_path_candidates(path_text: str) -> list[Path]:
+    value = str(path_text).strip()
+    if not value:
+        return []
+    candidates: list[Path] = [Path(value)]
+    for prefix in SHARED_ALIASES:
+        if value == prefix or value.startswith(prefix + "/"):
+            suffix = value[len(prefix):]
+            for alias in SHARED_ALIASES:
+                mapped = Path(alias + suffix)
+                if mapped not in candidates:
+                    candidates.append(mapped)
+            break
+    return candidates
+
+
+def _find_existing_candidate(path_text: str) -> Path | None:
+    for candidate in _shared_path_candidates(path_text):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _validate_submission_config_paths(config: dict) -> list[dict]:
+    errors: list[dict] = []
+    for key in EXISTING_FILE_CONFIG_KEYS:
+        value = config.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            errors.append(
+                {
+                    "key": key,
+                    "value": value,
+                    "error": "must be a string path",
+                    "checked": [],
+                }
+            )
+            continue
+        if "{" in value and "}" in value:
+            continue
+        existing = _find_existing_candidate(value)
+        if existing is not None:
+            continue
+        checked = [str(p) for p in _shared_path_candidates(value)]
+        errors.append(
+            {
+                "key": key,
+                "value": value,
+                "error": "file not found on any known shared-path alias",
+                "checked": checked,
+            }
+        )
+    return errors
 
 
 def _parse_plan_tasks(plan_content: str):
@@ -238,6 +296,15 @@ def main():
         print("Error: --config must decode to a JSON object")
         return 1
     config = _normalize_config_paths(config)
+    path_errors = _validate_submission_config_paths(config)
+    if path_errors:
+        print("Error: invalid config path values in --config.")
+        print("Fix these paths before submitting:")
+        for err in path_errors:
+            print(f"  - {err['key']}: {err['value']!r} ({err['error']})")
+            if err["checked"]:
+                print(f"    checked: {', '.join(err['checked'])}")
+        return 1
 
     if args.dry_run:
         plan_content = starter_file.read_text(encoding="utf-8")
@@ -317,4 +384,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
