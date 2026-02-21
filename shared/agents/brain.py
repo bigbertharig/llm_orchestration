@@ -1784,10 +1784,11 @@ Required JSON format:
                 configured_rounds = int(str(config.get("DISCOVERY_ROUNDS", "0") or "0"))
             except ValueError:
                 configured_rounds = 0
+            max_rounds = max(1, target * 2)
             if configured_rounds > 0:
-                goal_round_cap = min(target, configured_rounds)
+                goal_round_cap = min(max_rounds, configured_rounds)
             else:
-                goal_round_cap = target
+                goal_round_cap = max_rounds
             prefill_divisor = 4
             try:
                 prefill_divisor = int(str(config.get("DISCOVERY_PREFILL_DIVISOR", "4") or "4"))
