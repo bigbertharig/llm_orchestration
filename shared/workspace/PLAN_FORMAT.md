@@ -165,14 +165,33 @@ Plans can include an optional `## Goal` section for dynamic, result-driven execu
 
 ### Behavior
 
-1. Candidate pool generated = `target * max_attempts_multiplier`
-2. Initial wave = `target` candidates (one full pipeline each)
-3. Fast pre-filter on each tracked task completion (schema check + confidence threshold)
-4. Brain LLM validates borderline cases only (auto-accept high confidence, auto-reject missing/malformed)
-5. Rejected → replacement spawned one-for-one from the candidate pool
-6. Draining starts at `accepted >= target - tolerance` (no new spawns)
-7. Complete when draining and no in-flight candidates remain
-8. Exhausted if pool empty or circuit breaker hits before reaching target
+1. Discovery runs in two phases:
+   - `fill_pool`: prioritize discovery rounds to build candidate buffer
+   - `drain_pool`: pause discovery scheduling and focus on scoring/decisions
+2. Buffer/backpressure is automatic:
+   - `discovery_pool_target` defaults to `target`
+   - `discovery_refill_watermark` defaults to `ceil(target/4)`
+3. Initial discovery prefill still bursts immediately (for example, 5 rounds when target=20 and divisor=4).
+4. Candidate pipelines are spawned from manifest items and validated only when `tracked_task` completes.
+5. Fast pre-filter on each tracked task completion (schema check + confidence threshold).
+6. Brain LLM validates borderline cases only (auto-accept high confidence, auto-reject missing/malformed).
+7. Rejected -> replacement spawned one-for-one from the candidate pool.
+8. Draining starts at `accepted >= target - tolerance` (no new spawns).
+9. Complete when draining and no in-flight candidates remain.
+10. Exhausted only when round cap or circuit breaker prevents further progress.
+
+### Discovery Round Semantics
+
+- Discovery rounds are progress generation, not acceptance decisions.
+- `round=N` means discovery/query iterations have been scheduled/executed.
+- `accepted` / `rejected` only change after tracked candidate scoring tasks complete.
+- If `identify_people` fails, the round is treated as terminal for scheduling and the next round can still be scheduled.
+
+### Failure Semantics (Important)
+
+- For discovery extraction steps (for example `identify_people`), invalid/non-JSON LLM output should fail the task (non-zero exit) after retries.
+- Do not silently continue with zero candidates on parse failure. Hard-fail + retry gives clearer signal and better recovery.
+- If you choose fallback behavior in a plan-specific script, document it explicitly in the plan.
 
 ### Tolerance
 
@@ -198,6 +217,20 @@ Use goal-driven execution when:
 Standard (non-goal) plans are still better when:
 - Every item must be processed (no quality gate)
 - The total count is known upfront and fixed
+
+### Planner Guidance For Discovery Plans
+
+When writing discovery-heavy goal plans (prospecting/research):
+
+1. Keep discovery tasks separate from scoring tasks:
+   - discovery chain: `build_strategy -> execute_searches -> identify_people`
+   - scoring chain: `plan_searches -> scrape_person -> tracked_task`
+2. Set end conditions around outcomes, not query attempts:
+   - target accepted
+   - max rejected (circuit breaker)
+   - round cap
+3. Ensure `tracked_task` is the true decision gate task (usually the final scoring stage).
+4. Prefer strict parse contracts for LLM-to-JSON boundaries.
 
 ---
 
