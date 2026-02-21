@@ -9,13 +9,13 @@ import time
 import os
 import requests
 
-MODEL = "qwen2.5:7b"
+MODEL = "qwen2.5-coder:7b"
 PROMPT = "Parse this data and return JSON with fields: name, value, status.\n\nInput: Server alpha is running at 85% capacity. Server beta is offline. Server gamma is running at 42% capacity."
 NUM_RUNS = 3
 OLLAMA_API = "http://localhost:11434/api/generate"
 
-# Test each worker GPU individually
-WORKER_GPUS = [1, 2, 4]
+# Test each worker GPU individually (all 5x 1060s)
+WORKER_GPUS = [1, 2, 3, 4, 5]
 
 def stop_ollama():
     subprocess.run(["pkill", "-f", "ollama serve"], capture_output=True)
@@ -166,7 +166,7 @@ def main():
     print(f"Combined worker throughput (3 GPUs): ~{total_throughput:.1f} tok/s")
 
     # Save results
-    output_file = "/home/bryan/Documents/llm_orchestration/docs/worker_benchmark_results.json"
+    output_file = "/mnt/shared/logs/worker_benchmark_results.json"
     with open(output_file, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nResults saved to: {output_file}")

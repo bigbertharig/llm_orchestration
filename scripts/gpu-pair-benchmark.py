@@ -12,16 +12,29 @@ import os
 import requests
 
 # Test configuration
-MODEL = "qwen2.5:14b"
+MODEL = "qwen2.5-coder:14b"
 PROMPT = "Write a detailed 500-word analysis of distributed computing architectures, covering key concepts like load balancing, fault tolerance, and consensus algorithms."
 NUM_RUNS = 3
 OLLAMA_API = "http://localhost:11434/api/generate"
 
-# GPU pairs to test (for 2-GPU split)
+# GPU pairs to test (for 2-GPU 14B split on 1060s)
+# Variants by VBIOS:
+#   Model A: GPUs 1, 3 (86.06.13.00.28)
+#   Model B: GPU 2     (86.06.27.00.9B) - solo
+#   Model C: GPUs 4, 5 (86.06.63.00.60)
 GPU_PAIRS = [
-    (0, 3),  # Both high-binned, theory says best
-    (0, 1),  # High + low comparison
-    (1, 2),  # Both lower-binned baseline
+    # Natural pairs (same variant) - test first
+    (1, 3),  # Model A pair
+    (4, 5),  # Model C pair
+    # Cross pairs (different variants) - completeness testing
+    (1, 2),  # A + B
+    (1, 4),  # A + C
+    (1, 5),  # A + C
+    (2, 3),  # B + A
+    (2, 4),  # B + C
+    (2, 5),  # B + C
+    (3, 4),  # A + C
+    (3, 5),  # A + C
 ]
 
 def stop_ollama():
@@ -178,8 +191,8 @@ def summarize_results(all_results):
 
     print("-"*70)
     if best_pair:
-        print(f"\nRECOMMENDED PAIR FOR BRAIN MODEL: GPU {best_pair}")
-        print(f"Remaining GPUs for workers: {[i for i in range(4) if i not in best_pair]}")
+        print(f"\nRECOMMENDED PAIR FOR 14B: GPUs {best_pair}")
+        print(f"Remaining GPUs for 7B workers: {[i for i in [1,2,3,4,5] if i not in best_pair]}")
 
     return best_pair
 
@@ -214,7 +227,7 @@ def main():
     best_pair = summarize_results(all_results)
 
     # Save results
-    output_file = "/home/bryan/Documents/llm_orchestration/docs/gpu_pair_benchmark_results.json"
+    output_file = "/mnt/shared/logs/gpu_pair_benchmark_results.json"
     with open(output_file, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nDetailed results saved to: {output_file}")
