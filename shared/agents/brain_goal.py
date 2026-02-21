@@ -390,9 +390,6 @@ class BrainGoalMixin:
         """
         Front-load discovery rounds up to the prefill target so the initial
         candidate pool is populated faster.
-
-        Safety: rounds are serialized by chaining build_strategy round N to
-        identify_people round N-1 to avoid concurrent writes to shared result files.
         """
         if goal.get("status") != "active":
             return 0
@@ -432,8 +429,6 @@ class BrainGoalMixin:
                 "execute_searches": self._round_task_name("execute_searches", round_num),
                 "identify_people": self._round_task_name("identify_people", round_num),
             }
-            prev_identify = self._round_task_name("identify_people", round_num - 1)
-
             for base_name in required:
                 tpl = templates[base_name]
                 depends_on = []
@@ -442,11 +437,6 @@ class BrainGoalMixin:
                     if not dep or dep.lower() == "none":
                         continue
                     depends_on.append(name_map.get(dep, dep))
-
-                # Serialize discovery rounds to prevent overlapping writes.
-                if base_name == "build_strategy" and round_num > 1:
-                    if prev_identify not in depends_on:
-                        depends_on.append(prev_identify)
 
                 task = self.create_task(
                     task_type="shell",
