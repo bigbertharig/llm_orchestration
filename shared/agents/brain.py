@@ -1794,6 +1794,7 @@ Required JSON format:
                 "target": target,
                 "tolerance": goal_spec["tolerance"],
                 "max_attempts": target * multiplier,
+                "max_rejections": target * multiplier,
                 "max_attempts_multiplier": multiplier,
                 "tracked_task": goal_spec["tracked_task"],
                 "query": config.get("QUERY", ""),
@@ -1821,7 +1822,7 @@ Required JSON format:
             }
             self.log_decision("GOAL_INITIALIZED",
                 f"Goal-driven plan: target={target}, tolerance={goal_spec['tolerance']}, "
-                f"max_attempts={target * multiplier}, tracked={goal_spec['tracked_task']}",
+                f"max_rejections={target * multiplier}, tracked={goal_spec['tracked_task']}",
                 batch_meta["goal"])
 
         self.active_batches[batch_id] = batch_meta

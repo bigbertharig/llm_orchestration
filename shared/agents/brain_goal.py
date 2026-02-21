@@ -632,8 +632,10 @@ class BrainGoalMixin:
                 except Exception:
                     continue
 
+            # Even with zero completed tracked tasks we still need to run
+            # scheduling/exhaustion checks below (for zero-candidate rounds).
             if not new_completions:
-                continue
+                new_completions = []
 
             # Cap validations per cycle
             new_completions = new_completions[:max_per_cycle]
@@ -704,7 +706,9 @@ class BrainGoalMixin:
                      "rejected": goal["rejected"]})
                 self._release_goal_final_task(batch_id)
 
-            # Circuit breaker: pool exhausted
+            # Circuit breaker: pool exhausted for current pool snapshot.
+            # Only exhaust when the query-round cap is reached; otherwise keep
+            # discovery active and continue trying additional rounds.
             total_attempted = goal["accepted"] + goal["rejected"]
             if (goal["status"] == "active" and
                     goal["next_index"] >= goal["candidates_total"] and
@@ -714,22 +718,36 @@ class BrainGoalMixin:
                     batch_id, goal, reason="pool_exhausted"
                 )
                 if not scheduled:
-                    goal["status"] = "exhausted"
-                    self.log_decision("GOAL_EXHAUSTED",
-                        f"Goal exhausted: pool empty, only {goal['accepted']}/{target} accepted",
-                        {"accepted": goal["accepted"], "target": target,
-                         "rejected": goal["rejected"], "pool_size": goal["candidates_total"],
-                         "discovery_rounds_generated": goal.get("discovery_rounds_generated", 1),
-                         "discovery_round_cap": goal.get("discovery_round_cap", 0)})
-                    self._release_goal_final_task(batch_id)
+                    round_cap = int(goal.get("discovery_round_cap", 0) or 0)
+                    rounds_generated = int(goal.get("discovery_rounds_generated", 1) or 1)
+                    if round_cap > 0 and rounds_generated >= round_cap:
+                        goal["status"] = "exhausted"
+                        self.log_decision("GOAL_EXHAUSTED",
+                            f"Goal exhausted: round cap reached ({rounds_generated}/{round_cap}) with "
+                            f"{goal['accepted']}/{target} accepted",
+                            {"accepted": goal["accepted"], "target": target,
+                             "rejected": goal["rejected"], "pool_size": goal["candidates_total"],
+                             "discovery_rounds_generated": rounds_generated,
+                             "discovery_round_cap": round_cap,
+                             "reason": "query_round_cap_reached"})
+                        self._release_goal_final_task(batch_id)
+                    else:
+                        self.log_decision("GOAL_DISCOVERY_WAIT",
+                            "Pool exhausted but discovery remains active; waiting for next scheduling opportunity",
+                            {"accepted": goal["accepted"], "target": target,
+                             "rejected": goal["rejected"], "pool_size": goal["candidates_total"],
+                             "discovery_rounds_generated": rounds_generated,
+                             "discovery_round_cap": round_cap})
 
-            # Circuit breaker: max attempts
-            if goal["status"] == "active" and total_attempted >= goal["max_attempts"]:
+            # Circuit breaker: max rejected candidates.
+            max_rejections = int(goal.get("max_rejections", goal.get("max_attempts", 0)) or 0)
+            if goal["status"] == "active" and max_rejections > 0 and int(goal["rejected"]) >= max_rejections:
                 goal["status"] = "exhausted"
                 self.log_decision("GOAL_CIRCUIT_BREAKER",
-                    f"Goal circuit breaker: {total_attempted} attempts >= {goal['max_attempts']} max",
-                    {"total_attempted": total_attempted, "max_attempts": goal["max_attempts"],
-                     "accepted": goal["accepted"]})
+                    f"Goal circuit breaker: {goal['rejected']} rejections >= {max_rejections} max",
+                    {"rejected": goal["rejected"], "max_rejections": max_rejections,
+                     "accepted": goal["accepted"], "total_attempted": total_attempted,
+                     "reason": "max_rejections_reached"})
                 self._release_goal_final_task(batch_id)
 
             self._save_brain_state()
