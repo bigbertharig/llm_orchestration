@@ -61,6 +61,7 @@ let refreshInFlight = false;
 let lastRefreshOkAt = null;
 const stickyAlertStoreKey = 'orchStickyAlertsV1';
 const alertSeenStoreKey = 'orchAlertSeenV1';
+const dismissedStickyAlertStoreKey = 'orchDismissedStickyAlertsV1';
 const trackedBatchesStoreKey = 'orchTrackedBatchesV1';
 
 function isTrackableBatchId(batchId) {
@@ -142,6 +143,22 @@ function saveAlertSeenMap(map) {
   } catch (_) {}
 }
 
+function loadDismissedStickyAlerts() {
+  try {
+    const raw = localStorage.getItem(dismissedStickyAlertStoreKey);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveDismissedStickyAlerts(map) {
+  try {
+    localStorage.setItem(dismissedStickyAlertStoreKey, JSON.stringify(map || {}));
+  } catch (_) {}
+}
+
 function typeBadge(type) {
   return `<span class="pill ${type}">${type}</span>`;
 }
@@ -210,28 +227,38 @@ function renderCountCards(counts) {
 function renderAlerts(alerts) {
   const stickyMap = loadStickyAlerts();
   const seenMap = loadAlertSeenMap();
+  const dismissedStickyMap = loadDismissedStickyAlerts();
   const liveAlerts = Array.isArray(alerts) ? alerts : [];
+  const nowIso = new Date().toISOString();
+  const nowMs = Date.now();
+  const dismissedTtlMs = 7 * 24 * 3600 * 1000;
+
+  Object.keys(dismissedStickyMap).forEach((k) => {
+    const ts = new Date(String((dismissedStickyMap[k] || {}).dismissed_at || '')).getTime();
+    if (!Number.isFinite(ts) || (nowMs - ts) > dismissedTtlMs) delete dismissedStickyMap[k];
+  });
 
   // Promote server-declared sticky alerts into local persistent storage.
   liveAlerts.forEach(a => {
     const stickyId = a && a.sticky ? String(a.sticky_id || '') : '';
     if (!stickyId) return;
+    if (dismissedStickyMap[stickyId]) return;
     const prev = stickyMap[stickyId] || {};
     stickyMap[stickyId] = {
       ...prev,
       ...a,
       sticky: true,
       sticky_id: stickyId,
-      first_seen_at: prev.first_seen_at || new Date().toISOString(),
-      last_seen_at: new Date().toISOString(),
+      first_seen_at: prev.first_seen_at || nowIso,
+      last_seen_at: nowIso,
     };
   });
+  saveDismissedStickyAlerts(dismissedStickyMap);
   saveStickyAlerts(stickyMap);
 
   const nonStickyLive = liveAlerts.filter(a => !(a && a.sticky && a.sticky_id));
   const stickyRows = Object.values(stickyMap);
   const merged = [...stickyRows, ...nonStickyLive];
-  const nowMs = Date.now();
   const activeKeys = new Set();
 
   const alertKey = (a) => {
@@ -303,9 +330,12 @@ function renderAlerts(alerts) {
     btn.addEventListener('click', () => {
       const id = btn.getAttribute('data-clear-sticky');
       const cur = loadStickyAlerts();
+      const dismissed = loadDismissedStickyAlerts();
       if (id && cur[id]) {
         delete cur[id];
         saveStickyAlerts(cur);
+        dismissed[id] = { dismissed_at: new Date().toISOString() };
+        saveDismissedStickyAlerts(dismissed);
         renderAlerts((latestStatus && latestStatus.alerts) || []);
       }
     });
