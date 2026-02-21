@@ -323,6 +323,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception as e:
             return {"ok": False, "message": f"invalid config JSON: {e}"}
 
+        # Fill missing keys from plan defaults so required placeholders are always resolvable.
+        default_cfg = default_plan_config(self.shared_path, plan_name)
+        if isinstance(default_cfg, dict):
+            merged_cfg = dict(default_cfg)
+            merged_cfg.update(cfg_obj)
+            cfg_obj = merged_cfg
+
         try:
             cfg_obj = sanitize_config_object(cfg_obj)
         except Exception as e:
