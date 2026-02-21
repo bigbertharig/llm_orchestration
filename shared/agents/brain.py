@@ -4025,6 +4025,11 @@ JSON only:"""
                 # 2b. Process goal-driven plan validations
                 self._process_goal_validations()
 
+                # 2c. Reconcile batch completion for all active batches.
+                # Prevent stale active_batches entries when no new task releases occur.
+                for _batch_id in list(self.active_batches.keys()):
+                    self._check_batch_completion(_batch_id)
+
                 # 3. Handle failed tasks (retry logic)
                 self.handle_failed_tasks()
 

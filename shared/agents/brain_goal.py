@@ -918,26 +918,35 @@ class BrainGoalMixin:
                     batch_id, goal, reason="pool_exhausted"
                 )
                 if not scheduled:
-                    round_cap = int(goal.get("discovery_round_cap", 0) or 0)
-                    rounds_generated = int(goal.get("discovery_rounds_generated", 1) or 1)
-                    if round_cap > 0 and rounds_generated >= round_cap:
-                        goal["status"] = "exhausted"
-                        self.log_decision("GOAL_EXHAUSTED",
-                            f"Goal exhausted: round cap reached ({rounds_generated}/{round_cap}) with "
-                            f"{goal['accepted']}/{target} accepted",
-                            {"accepted": goal["accepted"], "target": target,
-                             "rejected": goal["rejected"], "pool_size": goal["candidates_total"],
-                             "discovery_rounds_generated": rounds_generated,
-                             "discovery_round_cap": round_cap,
-                             "reason": "query_round_cap_reached"})
-                        self._release_goal_final_task(batch_id)
-                    else:
+                    wait_for_discovery = bool(goal.get("discovery_in_progress"))
+                    if wait_for_discovery:
                         self.log_decision("GOAL_DISCOVERY_WAIT",
-                            "Pool exhausted but discovery remains active; waiting for next scheduling opportunity",
+                            "Pool exhausted while discovery round is still in progress; waiting for terminal event",
                             {"accepted": goal["accepted"], "target": target,
                              "rejected": goal["rejected"], "pool_size": goal["candidates_total"],
-                             "discovery_rounds_generated": rounds_generated,
-                             "discovery_round_cap": round_cap})
+                             "discovery_rounds_generated": int(goal.get("discovery_rounds_generated", 1) or 1),
+                             "discovery_round_cap": int(goal.get("discovery_round_cap", 0) or 0)})
+                    else:
+                        round_cap = int(goal.get("discovery_round_cap", 0) or 0)
+                        rounds_generated = int(goal.get("discovery_rounds_generated", 1) or 1)
+                        if round_cap > 0 and rounds_generated >= round_cap:
+                            goal["status"] = "exhausted"
+                            self.log_decision("GOAL_EXHAUSTED",
+                                f"Goal exhausted: round cap reached ({rounds_generated}/{round_cap}) with "
+                                f"{goal['accepted']}/{target} accepted",
+                                {"accepted": goal["accepted"], "target": target,
+                                 "rejected": goal["rejected"], "pool_size": goal["candidates_total"],
+                                 "discovery_rounds_generated": rounds_generated,
+                                 "discovery_round_cap": round_cap,
+                                 "reason": "query_round_cap_reached"})
+                            self._release_goal_final_task(batch_id)
+                        else:
+                            self.log_decision("GOAL_DISCOVERY_WAIT",
+                                "Pool exhausted but discovery remains active; waiting for next scheduling opportunity",
+                                {"accepted": goal["accepted"], "target": target,
+                                 "rejected": goal["rejected"], "pool_size": goal["candidates_total"],
+                                 "discovery_rounds_generated": rounds_generated,
+                                 "discovery_round_cap": round_cap})
 
             # Circuit breaker: max rejected candidates.
             max_rejections = int(goal.get("max_rejections", goal.get("max_attempts", 0)) or 0)
