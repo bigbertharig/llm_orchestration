@@ -344,11 +344,12 @@ def summarize(
             continue
         meta = active_batches.get(batch_id) if isinstance(active_batches.get(batch_id), dict) else {}
         counts = count_by_batch(lanes, batch_id)
-        is_engaged = (counts["queue"] + counts["processing"] + counts["private"] + counts["failed"]) > 0
-        # Also show batches that have completed or failed tasks (not just actively running)
-        has_any_tasks = (counts["complete"] + counts["failed"]) > 0 or is_engaged
-        if not has_any_tasks:
-            # Hide stale/idle leftovers that linger in brain state.
+        has_live_work = (counts["queue"] + counts["processing"] + counts["private"]) > 0
+        # Historical/terminal-only batches are shown only when explicitly selected.
+        # This keeps default dashboard state aligned to "what is running now".
+        has_terminal_tasks = (counts["complete"] + counts["failed"]) > 0
+        if not has_live_work and not (batch_id in selected_set and has_terminal_tasks):
+            # Hide stale/idle leftovers that linger in brain state unless selected.
             continue
         plan_name = str(meta.get("plan") or "").strip() if isinstance(meta, dict) else ""
         if not plan_name:
@@ -376,7 +377,8 @@ def summarize(
             }
         batches[batch_id] = batch_info
         batch_chains[batch_id] = build_batch_chain(lanes, batch_id)
-        engaged_batch_ids.add(batch_id)
+        if has_live_work:
+            engaged_batch_ids.add(batch_id)
 
     # Keep lane tables focused on engaged or user-selected batches.
     lane_focus_ids = engaged_batch_ids | selected_set

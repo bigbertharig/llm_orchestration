@@ -1006,7 +1006,11 @@ function refreshFromData(data) {
       started: fmt(b.started_at ? new Date(b.started_at).toLocaleTimeString() : '-')
     };
   });
-  batchRows.forEach((b) => addTrackedBatch(b.id));
+  // Auto-track only live batches so stale terminal-only rows do not
+  // keep reappearing as "current" status noise.
+  batchRows
+    .filter((b) => Number(b.queue || 0) + Number(b.processing || 0) + Number(b.private || 0) > 0)
+    .forEach((b) => addTrackedBatch(b.id));
   renderBatches(batchRows);
   renderBatchChains(data, visibleBatchIds);
   syncLaneVisibleBatchIds(data);
