@@ -1823,8 +1823,10 @@ Required JSON format:
                 "max_validations_per_cycle": 3,
                 "discovery_round_cap": goal_round_cap,
                 "discovery_rounds_generated": 1,
-                "discovery_in_progress": True,
-                "discovery_active_round": 1,
+                # Round 1 tasks are created by plan parsing above; keep discovery
+                # idle so prefill can enqueue rounds 2..N immediately on first loop.
+                "discovery_in_progress": False,
+                "discovery_active_round": 0,
                 "discovery_prefill_divisor": prefill_divisor,
                 "discovery_prefill_target_rounds": prefill_target_rounds,
                 "discovery_prefill_scheduled_through": 1,
