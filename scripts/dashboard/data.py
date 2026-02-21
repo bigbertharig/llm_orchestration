@@ -99,6 +99,9 @@ def list_tasks(shared_path: Path, focus_batch_ids: set[str] | None = None) -> di
             task = _load_task_cached(task_file)
             if not task:
                 continue
+            # Hide orchestration meta/system tasks from dashboard lanes and counts.
+            if str(task.get("batch_id") or "").strip().lower() == "system" or is_system_meta_task(task):
+                continue
             batch_id = _task_batch_id(task)
             if focus_set and lane in {"complete", "failed"} and batch_id not in focus_set:
                 continue
@@ -124,6 +127,8 @@ def list_private_tasks(shared_path: Path, focus_batch_ids: set[str] | None = Non
     for task_file in iter_task_files(private_dir) or []:
         task = _load_task_cached(task_file)
         if task:
+            if str(task.get("batch_id") or "").strip().lower() == "system" or is_system_meta_task(task):
+                continue
             if focus_set and _task_batch_id(task) not in focus_set:
                 continue
             rows.append(task)
@@ -186,7 +191,11 @@ def summarize(
     configured_brain_model = config.get("brain", {}).get("model") if isinstance(config.get("brain"), dict) else None
     active_batches = brain.get("active_batches", {}) if isinstance(brain.get("active_batches"), dict) else {}
     active_batch_ids = set(str(bid) for bid in active_batches.keys())
-    selected_set = {str(b).strip() for b in (selected_batch_ids or []) if str(b).strip()}
+    selected_set = {
+        str(b).strip()
+        for b in (selected_batch_ids or [])
+        if str(b).strip() and str(b).strip().lower() != "system"
+    }
     focus_batch_ids = active_batch_ids | selected_set
 
     lanes = list_tasks(shared_path, focus_batch_ids=focus_batch_ids)
@@ -331,6 +340,8 @@ def summarize(
                 candidate_batch_ids.add(bid)
 
     for batch_id in sorted(candidate_batch_ids):
+        if str(batch_id).strip().lower() == "system":
+            continue
         meta = active_batches.get(batch_id) if isinstance(active_batches.get(batch_id), dict) else {}
         counts = count_by_batch(lanes, batch_id)
         is_engaged = (counts["queue"] + counts["processing"] + counts["private"] + counts["failed"]) > 0
@@ -372,10 +383,7 @@ def summarize(
     if lane_focus_ids:
         lane_source = {
             "queue": [t for t in lanes["queue"] if t.get("batch_id") in lane_focus_ids],
-            "processing": [
-                t for t in lanes["processing"]
-                if t.get("batch_id") in lane_focus_ids or is_system_meta_task(t)
-            ],
+            "processing": [t for t in lanes["processing"] if t.get("batch_id") in lane_focus_ids],
             "private": [t for t in lanes["private"] if t.get("batch_id") in lane_focus_ids],
             "complete": [t for t in lanes["complete"] if t.get("batch_id") in lane_focus_ids],
             "failed": [t for t in lanes["failed"] if t.get("batch_id") in lane_focus_ids],

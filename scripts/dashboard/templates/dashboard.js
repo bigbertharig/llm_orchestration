@@ -63,6 +63,12 @@ const stickyAlertStoreKey = 'orchStickyAlertsV1';
 const alertSeenStoreKey = 'orchAlertSeenV1';
 const trackedBatchesStoreKey = 'orchTrackedBatchesV1';
 
+function isTrackableBatchId(batchId) {
+  const bid = String(batchId || '').trim();
+  if (!bid) return false;
+  return bid.toLowerCase() !== 'system';
+}
+
 function fmtTs(ts) {
   if (!ts) return '-';
   const d = new Date(ts);
@@ -74,7 +80,8 @@ function loadTrackedBatches() {
   try {
     const raw = localStorage.getItem(trackedBatchesStoreKey);
     const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? new Set(parsed) : new Set();
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.map(x => String(x || '').trim()).filter(isTrackableBatchId));
   } catch (_) {
     return new Set();
   }
@@ -82,14 +89,17 @@ function loadTrackedBatches() {
 
 function saveTrackedBatches(set) {
   try {
-    localStorage.setItem(trackedBatchesStoreKey, JSON.stringify([...set]));
+    const cleaned = [...(set || new Set())]
+      .map(x => String(x || '').trim())
+      .filter(isTrackableBatchId);
+    localStorage.setItem(trackedBatchesStoreKey, JSON.stringify(cleaned));
   } catch (_) {}
 }
 
 function addTrackedBatch(batchId) {
-  if (!batchId) return;
+  if (!isTrackableBatchId(batchId)) return;
   const tracked = loadTrackedBatches();
-  tracked.add(batchId);
+  tracked.add(String(batchId).trim());
   saveTrackedBatches(tracked);
 }
 

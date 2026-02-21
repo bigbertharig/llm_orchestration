@@ -194,6 +194,7 @@ function renderPlanSelectors() {
   if (!shoulderEl || !armEl || !planEl) return;
 
   const currentShoulder = shoulderEl.value;
+  const currentArm = armEl.value;
   shoulderEl.innerHTML = '';
   shoulderPlans.forEach(p => {
     const o = document.createElement('option');
@@ -228,7 +229,12 @@ function renderPlanSelectors() {
       o.textContent = name;
       armEl.appendChild(o);
     });
-    armEl.value = '__shoulder__';
+    const armValues = [...armEl.options].map(o => o.value);
+    if (currentArm && armValues.includes(currentArm)) {
+      armEl.value = currentArm;
+    } else {
+      armEl.value = '__shoulder__';
+    }
     armEl.style.display = '';
   } else {
     armEl.style.display = 'none';
