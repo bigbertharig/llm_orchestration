@@ -37,8 +37,9 @@ shared/agents/__pycache__/
 shared/agents/*.pyc
 shared/agents/permissions/
 
-# SYNC: Logs (backup value)
-!shared/logs/
+# NO SYNC: Runtime logs
+# shared/logs/ contains high-churn runtime artifacts and should not be versioned.
+shared/logs/
 
 # NO SYNC: Plans (each plan is its own repo, public or private)
 # shared/plans/          - plan folders live here but have their own git repos
@@ -58,6 +59,7 @@ shared/agents/permissions/
 # Temporary and lock files
 *.lock
 /tmp/
+cpu_task_barrier.log
 
 # OS
 .DS_Store
