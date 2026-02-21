@@ -19,8 +19,39 @@ import json
 import uuid
 import argparse
 import re
+import shutil
 from pathlib import Path
 from datetime import datetime
+
+PRIORITY_TIER_TO_VALUE = {
+    "low": 3,
+    "normal": 5,
+    "high": 8,
+    "urgent": 10,
+}
+SHARED_ALIASES = (
+    "/mnt/shared",
+    "/home/bryan/llm_orchestration/shared",
+    "/media/bryan/shared",
+)
+
+
+def _to_runtime_shared_path(path_text: str) -> str:
+    value = str(path_text)
+    for prefix in SHARED_ALIASES:
+        if value == prefix or value.startswith(prefix + "/"):
+            return "/mnt/shared" + value[len(prefix):]
+    return value
+
+
+def _normalize_config_paths(value):
+    if isinstance(value, str):
+        return _to_runtime_shared_path(value)
+    if isinstance(value, list):
+        return [_normalize_config_paths(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _normalize_config_paths(v) for k, v in value.items()}
+    return value
 
 
 def _parse_plan_tasks(plan_content: str):
@@ -119,9 +150,57 @@ def _preview_foreach(task: dict, variables: dict):
     return {"ok": True, "item_count": len(items), "expanded_count": expanded}
 
 
+def _find_plan_root(start: Path) -> Path:
+    candidate = start.resolve()
+    for folder in [candidate, *candidate.parents]:
+        if (folder / "scripts").exists():
+            return folder
+    return start.resolve()
+
+
+def _resolve_starter_file(plan_root: Path, plan_file_arg: str | None) -> Path:
+    if not plan_file_arg:
+        return plan_root / "plan.md"
+
+    requested = Path(plan_file_arg)
+    if requested.is_absolute():
+        starter = requested
+    else:
+        direct = plan_root / requested
+        in_input = plan_root / "input" / requested
+        starter = direct if direct.exists() else in_input
+    return starter.resolve()
+
+
+def _prepare_runtime_plan_dir(plan_root: Path, starter_file: Path) -> Path:
+    default_plan = (plan_root / "plan.md").resolve()
+    if starter_file.resolve() == default_plan:
+        return plan_root
+
+    runtime_base = plan_root / "input" / ".submit_runtime"
+    runtime_base.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    runtime_dir = runtime_base / f"{starter_file.stem}_{stamp}_{uuid.uuid4().hex[:8]}"
+    runtime_dir.mkdir(parents=True, exist_ok=False)
+
+    shutil.copy2(starter_file, runtime_dir / "plan.md")
+    for name in ("scripts", "input", "history"):
+        src = plan_root / name
+        dst = runtime_dir / name
+        if src.exists() and not dst.exists():
+            dst.symlink_to(src, target_is_directory=True)
+    return runtime_dir
+
+
 def main():
     parser = argparse.ArgumentParser(description="Submit plan to brain")
     parser.add_argument("plan", help="Path to plan folder or plan.md")
+    parser.add_argument(
+        "--plan-file",
+        type=str,
+        default=None,
+        help="Starter markdown file. Relative paths resolve under plan root, then plan_root/input/.",
+    )
     parser.add_argument("--config", type=str, default="{}",
                         help="JSON config for variable substitution")
     parser.add_argument("--dry-run", action="store_true",
@@ -130,12 +209,24 @@ def main():
                         help="Use this batch ID for dry-run variable substitution (lets foreach read existing manifest)")
     args = parser.parse_args()
 
-    plan_path = Path(args.plan).absolute()
-    if plan_path.is_file():
-        plan_path = plan_path.parent
+    plan_arg = Path(args.plan).absolute()
+    if plan_arg.is_file():
+        starter_file = plan_arg.resolve()
+        plan_path = _find_plan_root(starter_file.parent)
+    else:
+        plan_path = plan_arg.resolve()
+        starter_file = _resolve_starter_file(plan_path, args.plan_file)
 
-    if not (plan_path / "plan.md").exists():
-        print(f"Error: No plan.md in {plan_path}")
+    if not plan_path.exists() or not plan_path.is_dir():
+        print(f"Error: plan path is not a directory: {plan_path}")
+        return 1
+    if not starter_file.exists() or not starter_file.is_file():
+        print(f"Error: starter plan file not found: {starter_file}")
+        return 1
+    try:
+        starter_file.relative_to(plan_path)
+    except ValueError:
+        print(f"Error: starter plan file must be inside plan directory: {starter_file}")
         return 1
 
     try:
@@ -146,10 +237,10 @@ def main():
     if not isinstance(config, dict):
         print("Error: --config must decode to a JSON object")
         return 1
+    config = _normalize_config_paths(config)
 
     if args.dry_run:
-        plan_file = plan_path / "plan.md"
-        plan_content = plan_file.read_text(encoding="utf-8")
+        plan_content = starter_file.read_text(encoding="utf-8")
         tasks = _parse_plan_tasks(plan_content)
         preview_batch_id = args.preview_batch_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         variables = {
@@ -163,6 +254,7 @@ def main():
         total_expanded = 0
         print(f"Dry run: {plan_path.name}")
         print(f"Plan path: {plan_path}")
+        print(f"Starter file: {starter_file}")
         print(f"Preview batch_id: {preview_batch_id}")
         print(f"Template tasks: {len(tasks)}")
         print("")
@@ -190,14 +282,18 @@ def main():
         print("Dry run only: nothing queued.")
         return 0
 
+    execute_plan_path = _prepare_runtime_plan_dir(plan_path, starter_file)
+    priority_label = str(config.get("PRIORITY", "normal")).strip().lower()
+    priority_value = PRIORITY_TIER_TO_VALUE.get(priority_label, PRIORITY_TIER_TO_VALUE["normal"])
+
     # Create execute_plan task for brain
     task = {
         "task_id": str(uuid.uuid4()),
         "type": "execute_plan",
         "executor": "brain",  # Brain handles plan parsing, not workers
-        "plan_path": str(plan_path),
+        "plan_path": str(execute_plan_path),
         "config": config,
-        "priority": 10,  # High priority
+        "priority": priority_value,
         "status": "pending",
         "created_at": datetime.now().isoformat(),
         "created_by": "submit"
@@ -213,6 +309,9 @@ def main():
 
     print(f"Submitted: {plan_path.name}")
     print(f"Task ID: {task['task_id'][:8]}")
+    print(f"Starter file: {starter_file}")
+    if execute_plan_path != plan_path:
+        print(f"Runtime plan path: {execute_plan_path}")
     print(f"Config: {config}")
     print(f"\nMonitor: tail -f ~/llm_orchestration/shared/logs/brain_decisions.log")
 

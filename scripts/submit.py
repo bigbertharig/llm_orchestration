@@ -34,6 +34,11 @@ PRIORITY_TIER_TO_VALUE = {
 
 
 PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_\.]+)\}")
+SHARED_ALIASES = (
+    "/mnt/shared",
+    "/home/bryan/llm_orchestration/shared",
+    "/media/bryan/shared",
+)
 
 
 def _parse_plan_tasks(plan_content: str):
@@ -219,10 +224,20 @@ def _prepare_runtime_plan_dir(plan_root: Path, starter_file: Path) -> Path:
 
 def _to_rig_path(local_path: Path | str) -> str:
     s = str(local_path)
-    prefix = "/home/bryan/llm_orchestration/shared"
-    if s.startswith(prefix):
-        return "/mnt/shared" + s[len(prefix):]
+    for prefix in SHARED_ALIASES:
+        if s == prefix or s.startswith(prefix + "/"):
+            return "/mnt/shared" + s[len(prefix):]
     return s
+
+
+def _normalize_config_paths_for_rig(value):
+    if isinstance(value, str):
+        return _to_rig_path(value)
+    if isinstance(value, list):
+        return [_normalize_config_paths_for_rig(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _normalize_config_paths_for_rig(v) for k, v in value.items()}
+    return value
 
 
 def main():
@@ -333,7 +348,7 @@ def main():
             if pf.is_absolute():
                 remote_plan_file = _to_rig_path(pf)
 
-        cfg_payload = json.dumps(config, separators=(",", ":"))
+        cfg_payload = json.dumps(_normalize_config_paths_for_rig(config), separators=(",", ":"))
         cfg_tmp = "/tmp/submit_proxy_cfg.json"
         starter_opt = f" --plan-file {shlex.quote(remote_plan_file)}" if remote_plan_file else ""
         script = (
