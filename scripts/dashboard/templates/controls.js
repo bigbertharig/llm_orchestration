@@ -3,6 +3,10 @@ let planStarters = {};
 let planDefaultStarter = {};
 let planInputs = {};
 let planInputFiles = {};
+let planScopes = {};
+let shoulderPlans = [];
+let armPlans = [];
+let shoulderArmBindings = {};
 let outputFiles = [];
 let batchLabels = {};
 const GLOBAL_HIDDEN_KEYS = new Set(['PRIORITY', 'PREEMPTIBLE']);
@@ -167,6 +171,76 @@ function renderActiveBatches(rows) {
   `).join('');
 }
 
+function currentEffectivePlan() {
+  const el = document.getElementById('planName');
+  return el ? el.value : '';
+}
+
+function setEffectivePlan(planName) {
+  const el = document.getElementById('planName');
+  if (!el) return;
+  el.value = planName;
+}
+
+function currentEffectiveScope() {
+  const planName = currentEffectivePlan();
+  return planScopes[planName] || 'shoulders';
+}
+
+function renderPlanSelectors() {
+  const shoulderEl = document.getElementById('shoulderPlan');
+  const armEl = document.getElementById('armPlan');
+  const planEl = document.getElementById('planName');
+  if (!shoulderEl || !armEl || !planEl) return;
+
+  const currentShoulder = shoulderEl.value;
+  shoulderEl.innerHTML = '';
+  shoulderPlans.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p;
+    o.textContent = p;
+    shoulderEl.appendChild(o);
+  });
+  if (!shoulderEl.options.length) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = '(no shoulder plans)';
+    shoulderEl.appendChild(o);
+  }
+  if (currentShoulder && shoulderPlans.includes(currentShoulder)) {
+    shoulderEl.value = currentShoulder;
+  }
+
+  const shoulder = shoulderEl.value;
+  const binding = shoulderArmBindings[shoulder] || { arms: [] };
+  const armRows = Array.isArray(binding.arms) ? binding.arms : [];
+  armEl.innerHTML = '';
+  if (armRows.length) {
+    const shoulderOpt = document.createElement('option');
+    shoulderOpt.value = '__shoulder__';
+    shoulderOpt.textContent = `${shoulder} (run shoulder)`;
+    armEl.appendChild(shoulderOpt);
+    armRows.forEach(row => {
+      const name = row && row.name ? String(row.name) : '';
+      if (!name) return;
+      const o = document.createElement('option');
+      o.value = name;
+      o.textContent = name;
+      armEl.appendChild(o);
+    });
+    armEl.value = '__shoulder__';
+    armEl.style.display = '';
+  } else {
+    armEl.style.display = 'none';
+  }
+
+  const selected = armEl.style.display !== 'none' && armEl.value && armEl.value !== '__shoulder__'
+    ? armEl.value
+    : shoulder;
+  setEffectivePlan(selected || shoulder);
+  if (selected || shoulder) applyPlanDefault(selected || shoulder);
+}
+
 function fillBatchSelect(selectId, ids, labels) {
   const el = document.getElementById(selectId);
   el.innerHTML = '';
@@ -192,6 +266,10 @@ async function refreshOptions() {
   planDefaultStarter = data.plan_default_starter || {};
   planInputs = data.plan_inputs || {};
   planInputFiles = data.plan_input_files || {};
+  planScopes = data.plan_scopes || {};
+  shoulderPlans = data.shoulder_plans || [];
+  armPlans = data.arm_plans || [];
+  shoulderArmBindings = data.shoulder_arm_bindings || {};
   batchLabels = data.batch_labels || {};
   renderActiveBatches(data.active_batches_meta || []);
 
@@ -209,20 +287,28 @@ async function refreshOptions() {
   fillBatchSelect('outputBatch', ids, batchLabels);
 
   const plan = document.getElementById('planName');
+  const shoulder = document.getElementById('shoulderPlan');
+  const arm = document.getElementById('armPlan');
   const starter = document.getElementById('starterFile');
   plan.innerHTML = '';
-  (data.plans || []).forEach(p => {
+  const allPlans = data.plans || [];
+  allPlans.forEach(p => {
     const o = document.createElement('option');
     o.value = p;
     o.textContent = p;
     plan.appendChild(o);
   });
+  if (!shoulderPlans.length && armPlans.length) {
+    shoulderPlans = [...armPlans];
+  }
+  shoulder.onchange = () => renderPlanSelectors();
+  arm.onchange = () => renderPlanSelectors();
   plan.onchange = () => applyPlanDefault(plan.value);
   starter.onchange = () => {
-    renderPlanInputHelp(plan.value, starter.value);
-    renderConfigForm(plan.value);
+    renderPlanInputHelp(currentEffectivePlan(), starter.value);
+    renderConfigForm(currentEffectivePlan());
   };
-  if (plan.value) applyPlanDefault(plan.value);
+  renderPlanSelectors();
 }
 
 function applyPlanDefault(planName) {
@@ -315,7 +401,8 @@ async function resumePlan() {
 }
 
 async function startPlan() {
-  const planName = document.getElementById('planName').value;
+  const planName = currentEffectivePlan();
+  const planScope = currentEffectiveScope();
   const starterFile = document.getElementById('starterFile').value;
   const highPriority = document.getElementById('highPriority').checked;
   const quickRepoUrl = document.getElementById('quickRepoUrl').value;
@@ -328,6 +415,7 @@ async function startPlan() {
   const configText = JSON.stringify(cfg);
   showResult(await api('/api/control/start_plan', {
     plan_name: planName,
+    plan_scope: planScope,
     starter_file: starterFile,
     config_json: configText,
     repo_url: quickRepoUrl,

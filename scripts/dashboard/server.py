@@ -15,6 +15,7 @@ from .data import summarize
 from .plans import (
     collect_batch_outputs,
     default_plan_config,
+    discover_active_arm_bindings,
     discover_plan_input_files,
     discover_plan_starters,
     discover_plans,
@@ -135,14 +136,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _control_options(self) -> dict[str, Any]:
         brain = load_brain_state(self.shared_path)
         active = brain.get("active_batches", {}) if isinstance(brain.get("active_batches"), dict) else {}
-        plans = discover_plans(self.shared_path)
+        shoulder_plans = discover_plans(self.shared_path, plan_scope="shoulders")
+        arm_plans = discover_plans(self.shared_path, plan_scope="arms")
+        plans = shoulder_plans + [p for p in arm_plans if p not in set(shoulder_plans)]
+        plan_scopes: dict[str, str] = {}
+        for p in shoulder_plans:
+            plan_scopes.setdefault(p, "shoulders")
+        for p in arm_plans:
+            plan_scopes[p] = "arms"
+        shoulder_arm_bindings = discover_active_arm_bindings(self.shared_path)
         recent_batches = discover_recent_batches(self.shared_path, active)
         plan_defaults = {p: default_plan_config(self.shared_path, p) for p in plans}
-        plan_starters = {p: discover_plan_starters(self.shared_path, p) for p in plans}
-        plan_input_files = {p: discover_plan_input_files(self.shared_path, p) for p in plans}
+        plan_starters = {p: discover_plan_starters(self.shared_path, p, plan_scope=plan_scopes.get(p, "shoulders")) for p in plans}
+        plan_input_files = {p: discover_plan_input_files(self.shared_path, p, plan_scope=plan_scopes.get(p, "shoulders")) for p in plans}
         plan_default_starter = {p: ("plan.md" if "plan.md" in plan_starters[p] else (plan_starters[p][0] if plan_starters[p] else "")) for p in plans}
         plan_inputs = {
-            p: {starter: plan_input_help(self.shared_path, p, starter) for starter in plan_starters[p]}
+            p: {starter: plan_input_help(self.shared_path, p, starter, plan_scope=plan_scopes.get(p, "shoulders")) for starter in plan_starters[p]}
             for p in plans
         }
         active_meta = []
@@ -155,6 +164,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 {
                     "batch_id": batch_id,
                     "plan": plan_name,
+                    "scope": "arms" if "/plans/arms/" in str(meta.get("plan_dir", "")) else "shoulders",
                     "started_at": meta.get("started_at", ""),
                 }
             )
@@ -173,6 +183,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "resumable_batches": sorted(active.keys()),
             "recent_batches": recent_batches,
             "plans": plans,
+            "shoulder_plans": shoulder_plans,
+            "arm_plans": arm_plans,
+            "plan_scopes": plan_scopes,
+            "shoulder_arm_bindings": shoulder_arm_bindings,
             "plan_defaults": plan_defaults,
             "plan_starters": plan_starters,
             "plan_input_files": plan_input_files,
@@ -282,6 +296,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self,
         plan_name: str,
         config_json: str,
+        plan_scope: str = "shoulders",
         starter_file: str = "",
         repo_url: str = "",
         claimed_behavior: str = "",
@@ -289,11 +304,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
     ) -> dict[str, Any]:
         if not plan_name:
             return {"ok": False, "message": "plan_name is required"}
-        plans = set(discover_plans(self.shared_path))
-        if plan_name not in plans:
-            return {"ok": False, "message": f"unknown plan: {plan_name}"}
+        scope = str(plan_scope or "").strip().lower()
+        if scope not in {"shoulders", "arms"}:
+            return {"ok": False, "message": f"invalid plan_scope: {plan_scope}"}
 
-        starters = set(discover_plan_starters(self.shared_path, plan_name))
+        plans = set(discover_plans(self.shared_path, plan_scope=scope))
+        if plan_name not in plans:
+            return {"ok": False, "message": f"unknown plan in {scope}: {plan_name}"}
+
+        starters = set(discover_plan_starters(self.shared_path, plan_name, plan_scope=scope))
         if starter_file and starter_file not in starters:
             return {"ok": False, "message": f"invalid starter_file for {plan_name}: {starter_file}"}
 
@@ -326,13 +345,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if claimed_clean:
             cfg_obj["CLAIMED_BEHAVIOR"] = claimed_clean
         if inline_clean:
-            inline_path = write_inline_input_file(self.shared_path, plan_name, inline_clean)
+            inline_path = write_inline_input_file(self.shared_path, plan_name, inline_clean, plan_scope=scope)
             chosen_key = next((k for k in INLINE_FILE_KEYS if k in cfg_obj), "QUERY_FILE")
             cfg_obj[chosen_key] = inline_path
 
         cfg_payload = json.dumps(cfg_obj, separators=(",", ":"))
-        plan_path = f"/mnt/shared/plans/shoulders/{plan_name}"
-        cfg_tmp = f"/tmp/dashboard_submit_{plan_name}.json"
+        plan_path = f"/mnt/shared/plans/{scope}/{plan_name}"
+        cfg_tmp = f"/tmp/dashboard_submit_{scope}_{plan_name}.json"
         starter_arg = starter_file.strip()
         starter_opt = f" --plan-file {shlex.quote(starter_arg)}" if starter_arg else ""
         script = (
@@ -369,9 +388,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             }
         display_starter = starter_arg or "plan.md"
         out["message"] = (
-            f"Submitted plan {plan_name} ({display_starter})"
+            f"Submitted {scope}/{plan_name} ({display_starter})"
             if out.get("ok")
-            else f"Failed to submit plan {plan_name} ({display_starter})"
+            else f"Failed to submit {scope}/{plan_name} ({display_starter})"
         )
         return out
 
@@ -401,11 +420,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         cfg["BATCH_ID"] = batch_id
         cfg_json = json.dumps(cfg)
 
-        out = self._start_plan(plan_name, cfg_json)
+        plan_scope = "shoulders"
+        plan_dir = str(meta.get("plan_dir") or "").strip()
+        if "/plans/arms/" in plan_dir:
+            plan_scope = "arms"
+
+        out = self._start_plan(plan_name, cfg_json, plan_scope=plan_scope)
         if out.get("ok"):
-            out["message"] = f"Resumed batch {batch_id} ({plan_name})"
+            out["message"] = f"Resumed batch {batch_id} ({plan_scope}/{plan_name})"
         else:
-            out["message"] = f"Failed to resume batch {batch_id} ({plan_name})"
+            out["message"] = f"Failed to resume batch {batch_id} ({plan_scope}/{plan_name})"
         return out
 
     def _batch_outputs(self, batch_id: str) -> dict[str, Any]:
@@ -470,6 +494,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._start_plan(
                     str(payload.get("plan_name", "")).strip(),
                     str(payload.get("config_json", "")).strip(),
+                    str(payload.get("plan_scope", "shoulders")).strip(),
                     str(payload.get("starter_file", "")).strip(),
                     str(payload.get("repo_url", "")).strip(),
                     str(payload.get("claimed_behavior", "")).strip(),
