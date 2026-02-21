@@ -1630,6 +1630,8 @@ Required JSON format:
             "manifest_path": str(env_manifest_path),
         })
 
+        goal_discovery_templates = {}
+        goal_round_cap = 0
         # Create tasks with variable substitution
         tasks_with_no_deps = []
         for task_def in task_defs:
@@ -1669,6 +1671,14 @@ Required JSON format:
                 # Mark goal-driven foreach tasks for incremental expansion
                 if task_def.get("goal_driven"):
                     task["goal_driven"] = True
+            elif goal_spec and task_def["id"] in ("build_strategy", "execute_searches", "identify_people"):
+                goal_discovery_templates[task_def["id"]] = {
+                    "command": command,
+                    "executor": task_def.get("executor", "worker"),
+                    "task_class": task_def.get("task_class"),
+                    "priority": batch_priority_value,
+                    "depends_on": list(task_def.get("depends_on", [])),
+                }
 
             # Check for definition errors - send to failed/ immediately
             if task.get("definition_error"):
@@ -1770,6 +1780,14 @@ Required JSON format:
         if goal_spec:
             target = goal_spec["target"]
             multiplier = goal_spec["max_attempts_multiplier"]
+            try:
+                configured_rounds = int(str(config.get("DISCOVERY_ROUNDS", "0") or "0"))
+            except ValueError:
+                configured_rounds = 0
+            if configured_rounds > 0:
+                goal_round_cap = min(target, configured_rounds)
+            else:
+                goal_round_cap = target
             batch_meta["goal"] = {
                 "goal_version": 1,
                 "type": goal_spec["type"],
@@ -1794,6 +1812,12 @@ Required JSON format:
                 "next_index": 0,
                 "status": "active",
                 "max_validations_per_cycle": 3,
+                "discovery_round_cap": goal_round_cap,
+                "discovery_rounds_generated": 1,
+                "discovery_in_progress": False,
+                "discovery_active_round": 0,
+                "discovery_templates": goal_discovery_templates,
+                "processed_identify_task_ids": [],
             }
             self.log_decision("GOAL_INITIALIZED",
                 f"Goal-driven plan: target={target}, tolerance={goal_spec['tolerance']}, "
@@ -2411,6 +2435,83 @@ JSON only:"""
                 continue
         return False
 
+    def _extract_permission_denied_path(self, result: Dict[str, Any]) -> str:
+        """Extract denied filesystem path from Python PermissionError output."""
+        text = (
+            str(result.get("output", "") or "")
+            + "\n"
+            + str(result.get("error", "") or "")
+        )
+        m = re.search(r"PermissionError:\s*\[Errno\s*13\]\s*Permission denied:\s*'([^']+)'", text)
+        return m.group(1).strip() if m else ""
+
+    def _try_fix_permission_denied(self, task: Dict[str, Any], result: Dict[str, Any]) -> bool:
+        """
+        Attempt to recover from file/dir PermissionError in plan artifacts.
+
+        Strategy:
+        1) Parse denied path from traceback.
+        2) Ensure parent dirs exist.
+        3) Relax perms for plan batch tree to group writable.
+        """
+        denied_path = self._extract_permission_denied_path(result)
+        if not denied_path:
+            return False
+
+        candidates: List[Path] = [Path(denied_path)]
+        if denied_path.startswith("/mnt/shared"):
+            candidates.append(Path(denied_path.replace("/mnt/shared", "/media/bryan/shared", 1)))
+        elif denied_path.startswith("/media/bryan/shared"):
+            candidates.append(Path(denied_path.replace("/media/bryan/shared", "/mnt/shared", 1)))
+
+        fixed = False
+        for denied in candidates:
+            try:
+                parent = denied.parent
+                parent.mkdir(parents=True, exist_ok=True)
+
+                # If we have batch_path, normalize from there down so future writes work.
+                batch_path = str(task.get("batch_path", "") or "")
+                batch_root = Path(batch_path) if batch_path else None
+                if batch_root and str(batch_root).startswith("/mnt/shared"):
+                    batch_root = Path(str(batch_root).replace("/mnt/shared", "/media/bryan/shared", 1))
+                if batch_root and batch_root.exists():
+                    for d in [batch_root, *batch_root.glob("**/*")]:
+                        if d.is_dir():
+                            try:
+                                os.chmod(d, 0o775)
+                            except Exception:
+                                pass
+                        elif d.is_file():
+                            try:
+                                os.chmod(d, 0o664)
+                            except Exception:
+                                pass
+
+                try:
+                    os.chmod(parent, 0o775)
+                except Exception:
+                    pass
+                if denied.exists():
+                    try:
+                        os.chmod(denied, 0o664)
+                    except Exception:
+                        pass
+
+                # Verify write access in target directory.
+                probe = parent / f".perm_probe_{uuid.uuid4().hex}.tmp"
+                with open(probe, "w", encoding="utf-8") as f:
+                    f.write("ok")
+                probe.unlink(missing_ok=True)
+                fixed = True
+                break
+            except Exception:
+                continue
+
+        if fixed:
+            task["fix_applied"] = "permission_recovered"
+        return fixed
+
     def handle_failed_tasks(self):
         """Check for failed tasks and handle based on error type.
 
@@ -2461,7 +2562,8 @@ JSON only:"""
                 if task.get("status") == "blocked_cloud" or task.get("cloud_escalated", False):
                     recoverable_timeout = self._is_recoverable_llm_timeout(task, result)
                     recoverable_missing_scrape = self._is_missing_scraped_file(result)
-                    if recoverable_timeout or recoverable_missing_scrape:
+                    recoverable_permission = self._try_fix_permission_denied(task, result)
+                    if recoverable_timeout or recoverable_missing_scrape or recoverable_permission:
                         if recoverable_timeout:
                             model_used = self._set_next_llm_model(task)
                             self._queue_task_retry(task_file, task, "recoverable_llm_timeout")
@@ -2473,7 +2575,7 @@ JSON only:"""
                                     "next_model": model_used or "unchanged"
                                 }
                             )
-                        else:
+                        elif recoverable_missing_scrape:
                             person_id = self._extract_person_id(task)
                             self._requeue_upstream_scrape_for_person(task.get("batch_id", ""), person_id)
                             self._queue_task_retry(task_file, task, "recoverable_missing_scrape")
@@ -2483,6 +2585,16 @@ JSON only:"""
                                 {
                                     "task_id": task.get("task_id", "")[:8],
                                     "person_id": person_id
+                                }
+                            )
+                        else:
+                            self._queue_task_retry(task_file, task, "recoverable_permission_denied")
+                            self.log_decision(
+                                "RECOVERABLE_REQUEUE",
+                                f"Recovered blocked permission error task '{task.get('name', '')}'",
+                                {
+                                    "task_id": task.get("task_id", "")[:8],
+                                    "denied_path": self._extract_permission_denied_path(result),
                                 }
                             )
                         continue
@@ -2592,6 +2704,8 @@ JSON only:"""
                             self._requeue_upstream_scrape_for_person(task.get("batch_id", ""), person_id)
                             fixed = True
                             task["fix_applied"] = "requeued_upstream_scrape"
+                        if (not fixed) and self._try_fix_permission_denied(task, result):
+                            fixed = True
                         incident["brain_fix_attempts"] = int(incident.get("brain_fix_attempts", 0)) + 1
                         incident["updated_at"] = datetime.now().isoformat()
                         incident["history"].append({
