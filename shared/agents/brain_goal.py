@@ -8,6 +8,11 @@ from typing import Any, Dict, List, Optional
 
 
 class BrainGoalMixin:
+    def _round_task_name(self, base_name: str, round_num: int) -> str:
+        if int(round_num or 1) <= 1:
+            return str(base_name)
+        return f"{base_name}_round_{int(round_num):04d}"
+
     def _goal_batch_dir(self, batch_id: str) -> Path:
         """
         Resolve the effective data batch directory for goal-driven profile reads.
@@ -381,6 +386,115 @@ class BrainGoalMixin:
         after = len(goal.get("spawned_ids", []))
         return max(0, after - before)
 
+    def _maybe_schedule_discovery_prefill(self, batch_id: str, goal: Dict[str, Any]) -> int:
+        """
+        Front-load discovery rounds up to the prefill target so the initial
+        candidate pool is populated faster.
+
+        Safety: rounds are serialized by chaining build_strategy round N to
+        identify_people round N-1 to avoid concurrent writes to shared result files.
+        """
+        if goal.get("status") != "active":
+            return 0
+        if bool(goal.get("discovery_in_progress")):
+            return 0
+
+        templates = goal.get("discovery_templates", {})
+        if not isinstance(templates, dict):
+            return 0
+        required = ("build_strategy", "execute_searches", "identify_people")
+        if any(name not in templates for name in required):
+            return 0
+
+        cap = int(goal.get("discovery_round_cap", 0) or 0)
+        prefill_target = int(goal.get("discovery_prefill_target_rounds", 1) or 1)
+        if cap > 0:
+            prefill_target = min(prefill_target, cap)
+
+        generated = int(goal.get("discovery_rounds_generated", 1) or 1)
+        scheduled_through = int(goal.get("discovery_prefill_scheduled_through", generated) or generated)
+        scheduled_through = max(scheduled_through, generated)
+        if scheduled_through >= prefill_target:
+            return 0
+
+        batch_meta = self.active_batches.get(batch_id, {}) or {}
+        batch_priority = str(batch_meta.get("priority", "normal") or "normal")
+        batch_preemptible = bool(batch_meta.get("preemptible", True))
+        satisfied = self.get_satisfied_task_ids(batch_id)
+
+        start_round = scheduled_through + 1
+        end_round = prefill_target
+        created_ids: list[str] = []
+
+        for round_num in range(start_round, end_round + 1):
+            name_map = {
+                "build_strategy": self._round_task_name("build_strategy", round_num),
+                "execute_searches": self._round_task_name("execute_searches", round_num),
+                "identify_people": self._round_task_name("identify_people", round_num),
+            }
+            prev_identify = self._round_task_name("identify_people", round_num - 1)
+
+            for base_name in required:
+                tpl = templates[base_name]
+                depends_on = []
+                for dep in tpl.get("depends_on", []) or []:
+                    dep = str(dep or "").strip()
+                    if not dep or dep.lower() == "none":
+                        continue
+                    depends_on.append(name_map.get(dep, dep))
+
+                # Serialize discovery rounds to prevent overlapping writes.
+                if base_name == "build_strategy" and round_num > 1:
+                    if prev_identify not in depends_on:
+                        depends_on.append(prev_identify)
+
+                task = self.create_task(
+                    task_type="shell",
+                    command=str(tpl.get("command", "") or ""),
+                    batch_id=batch_id,
+                    task_name=name_map[base_name],
+                    priority=int(tpl.get("priority", 5) or 5),
+                    depends_on=depends_on,
+                    executor=str(tpl.get("executor", "worker") or "worker"),
+                    task_class=str(tpl.get("task_class", "") or "").lower() or None,
+                    batch_priority=batch_priority,
+                    preemptible=batch_preemptible,
+                )
+                if batch_meta.get("plan_dir"):
+                    task["plan_path"] = str(batch_meta["plan_dir"])
+                if batch_meta.get("batch_dir"):
+                    task["batch_path"] = str(batch_meta["batch_dir"])
+                if batch_meta.get("env_manifest_path"):
+                    task["env_manifest_path"] = str(batch_meta["env_manifest_path"])
+                task["goal_discovery_round"] = round_num
+
+                if all(d in satisfied for d in depends_on):
+                    self.save_to_public(task)
+                else:
+                    self.save_to_private(task)
+                created_ids.append(task["task_id"][:8])
+
+        if not created_ids:
+            return 0
+
+        goal["discovery_in_progress"] = True
+        goal["discovery_active_round"] = end_round
+        goal["discovery_rounds_generated"] = end_round
+        goal["discovery_prefill_scheduled_through"] = end_round
+        self.log_decision(
+            "GOAL_DISCOVERY_PREFILL",
+            f"Scheduled prefill rounds {start_round}-{end_round}/{cap or '?'}",
+            {
+                "batch_id": batch_id,
+                "start_round": start_round,
+                "end_round": end_round,
+                "round_cap": cap,
+                "prefill_target_rounds": prefill_target,
+                "created_tasks": created_ids,
+            },
+        )
+        return end_round - start_round + 1
+
     def _maybe_schedule_next_discovery_round(self, batch_id: str, goal: Dict[str, Any], reason: str) -> bool:
         """
         Enqueue one more build_strategy -> execute_searches -> identify_people chain.
@@ -593,6 +707,7 @@ class BrainGoalMixin:
             # Keep pool size and discovery-cycle state fresh.
             self._refresh_goal_pool_stats(goal)
             self._process_goal_discovery_events(batch_id, goal)
+            self._maybe_schedule_discovery_prefill(batch_id, goal)
             self._spawn_goal_headroom(batch_id, goal)
 
             # If we cannot meet the remaining target with current pool+inflight, prefetch another discovery round.

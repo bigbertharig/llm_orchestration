@@ -1788,6 +1788,14 @@ Required JSON format:
                 goal_round_cap = min(target, configured_rounds)
             else:
                 goal_round_cap = target
+            prefill_divisor = 4
+            try:
+                prefill_divisor = int(str(config.get("DISCOVERY_PREFILL_DIVISOR", "4") or "4"))
+            except ValueError:
+                prefill_divisor = 4
+            prefill_divisor = max(1, prefill_divisor)
+            prefill_target_rounds = max(1, (target + prefill_divisor - 1) // prefill_divisor)
+            prefill_target_rounds = min(goal_round_cap, prefill_target_rounds)
             batch_meta["goal"] = {
                 "goal_version": 1,
                 "type": goal_spec["type"],
@@ -1817,6 +1825,9 @@ Required JSON format:
                 "discovery_rounds_generated": 1,
                 "discovery_in_progress": True,
                 "discovery_active_round": 1,
+                "discovery_prefill_divisor": prefill_divisor,
+                "discovery_prefill_target_rounds": prefill_target_rounds,
+                "discovery_prefill_scheduled_through": 1,
                 "discovery_templates": goal_discovery_templates,
                 "processed_identify_task_ids": [],
             }
