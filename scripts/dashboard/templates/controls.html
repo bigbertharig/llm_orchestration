@@ -1,0 +1,152 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM Orchestration Controls</title>
+  <style>
+{{BASE_CSS}}
+
+.wrap { max-width: 1100px; }
+.card { margin-bottom: 10px; padding: 12px; }
+h3 { margin: 0 0 8px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.start-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 10px; align-items: start; }
+.field-grid { display: grid; gap: 8px; }
+.field-row { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 8px; align-items: center; }
+.field-key { color: var(--muted); font-size: 12px; font-family: "JetBrains Mono", monospace; }
+.field-help { color: var(--muted); font-size: 12px; line-height: 1.35; }
+select, input, textarea, button {
+  background: #0d1f31;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+button { cursor: pointer; background: #204565; }
+button.danger { background: #5a2323; border-color: #7a2d2d; }
+button.warn { background: #4d3b1a; border-color: #6a5120; }
+textarea { width: 100%; min-height: 120px; font-family: "JetBrains Mono", monospace; }
+#result { white-space: pre-wrap; font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--muted); }
+.stack { display: grid; gap: 8px; }
+.tiny { font-size: 11px; color: var(--muted); }
+.preview { white-space: pre-wrap; background: #0b1a2a; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-family: "JetBrains Mono", monospace; font-size: 12px; max-height: 320px; overflow: auto; }
+@media (max-width: 980px) {
+  .start-grid { grid-template-columns: 1fr; }
+  .field-row { grid-template-columns: 1fr; }
+}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="tabs">
+      <a class="tab-btn" href="/">Dashboard</a>
+      <a class="tab-btn active" href="/controls">Controls</a>
+    </div>
+    <h1>Control Panel</h1>
+
+    <div class="card">
+      <h3>Batch Actions</h3>
+      <div class="row">
+        <select id="killBatch"></select>
+        <button class="danger" onclick="killPlan()">Kill selected batch</button>
+        <button class="danger" onclick="killAllActive()">Kill all active</button>
+      </div>
+      <div class="k">Kills selected/all active batches without shutting down workers.</div>
+      <div class="row">
+        <select id="resumeBatch"></select>
+        <button onclick="resumePlan()">Resume selected batch</button>
+      </div>
+      <div class="k">Resubmits selected batch with `RUN_MODE=resume`.</div>
+      <div style="margin-top:10px;">
+        <table>
+          <thead>
+            <tr><th>Batch</th><th>Plan</th><th>Started</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="activeBatchRows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Return To Default</h3>
+      <div class="row">
+        <button class="warn" onclick="returnDefault()">Reset to brain + 1 hot worker</button>
+      </div>
+      <div class="k">Stops duplicate/orphan agents and restarts via startup defaults.</div>
+    </div>
+
+    <div class="card">
+      <h3>Start Plan (Simplified)</h3>
+      <div class="row" style="margin-bottom:8px;">
+        <select id="planName"></select>
+        <select id="starterFile"></select>
+        <label class="k" style="display:flex;align-items:center;gap:6px;">
+          <input id="highPriority" type="checkbox" />
+          High priority
+        </label>
+      </div>
+      <div class="start-grid">
+        <div>
+          <div id="quickInputsWrap">
+          <div class="k" style="margin-bottom:6px;">Quick typed inputs</div>
+          <div class="field-grid" style="margin-bottom:8px;">
+            <div class="field-row">
+              <div class="field-key">REPO_URL (quick)</div>
+              <div><input id="quickRepoUrl" placeholder="https://github.com/owner/repo" /></div>
+            </div>
+            <div class="field-row">
+              <div class="field-key">CLAIMED_BEHAVIOR (quick)</div>
+              <div><textarea id="quickClaim" placeholder="Paste what it claims to do..." style="min-height:80px;"></textarea></div>
+            </div>
+          </div>
+          </div>
+          <div id="planConfigForm" class="field-grid"></div>
+          <div style="display:none;">
+          <div class="k" style="margin-top:8px;">Advanced JSON (optional)</div>
+          <textarea id="planConfig">{
+  "QUERY_FILE": "/mnt/shared/plans/shoulders/research_assistant/input/query.md",
+  "TARGET_COUNT": "20",
+  "TARGET_TOLERANCE": "0",
+  "SECONDARY_TARGET_COUNT": "20",
+  "SEARCH_DEPTH": "basic",
+  "OUTPUT_FORMAT": "both",
+  "RUN_MODE": "fresh"
+}</textarea>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <button onclick="startPlan()">Submit plan</button>
+          </div>
+          <div class="k">Uses `/mnt/shared/agents/submit.py` on GPU host. Typed inputs are sanitized server-side.</div>
+        </div>
+        <div>
+          <div class="k">Input settings (with options)</div>
+          <div id="planInputs" style="margin-top:8px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Batch Outputs</h3>
+      <div class="row">
+        <select id="outputBatch"></select>
+        <button onclick="loadBatchOutputs()">Load outputs</button>
+      </div>
+      <div class="k">Browse recent batch output files and quick previews.</div>
+      <div id="outputMeta" class="tiny" style="margin-top:8px;"></div>
+      <div id="outputFiles" style="margin-top:8px;"></div>
+      <div id="outputPreview" class="preview" style="margin-top:8px;">(select a file preview)</div>
+    </div>
+
+    <div class="card">
+      <h3>Result</h3>
+      <div id="result">(waiting)</div>
+    </div>
+  </div>
+
+  <script>
+{{CONTROLS_JS}}
+  </script>
+</body>
+</html>

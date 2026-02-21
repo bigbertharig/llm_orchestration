@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM Orchestration Dashboard</title>
+  <style>
+{{BASE_CSS}}
+
+.grid { display: grid; gap: 10px; }
+.g5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.section { margin-top: 10px; }
+.clip {
+  display: inline-block;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+.copyable { cursor: copy; }
+.copy-toast {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  background: #16324a;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  z-index: 9999;
+  opacity: 0;
+  transition: opacity .18s ease;
+  pointer-events: none;
+}
+.copy-toast.show { opacity: 1; }
+.lane-title { display: flex; justify-content: space-between; align-items: baseline; }
+.lane-count { color: var(--muted); font-size: 12px; }
+.chain-box { margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.chain-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; }
+.chain-controls { display:flex; gap:6px; align-items:center; }
+.plan-scope { margin-top: 8px; }
+.filter-bar { display:flex; gap:8px; flex-wrap:wrap; margin: 6px 0 8px; align-items:center; }
+.filter-field { display:flex; gap:4px; align-items:center; }
+.filter-field input, .filter-field select {
+  background: #0d1f31;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+@media (max-width: 1180px) {
+  .g5, .g2 { grid-template-columns: 1fr; }
+}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="tabs" style="margin-bottom:8px;">
+      <a class="tab-btn active" href="/">Dashboard</a>
+      <a class="tab-btn" href="/controls">Controls</a>
+    </div>
+    <h1>LLM Orchestration Dashboard</h1>
+    <div class="meta" id="meta">Loading...</div>
+
+    <div class="grid g5" id="countCards"></div>
+
+    <div class="section card">
+      <h3>Alerts</h3>
+      <div id="alerts"></div>
+    </div>
+
+    <div class="section card">
+      <h3>Brain GPU Status</h3>
+      <div id="brainGpus"></div>
+    </div>
+
+    <div class="section card">
+      <h3>Workers</h3>
+      <div class="tabs" id="workerTabs"></div>
+      <div id="workerTable"></div>
+    </div>
+
+    <div class="section card">
+      <h3>Active Batches</h3>
+      <div id="batches"></div>
+      <div id="batchChains"></div>
+    </div>
+
+    <div class="section card">
+      <h3>Task Lanes</h3>
+      <div class="tabs" id="laneTabs"></div>
+      <div id="laneTable"></div>
+    </div>
+  </div>
+
+  <script>
+{{DASHBOARD_JS}}
+  </script>
+</body>
+</html>
