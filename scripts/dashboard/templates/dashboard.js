@@ -976,8 +976,10 @@ function refreshFromData(data) {
     const total = Math.max(b.total_hint || 0, c.queue + c.processing + c.private + c.complete + c.failed);
     let stage = 'idle';
     let stageRank = 0;
-    if (c.failed > 0) { stage = 'failed'; stageRank = 4; }
+    const hasLiveWork = (c.processing > 0) || (c.queue > 0) || (c.private > 0);
+    if (hasLiveWork && c.failed > 0) { stage = 'processing (errors)'; stageRank = 3; }
     else if (c.processing > 0) { stage = 'processing'; stageRank = 3; }
+    else if (c.failed > 0) { stage = 'failed'; stageRank = 4; }
     else if (c.queue > 0 || c.private > 0) { stage = 'queued'; stageRank = 2; }
     else if (total > 0 && c.complete >= total) { stage = 'complete'; stageRank = 5; }
     else if (c.complete > 0) { stage = 'partial'; stageRank = 1; }
