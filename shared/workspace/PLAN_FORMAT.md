@@ -74,6 +74,11 @@ One or two sentences describing what this plan accomplishes.
 ## Inputs
 
 - **VAR_NAME**: Description and format
+- Include optional tuning knobs only when needed by that specific plan. Do not add goal-related or query-related inputs to plans that do not use them.
+- For discovery/query plans, optional query normalization inputs can include:
+  - `QUERY_STOPWORDS`: extra stopwords to suppress low-signal terms (comma/space separated)
+  - `QUERY_KEEPWORDS`: allowlist terms that must not be removed even if present in stopwords
+  - Scripts should still keep a small hardcoded core stopword set so plans work without explicit tuning.
 
 ## Outputs
 
