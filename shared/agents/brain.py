@@ -1820,6 +1820,7 @@ Required JSON format:
                 "validated_task_ids": [],
                 "next_index": 0,
                 "status": "active",
+                "phase": "fill_pool",
                 "max_validations_per_cycle": 3,
                 "discovery_round_cap": goal_round_cap,
                 "discovery_rounds_generated": 1,
@@ -1830,6 +1831,8 @@ Required JSON format:
                 "discovery_prefill_divisor": prefill_divisor,
                 "discovery_prefill_target_rounds": prefill_target_rounds,
                 "discovery_prefill_scheduled_through": 1,
+                "discovery_pool_target": target,
+                "discovery_refill_watermark": max(1, (target + 3) // 4),
                 "discovery_templates": goal_discovery_templates,
                 "processed_identify_task_ids": [],
             }

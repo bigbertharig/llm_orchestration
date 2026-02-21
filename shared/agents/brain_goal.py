@@ -325,49 +325,63 @@ class BrainGoalMixin:
         Track completion of discovery-cycle tasks so we can safely schedule the next round.
         """
         processed_ids = set(goal.get("processed_identify_task_ids", []))
-        for task_file in self.complete_path.glob("*.json"):
-            try:
-                with open(task_file) as f:
-                    task = json.load(f)
-            except Exception:
-                continue
-            if task.get("batch_id") != batch_id:
-                continue
-            task_id = str(task.get("task_id", ""))
-            if task_id in processed_ids:
-                continue
-            task_name = str(task.get("name", "") or "")
-            if not (
-                task_name == "identify_people"
-                or task_name.startswith("identify_people_round_")
-                or task_name == "build_strategy"
-                or task_name.startswith("build_strategy_round_")
-            ):
-                continue
-            processed_ids.add(task_id)
-            round_num = self._parse_round_suffix(task_name)
-            if round_num is None and task_name.startswith("build_strategy"):
-                round_num = 1
-            if round_num is not None:
-                goal["discovery_rounds_generated"] = max(
-                    int(goal.get("discovery_rounds_generated", 1)),
-                    int(round_num),
-                )
-            # End-of-discovery-cycle marker is identify_people completion.
-            if task_name.startswith("identify_people"):
-                active_round = int(goal.get("discovery_active_round", 0) or 0)
-                if round_num is None or round_num == active_round:
-                    goal["discovery_in_progress"] = False
-                    goal["discovery_active_round"] = 0
-                    self.log_decision(
-                        "GOAL_DISCOVERY_READY",
-                        f"Discovery round complete for batch {batch_id}; pool can be expanded",
-                        {
-                            "batch_id": batch_id,
-                            "round": int(round_num or 1),
-                            "candidates_total": int(goal.get("candidates_total", 0) or 0),
-                        },
+        for lane_name, lane_path in (("complete", self.complete_path), ("failed", self.failed_path)):
+            for task_file in lane_path.glob("*.json"):
+                try:
+                    with open(task_file) as f:
+                        task = json.load(f)
+                except Exception:
+                    continue
+                if task.get("batch_id") != batch_id:
+                    continue
+                task_id = str(task.get("task_id", ""))
+                if task_id in processed_ids:
+                    continue
+                task_name = str(task.get("name", "") or "")
+                if not (
+                    task_name == "identify_people"
+                    or task_name.startswith("identify_people_round_")
+                    or task_name == "build_strategy"
+                    or task_name.startswith("build_strategy_round_")
+                ):
+                    continue
+                processed_ids.add(task_id)
+                round_num = self._parse_round_suffix(task_name)
+                if round_num is None and task_name.startswith("build_strategy"):
+                    round_num = 1
+                if round_num is not None:
+                    goal["discovery_rounds_generated"] = max(
+                        int(goal.get("discovery_rounds_generated", 1)),
+                        int(round_num),
                     )
+                # End-of-discovery-cycle marker is identify_people terminal event
+                # (complete or failed) so strict identify failures do not stall rounds.
+                if task_name.startswith("identify_people"):
+                    active_round = int(goal.get("discovery_active_round", 0) or 0)
+                    if round_num is None or round_num == active_round:
+                        goal["discovery_in_progress"] = False
+                        goal["discovery_active_round"] = 0
+                        event_type = "GOAL_DISCOVERY_READY"
+                        event_msg = (
+                            f"Discovery round complete for batch {batch_id}; pool can be expanded"
+                        )
+                        if lane_name == "failed":
+                            event_type = "GOAL_DISCOVERY_ROUND_FAILED"
+                            event_msg = (
+                                f"Discovery round ended with failed identify task for batch {batch_id}; "
+                                "continuing scheduling"
+                            )
+                        self.log_decision(
+                            event_type,
+                            event_msg,
+                            {
+                                "batch_id": batch_id,
+                                "round": int(round_num or 1),
+                                "lane": lane_name,
+                                "task_name": task_name,
+                                "candidates_total": int(goal.get("candidates_total", 0) or 0),
+                            },
+                        )
         goal["processed_identify_task_ids"] = list(processed_ids)
 
     def _spawn_goal_headroom(self, batch_id: str, goal: Dict[str, Any]) -> int:
@@ -697,18 +711,65 @@ class BrainGoalMixin:
             # Keep pool size and discovery-cycle state fresh.
             self._refresh_goal_pool_stats(goal)
             self._process_goal_discovery_events(batch_id, goal)
-            self._maybe_schedule_discovery_prefill(batch_id, goal)
-            self._spawn_goal_headroom(batch_id, goal)
+            # Explicit phase-based state machine:
+            # - fill_pool: prioritize discovery until buffer is healthy
+            # - drain_pool: pause discovery and focus on scoring/decisions
+            phase = str(goal.get("phase", "fill_pool") or "fill_pool")
+            if phase not in {"fill_pool", "drain_pool"}:
+                phase = "fill_pool"
+                goal["phase"] = phase
+            pool_remaining = max(0, int(goal.get("candidates_total", 0)) - int(goal.get("next_index", 0)))
+            in_flight_now = len(goal.get("in_flight_ids", []))
+            buffer_total = pool_remaining + in_flight_now
+            buffer_target = max(1, int(goal.get("discovery_pool_target", goal.get("target", 1)) or 1))
+            refill_watermark = max(
+                1,
+                int(goal.get("discovery_refill_watermark", max(1, (buffer_target + 3) // 4)) or 1),
+            )
 
-            # If we cannot meet the remaining target with current pool+inflight, prefetch another discovery round.
             if goal.get("status") == "active":
-                remaining_target = max(0, int(goal["target"]) - int(goal["accepted"]))
-                pool_remaining = max(0, int(goal.get("candidates_total", 0)) - int(goal.get("next_index", 0)))
-                in_flight_now = len(goal.get("in_flight_ids", []))
-                if remaining_target > (pool_remaining + in_flight_now):
-                    self._maybe_schedule_next_discovery_round(
-                        batch_id, goal, reason="insufficient_pool_for_remaining_target"
+                if phase == "fill_pool" and buffer_total >= buffer_target:
+                    goal["phase"] = "drain_pool"
+                    phase = "drain_pool"
+                    self.log_decision(
+                        "GOAL_PHASE_CHANGE",
+                        f"Goal batch {batch_id} phase fill_pool -> drain_pool",
+                        {
+                            "batch_id": batch_id,
+                            "buffer_total": buffer_total,
+                            "buffer_target": buffer_target,
+                            "pool_remaining": pool_remaining,
+                            "in_flight": in_flight_now,
+                        },
                     )
+                elif phase == "drain_pool" and buffer_total <= refill_watermark:
+                    goal["phase"] = "fill_pool"
+                    phase = "fill_pool"
+                    self.log_decision(
+                        "GOAL_PHASE_CHANGE",
+                        f"Goal batch {batch_id} phase drain_pool -> fill_pool",
+                        {
+                            "batch_id": batch_id,
+                            "buffer_total": buffer_total,
+                            "refill_watermark": refill_watermark,
+                            "pool_remaining": pool_remaining,
+                            "in_flight": in_flight_now,
+                        },
+                    )
+
+            if goal.get("status") == "active" and phase == "fill_pool":
+                self._maybe_schedule_discovery_prefill(batch_id, goal)
+                # Fill-pool should keep generating rounds while buffer is short.
+                remaining_target = max(0, int(goal["target"]) - int(goal["accepted"]))
+                if remaining_target > buffer_total:
+                    self._maybe_schedule_next_discovery_round(
+                        batch_id, goal, reason="fill_pool_buffer_shortfall"
+                    )
+
+            # Candidate spawning is always allowed while active so decision flow
+            # can continue in both phases.
+            if goal.get("status") == "active":
+                self._spawn_goal_headroom(batch_id, goal)
 
             tracked_task = goal["tracked_task"]
             max_per_cycle = goal.get("max_validations_per_cycle", 3)
@@ -819,6 +880,20 @@ class BrainGoalMixin:
                     goal["next_index"] >= goal["candidates_total"] and
                     in_flight == 0 and
                     goal["accepted"] < target - tolerance):
+                phase = str(goal.get("phase", "fill_pool") or "fill_pool")
+                if phase != "fill_pool":
+                    goal["phase"] = "fill_pool"
+                    self.log_decision(
+                        "GOAL_PHASE_CHANGE",
+                        f"Goal batch {batch_id} phase drain_pool -> fill_pool (pool exhausted)",
+                        {
+                            "batch_id": batch_id,
+                            "accepted": goal["accepted"],
+                            "target": target,
+                            "pool_size": goal["candidates_total"],
+                            "next_index": goal["next_index"],
+                        },
+                    )
                 scheduled = self._maybe_schedule_next_discovery_round(
                     batch_id, goal, reason="pool_exhausted"
                 )
