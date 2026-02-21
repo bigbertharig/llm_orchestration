@@ -61,13 +61,13 @@ shared/plans/<plan_name>/
 
 Plans have two sections:
 
-1. **Header** - Goal, inputs, outputs, script descriptions
+1. **Header** - Objective, inputs, outputs, script descriptions
 2. **Tasks** - Concrete task definitions the brain parses directly
 
 ```markdown
 # Plan: <Name>
 
-## Goal
+## Objective
 
 One or two sentences describing what this plan accomplishes.
 
@@ -144,6 +144,8 @@ Any additional guidance, constraints, or edge cases.
 
 Plans can include an optional `## Goal` section for dynamic, result-driven execution. Instead of expanding all foreach tasks upfront, the brain generates tasks incrementally and validates results against a target count.
 
+`## Goal` is a reserved heading for machine-parsed goal metadata. If a plan is not goal-driven, use `## Objective` for narrative intent and omit the `## Goal` section entirely.
+
 ### Goal Section Format
 
 ```markdown
@@ -153,6 +155,13 @@ Plans can include an optional `## Goal` section for dynamic, result-driven execu
 - **tolerance**: 2
 - **max_attempts_multiplier**: 5
 - **tracked_task**: score_person
+- **discovery_tasks**: build_strategy, execute_searches, identify_people
+- **discovery_round_multiplier**: 2
+- **discovery_prefill_divisor**: 4
+- **discovery_pool_multiplier**: 5
+- **discovery_pool_cap**: 100
+- **discovery_refill_divisor**: 4
+- **max_validations_per_cycle**: 3
 ```
 
 | Field | Description |
@@ -162,6 +171,13 @@ Plans can include an optional `## Goal` section for dynamic, result-driven execu
 | `tolerance` | ±N acceptable deviation. Draining starts at `target - tolerance` |
 | `max_attempts_multiplier` | Pool size and circuit breaker. `identify_people` generates `target * multiplier` candidates. Brain stops after that many total attempts |
 | `tracked_task` | Foreach task name whose completion triggers validation |
+| `discovery_tasks` | Optional ordered list of discovery task ids. If omitted, brain infers discovery chain from non-foreach ancestors of foreach tasks |
+| `discovery_round_multiplier` | Optional. Max rounds formula multiplier. Default `2` (`max_rounds = target * multiplier`) |
+| `discovery_prefill_divisor` | Optional. Initial prefill formula divisor. Default `4` (`prefill_rounds = ceil(target / divisor)`) |
+| `discovery_pool_multiplier` | Optional. Candidate buffer target multiplier. Default `1` (`pool_target = target * multiplier`) |
+| `discovery_pool_cap` | Optional. Hard cap for candidate buffer target. `0`/unset means no extra cap |
+| `discovery_refill_divisor` | Optional. Refill watermark divisor. Default `4` (`refill = ceil(pool_target / divisor)`) |
+| `max_validations_per_cycle` | Optional. Brain-side validation throttle per loop. Default `3` |
 
 ### Behavior
 
@@ -169,8 +185,8 @@ Plans can include an optional `## Goal` section for dynamic, result-driven execu
    - `fill_pool`: prioritize discovery rounds to build candidate buffer
    - `drain_pool`: pause discovery scheduling and focus on scoring/decisions
 2. Buffer/backpressure is automatic:
-   - `discovery_pool_target` defaults to `target`
-   - `discovery_refill_watermark` defaults to `ceil(target/4)`
+   - `discovery_pool_target` defaults to `target * discovery_pool_multiplier`
+   - `discovery_refill_watermark` defaults to `ceil(discovery_pool_target / discovery_refill_divisor)`
 3. Initial discovery prefill still bursts immediately (for example, 5 rounds when target=20 and divisor=4).
 4. Candidate pipelines are spawned from manifest items and validated only when `tracked_task` completes.
 5. Fast pre-filter on each tracked task completion (schema check + confidence threshold).
@@ -185,13 +201,14 @@ Plans can include an optional `## Goal` section for dynamic, result-driven execu
 - Discovery rounds are progress generation, not acceptance decisions.
 - `round=N` means discovery/query iterations have been scheduled/executed.
 - `accepted` / `rejected` only change after tracked candidate scoring tasks complete.
-- If `identify_people` fails, the round is treated as terminal for scheduling and the next round can still be scheduled.
+- The terminal discovery task is the last task in `discovery_tasks` (or inferred chain). If it fails, the round is still treated as terminal for scheduling.
 
 ### Failure Semantics (Important)
 
-- For discovery extraction steps (for example `identify_people`), invalid/non-JSON LLM output should fail the task (non-zero exit) after retries.
-- Do not silently continue with zero candidates on parse failure. Hard-fail + retry gives clearer signal and better recovery.
-- If you choose fallback behavior in a plan-specific script, document it explicitly in the plan.
+- Discovery script error semantics are plan/script-owned and must be explicit:
+  - strict mode: non-zero exit on parse/LLM failure to trigger retries
+  - permissive mode: write error artifact, continue round, let goal loop continue
+- Choose one behavior per script and document it in the plan notes.
 
 ### Tolerance
 
@@ -222,15 +239,13 @@ Standard (non-goal) plans are still better when:
 
 When writing discovery-heavy goal plans (prospecting/research):
 
-1. Keep discovery tasks separate from scoring tasks:
-   - discovery chain: `build_strategy -> execute_searches -> identify_people`
-   - scoring chain: `plan_searches -> scrape_person -> tracked_task`
+1. Keep discovery tasks separate from scoring tasks and declare discovery chain explicitly with `discovery_tasks` when needed.
 2. Set end conditions around outcomes, not query attempts:
    - target accepted
    - max rejected (circuit breaker)
    - round cap
 3. Ensure `tracked_task` is the true decision gate task (usually the final scoring stage).
-4. Prefer strict parse contracts for LLM-to-JSON boundaries.
+4. Pick strict vs permissive parse behavior deliberately and keep it consistent per plan.
 
 ---
 
