@@ -1121,6 +1121,8 @@ class GPUAgent:
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
         # Ensure script-style worker tasks can self-identify and self-route.
         env["WORKER_NAME"] = self.name
+        if self.model:
+            env["WORKER_MODEL"] = str(self.model)
         if self.port:
             env["WORKER_OLLAMA_URL"] = f"http://localhost:{self.port}"
 

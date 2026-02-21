@@ -247,6 +247,8 @@ def main():
     logger.info(f"Worker starting: task {task.get('task_id', '')[:8]} on {args.gpu_name}")
     # Export worker identity/runtime endpoint for script commands executed via shell.
     os.environ["WORKER_NAME"] = args.gpu_name
+    if model:
+        os.environ["WORKER_MODEL"] = str(model)
     if args.ollama_url:
         os.environ["WORKER_OLLAMA_URL"] = args.ollama_url
 
