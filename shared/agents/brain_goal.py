@@ -106,8 +106,15 @@ class BrainGoalMixin:
         goal["candidates_total"] = len(pool)
 
         if not pool:
-            self.logger.error(f"Goal batch {batch_id}: candidate pool is empty")
-            goal["status"] = "exhausted"
+            # Zero-candidate rounds are expected occasionally in discovery mode.
+            # Do not exhaust the batch here; keep goal active so discovery can
+            # schedule additional build_strategy/execute_searches/identify_people rounds.
+            self.logger.warning(f"Goal batch {batch_id}: candidate pool is empty for current round")
+            self.log_decision(
+                "GOAL_POOL_EMPTY",
+                f"Candidate pool empty for batch {batch_id}; continuing discovery",
+                {"batch_id": batch_id, "target": goal.get("target", 0)},
+            )
             self._save_brain_state()
             return
 
