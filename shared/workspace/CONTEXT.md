@@ -1,297 +1,44 @@
-# LLM Orchestration - Project Context
+# LLM Orchestration — Quick Reference
 
-**Read this first.** This document helps you quickly understand the project and find the right documentation.
+Multi-GPU LLM orchestration: Claude writes plans, Brain interprets and sequences, GPU agents execute tasks via workers.
 
----
+## Where To Find Things
 
-## What This Project Does (30 seconds)
+| Topic | Read This |
+|-------|-----------|
+| Architecture & hardware | `workspace/architecture.md` |
+| Plan format spec | `workspace/PLAN_FORMAT.md` |
+| Quick start (status, submit, monitor) | `workspace/quickstart.md` |
+| Brain loop & task handling | `workspace/brain-behavior.md` |
+| End-to-end workflow | `workspace/distributed_work_guide.md` |
+| Network setup (NFS, SSH, static IPs) | `workspace/NETWORK_SETUP.md` |
+| Hardware config & GPU assignment | `agents/config.json`, `agents/setup.py` |
+| Security rules | `core/RULES.md` |
+| Benchmarking guide | `workspace/llm_benchmark_testing_guide.md` |
+| Priority tasks (do first) | `workspace/implement/` |
+| Dashboard (web UI) | `scripts/dashboard.py` — run via `python scripts/dashboard.py`, access at http://localhost:8787 |
+| Cloud escalation artifact schema | `workspace/escalation_artifact_schema.md` |
+| Plan organization (shoulders & arms) | `plans/README_SHOULDERS_ARMS.md` |
 
-A **multi-GPU LLM orchestration system** that coordinates local language models across multiple NVIDIA GPUs. Uses a tiered intelligence hierarchy:
-
-- **Claude** (external) writes plans
-- **Brain** (larger model on dedicated GPU(s)) interprets plans, creates tasks, monitors GPU agents
-- **GPU Agents** (one per worker GPU) claim tasks, spawn worker subprocesses
-
-**Key concept:** Smart planning happens externally. Local models handle execution and monitoring.
-
----
-
-## Quick Orientation
-
-| Term | Meaning |
-|------|---------|
-| **Plan** | Markdown file defining a goal, scripts, and tasks with dependencies |
-| **Brain** | Coordinator agent on dedicated GPU(s) — see `config.json` for assignment |
-| **GPU Agent** | One per worker GPU — see `config.json` for which GPUs are workers |
-| **Worker** | Short-lived subprocess spawned by GPU agent - executes one task and exits |
-| **Dependency** | Task A depends_on Task B means B must complete before A runs |
-| **Batch** | One execution run of a plan |
-| **Escalation** | Problems flow upward: GPU Agent -> Brain -> Claude (see [architecture.md](architecture.md#error-handling--escalation)) |
-
----
-
-## Documentation Map
-
-All docs live in `shared/workspace/` (on the shared drive, synced to git).
-
-### Start Here
-
-| Doc | Purpose |
-|-----|---------|
-| **[quickstart.md](quickstart.md)** | Check status, start system, submit plans |
-| **[architecture.md](architecture.md)** | High-level system overview, hardware, file structure |
-| **[PLAN_FORMAT.md](PLAN_FORMAT.md)** | How to write plans (the authoritative format) |
-
-### Implementation Details
-
-| Doc | Purpose |
-|-----|---------|
-| [brain-behavior.md](brain-behavior.md) | Brain loop, task handling, phase management, failure recovery |
-| [distributed_work_guide.md](distributed_work_guide.md) | End-to-end workflow from planning to execution |
-
-### Reference
-
-| Doc | Purpose |
-|-----|---------|
-| [llm_benchmark_testing_guide.md](llm_benchmark_testing_guide.md) | How to benchmark GPU performance |
-| [systems_analyst_questionnaire.md](systems_analyst_questionnaire.md) | Hardware and config review checklist |
-| [future/resource_manager_design.md](future/resource_manager_design.md) | Future: GPU state management, LLM/script switching |
-
-### Security
-
-| Doc | Purpose |
-|-----|---------|
-| `shared/core/SYSTEM.md` | Agent system prompt (root-owned, read-only) |
-| `shared/core/RULES.md` | Immutable rules that agents cannot override |
-| `shared/core/ESCALATION_POLICY.md` | Worker -> Brain -> Cloud -> Human escalation chain |
-
----
-
-## Hardware
-
-Hardware is auto-discovered by `setup.py` and stored in `config.json`. Run `python setup.py` on any rig to scan GPUs, suggest brain/worker assignment, and generate the config.
-
-- `config.json` defines: brain GPU(s), worker GPUs, models, ports, resource limits
-- Context defaults are role-scoped via `brain_context_tokens` and `worker_context_tokens`
-- Worker liveness during long tasks is controlled by `timeouts.task_heartbeat_interval_seconds`
-- `config.template.json` shows the schema
-- Models are stored on the shared drive and loaded into Ollama on demand
-
----
-
-## File Structure
+## File Layout
 
 ```
-llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
-├── .claude/settings.json          # Claude Code permissions
-├── .gitignore                     # Selective sync rules
-├── requirements.txt               # Python dependencies
-│
-├── scripts/                       # RPi-only utilities
-│   ├── submit.py                  # Submit a plan for execution
-│   ├── status.py                  # Check system status
-│   ├── watch.py                   # Live monitoring
-│   ├── gpu-monitor.py             # GPU benchmarking tools
-│   ├── chat                       # Chat launcher (chat brain / chat worker)
-│   ├── chat-brain                 # Chat with brain model via SSH
-│   └── chat-worker                # Chat with worker model via SSH
-│
-└── shared/                        # External drive, bind-mounted here
-    │                              # NFS-shared to GPU rig via ethernet
-    │
-    ├── agents/                    # Agent code (GPU rig runs these)
-    │   ├── hardware.py            # Hardware discovery (GPU/Ollama/system scanning)
-    │   ├── setup.py               # Interactive config generator (run once per rig)
-    │   ├── startup.py             # Non-interactive launcher (run on every boot)
-    │   ├── brain.py               # Brain coordinator
-    │   ├── gpu.py                 # GPU agent (one per physical GPU)
-    │   ├── worker.py              # Worker subprocess (spawned by gpu.py)
-    │   ├── executor.py            # Permission-aware command executor
-    │   ├── launch.py              # Launcher script (deprecated, use startup.py)
-    │   ├── config.json            # GPU rig config (generated by setup.py, not in git)
-    │   ├── config.template.json   # Config schema reference
-    │   └── permissions/           # Agent permission rules (not in git)
-    │       ├── brain.json
-    │       └── worker.json
-    │
-    ├── core/                      # PROTECTED - root-owned, read-only
-    │   ├── SYSTEM.md              # Agent system prompt (read on startup)
-    │   ├── RULES.md               # Immutable rules (cannot be overridden)
-    │   └── ESCALATION_POLICY.md   # Worker -> Brain -> Cloud -> Human escalation
-    │
-    ├── workspace/                 # Agent-writable working area
-    │   ├── CONTEXT.md             # Project context (this file)
-    │   ├── architecture.md        # System architecture
-    │   ├── implement/             # Priority tasks (do these first)
-    │   ├── future/                # Ideas parking lot
-    │   ├── human/                 # Stuck items needing human review
-    │   └── archive/               # Completed work and historical lessons
-    │
-    ├── plans/                     # Plan folders
-    │   ├── PLAN_FORMAT.md         # Plan specification
-    │   └── <plan_name>/
-    │       ├── plan.md
-    │       ├── scripts/
-    │       └── history/           # Batch execution runs
-    │
-    ├── tasks/                     # Task queue (runtime, not in git)
-    │   ├── queue/                 # Ready for workers
-    │   ├── processing/
-    │   ├── complete/
-    │   └── failed/
-    │
-    ├── brain/                     # Brain state (runtime, not in git)
-    │   ├── state.json
-    │   └── private_tasks/
-    │
-    ├── gpus/                      # GPU agent heartbeats (runtime)
-    ├── signals/                   # GPU agent control signals (runtime)
-    └── logs/                      # Logs (synced to git for backup)
+shared/
+├── agents/        # brain.py, gpu.py, worker.py, executor.py, setup.py, startup.py
+├── core/          # PROTECTED (root-owned) — system prompt, rules, escalation
+├── workspace/     # Docs, implement/, future/, human/, archive/
+├── plans/         # Plan folders (each its own git repo, gitignored from main)
+├── tasks/         # Runtime queue (queue/, processing/, complete/, failed/)
+├── brain/         # Brain state, private_tasks/, escalations/ (runtime)
+├── gpus/          # GPU heartbeats (runtime)
+├── signals/       # GPU control signals (runtime)
+└── logs/          # Logs
 ```
 
-**Key insight:** The `shared/` folder lives on an external drive mounted on the RPi, bind-mounted into the git repo, and NFS-shared to the GPU rig over direct ethernet. See [NETWORK_SETUP.md](NETWORK_SETUP.md) for specifics.
+## Key Principles
 
----
-
-## Quick Start
-
-See **[quickstart.md](quickstart.md)** for complete instructions.
-
-### Submit a Plan
-
-```bash
-python scripts/submit.py <plan_name> \
-  --config '{"INPUT_VAR": "/path/to/input"}'
-```
-
-### Monitor Execution
-
-```bash
-tail -f shared/logs/brain_decisions.log
-```
-
-### Check Status
-
-```bash
-python scripts/status.py
-```
-
----
-
-## Key Concepts
-
-### Plans
-
-Plans are markdown files that tell the brain what to do. They contain:
-- Goal description
-- Available scripts with run commands
-- Tasks with explicit dependencies
-
-See [PLAN_FORMAT.md](PLAN_FORMAT.md).
-
-### Dependency-Based Task Release
-
-Tasks specify what they depend on:
-
-```markdown
-### aggregate
-- **executor**: worker
-- **task_class**: cpu
-- **command**: `python scripts/combine.py`
-- **depends_on**: process
-```
-
-The brain releases tasks when all their dependencies complete. This is a **Gantt-chart style** model - flexible ordering based on actual dependencies, not rigid phases.
-
-### Private/Public Task Lists
-
-- Brain holds all tasks in a private list (`shared/brain/private_tasks/`)
-- Releases to public queue when dependencies are met
-- Workers only see the public queue (`shared/tasks/queue/`)
-
-This keeps workers simple while brain controls all sequencing.
-
----
-
-## What to Read Next
-
-- **Building a new plan?** → [PLAN_FORMAT.md](PLAN_FORMAT.md)
-- **Understanding the system?** → [architecture.md](architecture.md)
-- **Debugging brain behavior?** → [brain-behavior.md](brain-behavior.md)
-- **Following work end-to-end?** → [distributed_work_guide.md](distributed_work_guide.md)
-- **Security model?** → See `shared/core/` (root-owned, read-only agent instructions)
-
----
-
-## Design Principles
-
-**No Backwards Compatibility.** This project maintains ONE clean way of doing things. When the design changes:
-- Update the code to the new design
-- Update all documentation
-- Delete old patterns, don't keep fallbacks "just in case"
-- If old plans break, fix them or delete them
-
-Why: Backwards compatibility creates technical debt, confusing code paths, and documentation that lies. A small project like this should stay clean and simple.
-
-**Fail Fast, Fix Smart.** When something is wrong (like a missing required field), fail immediately with a clear error. The brain can then attempt to fix the issue rather than silently guessing.
-
----
-
-## Current Status
-
-**Infrastructure:**
-- RPi as control plane (internet, Claude Code, plan submission)
-- GPU rig (air-gapped, runs brain + workers) — see [NETWORK_SETUP.md](NETWORK_SETUP.md)
-- External drive on RPi, bind-mounted into repo, NFS-shared to GPU rig
-- Bidirectional SSH between Pi and GPU rig
-- Ollama instances per `config.json` (one per GPU group)
-- Python venv with dependencies
-- GitHub CLI for version control
-
-**Agent System:**
-- Brain + GPU agent architecture in `shared/agents/`
-- GPU agent model: one agent per physical GPU, spawns worker subprocesses
-- Task queue with filesystem state
-- Dependency-based task release (private/public lists)
-- GPU agent self-awareness (temp, VRAM, power monitoring via nvidia-smi)
-- Resource-aware task claiming (GPU agents back off when constrained)
-- Hot/Cold state management (LLM loaded vs empty GPU)
-- VRAM budget system (GPU agent tracks internally, limits concurrent workers)
-- Definition error detection and auto-fix
-- Independent component logging (GPU_LOG_LEVEL, EXECUTOR_LOG_LEVEL, WORKER_LOG_LEVEL, BRAIN_LOG_LEVEL)
-- Task memory system (attempts tracking, retry limits)
-- Dual-cycle GPU agent loop (30s external heartbeat + 5s internal poll)
-- Signal system: brain sends stop/abort/kill signals to GPU agents
-- Stuck task detection with 3-level escalation (abort -> force_kill -> manual)
-- Foreach task expansion (template tasks expand into N tasks from manifest)
-- Auto batch summary task (depends on all other tasks)
-- Variable substitution in commands ({BATCH_ID}, {PLAN_PATH}, {BATCH_PATH})
-- Launch singleton lock and model preload detection
-- Brain singleton lock (`brain_agent.lock`) prevents multiple brain instances from running concurrently
-- Generic hardware discovery (`hardware.py`): scans GPUs, Ollama models, system resources
-- Interactive setup (`setup.py`): auto-suggests brain/worker GPU assignment, writes config.json
-- Non-interactive startup (`startup.py`): hardware verification, degraded mode (missing GPU tolerance)
-- Smart GPU assignment: cpu_only / single_gpu / minimal / standard modes, brain GPU pairing
-- Dynamic VRAM: per-GPU vram_mb from config with nvidia-smi fallback (no more hardcoded constants)
-- Worker mode preference: hot (preload LLMs) or cold (empty GPUs for compute)
-- Local web dashboard (`scripts/dashboard.py`) with:
-  - Active batch/task lane visibility (queue/processing/private/complete/failed)
-  - Brain GPU + worker heartbeat/temperature/utilization views
-  - Dependency chain table with collapse + pagination
-  - Controls page for kill plan, return default, and start plan operations
-- Task archive utility (`scripts/archive_tasks.py`) to move historical complete/failed files into batch folders
-
-**Security:**
-- Protected core/ directory (root-owned, chmod 644) for agent system prompts and rules
-- Executor permission system blocks writes to core/, .ssh, passwords, credentials
-- Bash blocked patterns prevent chmod/chown on core, sudo, fork bombs, etc.
-- Git pre-commit hook rejects commits to shared/core/ (only --no-verify from terminal)
-- Workspace/ as agent-writable area with implement/future/human/archive folders
-- HUMAN escalation pattern: agents write HUMAN_{topic}.md and stop when stuck
-
-**Planned:**
-- Cloud gateway transport/automation enhancements (escalation artifacts are already active)
-
----
-
-*Last Updated: February 2026*
+- No backwards compatibility — one clean way, delete old patterns
+- Fail fast with clear errors
+- shared/ lives on external drive, bind-mounted into repo, NFS-shared to GPU rig
+- Plans are independent git repos (shared/plans/ is gitignored from main repo)
+- Priority tasks go in workspace/implement/, completed work archived to workspace/archive/
