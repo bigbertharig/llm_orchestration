@@ -1814,8 +1814,8 @@ Required JSON format:
                 "max_validations_per_cycle": 3,
                 "discovery_round_cap": goal_round_cap,
                 "discovery_rounds_generated": 1,
-                "discovery_in_progress": False,
-                "discovery_active_round": 0,
+                "discovery_in_progress": True,
+                "discovery_active_round": 1,
                 "discovery_templates": goal_discovery_templates,
                 "processed_identify_task_ids": [],
             }
