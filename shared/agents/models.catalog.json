@@ -18,14 +18,6 @@
       "placement": "split_gpu",
       "split_groups": [
         {
-          "id": "pair_1_3",
-          "members": [
-            "gpu-1",
-            "gpu-3"
-          ],
-          "port": 11440
-        },
-        {
           "id": "pair_4_5",
           "members": [
             "gpu-4",
@@ -43,14 +35,6 @@
       "tier": 2,
       "placement": "split_gpu",
       "split_groups": [
-        {
-          "id": "pair_1_3",
-          "members": [
-            "gpu-1",
-            "gpu-3"
-          ],
-          "port": 11440
-        },
         {
           "id": "pair_4_5",
           "members": [
