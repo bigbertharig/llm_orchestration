@@ -37,6 +37,33 @@
       "tags": [
         "higher_reasoning"
       ]
+    },
+    {
+      "id": "qwen2.5-coder:14b",
+      "tier": 2,
+      "placement": "split_gpu",
+      "split_groups": [
+        {
+          "id": "pair_1_3",
+          "members": [
+            "gpu-1",
+            "gpu-3"
+          ],
+          "port": 11440
+        },
+        {
+          "id": "pair_4_5",
+          "members": [
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11441
+        }
+      ],
+      "tags": [
+        "code_review",
+        "higher_reasoning"
+      ]
     }
   ]
 }
