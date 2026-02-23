@@ -1002,6 +1002,9 @@ class Brain(BrainGoalMixin):
                 task_class=template_task.get("task_class"),
                 vram_estimate_mb=template_task.get("vram_estimate_mb"),
                 vram_estimate_source=template_task.get("vram_estimate_source"),
+                llm_min_tier=template_task.get("llm_min_tier"),
+                llm_model=template_task.get("llm_model"),
+                llm_placement=template_task.get("llm_placement"),
                 batch_priority=template_task.get("batch_priority", "normal"),
                 preemptible=template_task.get("preemptible", True),
             )
