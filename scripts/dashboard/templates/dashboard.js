@@ -803,11 +803,43 @@ function renderWorkerTabs(workers) {
 
 function renderWorkerTable(workers, type) {
   if (type === 'gpu') {
-    const vram = (w) => (w.vram_used_mb !== null && w.vram_total_mb !== null)
-      ? `${w.vram_used_mb}/${w.vram_total_mb}` : '-';
+    const splitGroupTotals = {};
+    workers.forEach((w) => {
+      const gid = String(w.runtime_group_id || '').trim();
+      const placement = String(w.runtime_placement || '').trim();
+      if (!gid || placement !== 'split_gpu') return;
+      if (!splitGroupTotals[gid]) {
+        splitGroupTotals[gid] = { used: 0, total: 0, members: 0 };
+      }
+      if (w.vram_used_mb !== null && w.vram_used_mb !== undefined) {
+        splitGroupTotals[gid].used += Number(w.vram_used_mb) || 0;
+      }
+      if (w.vram_total_mb !== null && w.vram_total_mb !== undefined) {
+        splitGroupTotals[gid].total += Number(w.vram_total_mb) || 0;
+      }
+      splitGroupTotals[gid].members += 1;
+    });
+    const stateLabel = (w) => {
+      const placement = String(w.runtime_placement || '').trim();
+      const gid = String(w.runtime_group_id || '').trim();
+      if (placement === 'split_gpu' && gid) {
+        return `LINKED (${gid})`;
+      }
+      return fmt(w.state);
+    };
+    const vram = (w) => {
+      const self = (w.vram_used_mb !== null && w.vram_total_mb !== null)
+        ? `${w.vram_used_mb}/${w.vram_total_mb}` : '-';
+      const gid = String(w.runtime_group_id || '').trim();
+      const placement = String(w.runtime_placement || '').trim();
+      if (!gid || placement !== 'split_gpu') return self;
+      const grp = splitGroupTotals[gid];
+      if (!grp || grp.members < 2 || grp.total <= 0) return self;
+      return `${self} (grp ${grp.used}/${grp.total})`;
+    };
     const rows = workers.map(w => [
       fmt(w.name),
-      fmt(w.state),
+      stateLabel(w),
       fmt(w.host),
       `<span class="${tempClass(w.cpu_temp_c)}">${fmt(w.cpu_temp_c)}</span>`,
       fmt(w.gpu_temp_c),
