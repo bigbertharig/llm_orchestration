@@ -3,6 +3,35 @@
 import re
 from typing import Any
 
+# Pattern for round-numbered stages like build_strategy_round_0002
+ROUND_SUFFIX_RE = re.compile(r"^(.+?)_round_\d+$")
+
+
+def collapse_stage_name(name: str) -> str:
+    """Collapse round-numbered stage names to their base form.
+
+    Examples:
+        build_strategy -> build_strategy
+        build_strategy_round_0002 -> build_strategy
+        execute_searches_round_0005 -> execute_searches
+    """
+    m = ROUND_SUFFIX_RE.match(name)
+    if m:
+        return m.group(1)
+    return name
+
+
+def collapse_stage_order(stage_order: list[str]) -> list[str]:
+    """Collapse a stage order list to unique base stages, preserving order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for stage in stage_order:
+        base = collapse_stage_name(stage)
+        if base not in seen:
+            seen.add(base)
+            result.append(base)
+    return result
+
 
 def extract_stage_item(name: str | None) -> tuple[str | None, str | None]:
     """Extract stage and item from task name like 'stage_contact_0019'."""
@@ -143,9 +172,21 @@ def build_batch_chain(tasks_by_lane: dict[str, list[dict[str, Any]]], batch_id: 
             "stages": {s: item_stage_status[item].get(s, "-") for s in stage_order},
         })
 
+    # Collapsed order for chain header display (removes _round_NNNN noise)
+    collapsed_order = collapse_stage_order(stage_order)
+
+    # Build collapsed stage types from first matching full stage
+    collapsed_types: dict[str, str] = {}
+    for s in stage_order:
+        base = collapse_stage_name(s)
+        if base not in collapsed_types:
+            collapsed_types[base] = stage_types.get(s, "-")
+
     return {
         "stage_order": stage_order,
         "stage_types": {s: stage_types.get(s, "-") for s in stage_order},
+        "collapsed_order": collapsed_order,
+        "collapsed_types": collapsed_types,
         "rows": rows,
         "row_count": len(items),
     }

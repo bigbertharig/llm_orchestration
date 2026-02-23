@@ -29,6 +29,18 @@ def load_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def save_json(path: Path, data: dict[str, Any]) -> bool:
+    """Save JSON file atomically, returning True on success."""
+    try:
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, default=str)
+        tmp.replace(path)
+        return True
+    except Exception:
+        return False
+
+
 def load_config(config_path: Path) -> dict[str, Any]:
     """Load configuration JSON file."""
     with open(config_path, "r", encoding="utf-8") as f:

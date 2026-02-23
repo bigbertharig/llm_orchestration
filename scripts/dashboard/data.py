@@ -13,6 +13,7 @@ from .utils import (
     heartbeat_age_seconds,
     iter_task_files,
     load_json,
+    save_json,
 )
 from .workers import load_brain_heartbeat, load_brain_state, load_gpu_telemetry, load_worker_rows
 
@@ -164,6 +165,76 @@ def _resolve_batch_plan(shared_path: Path, batch_id: str, active_batches: dict[s
     if found:
         return str(found[0] or "")
     return ""
+
+
+def _persist_batch_meta(shared_path: Path, batch_id: str, meta: dict[str, Any]) -> None:
+    """Persist batch metadata to batch directory for later retrieval."""
+    if not meta:
+        return
+    found = find_batch_dir(shared_path, batch_id)
+    if not found:
+        return
+    _, batch_dir = found
+    meta_path = batch_dir / "batch_meta.json"
+    # Only write if file doesn't exist or if we have new/more complete data
+    existing = load_json(meta_path) if meta_path.exists() else None
+    should_write = (
+        not existing
+        or meta.get("started_at") and not existing.get("started_at")
+        or meta.get("goal") and not existing.get("goal")
+    )
+    if should_write:
+        save_json(meta_path, {
+            "batch_id": batch_id,
+            "plan": meta.get("plan"),
+            "started_at": meta.get("started_at"),
+            "total_tasks": meta.get("total_tasks"),
+            "priority": meta.get("priority", "normal"),
+            "preemptible": meta.get("preemptible", True),
+            "goal": meta.get("goal"),
+            "persisted_at": datetime.now().isoformat(),
+        })
+
+
+def _load_batch_meta(shared_path: Path, batch_id: str) -> dict[str, Any] | None:
+    """Load persisted batch metadata from batch directory.
+
+    Merges data from batch_meta.json (saved while running) and
+    execution_stats.json (written at completion) for complete picture.
+    """
+    found = find_batch_dir(shared_path, batch_id)
+    if not found:
+        return None
+    _, batch_dir = found
+
+    # Load base metadata saved during execution
+    meta_path = batch_dir / "batch_meta.json"
+    meta = load_json(meta_path) or {}
+
+    # Merge in final outcome from execution_stats if available
+    stats_path = batch_dir / "execution_stats.json"
+    stats = load_json(stats_path)
+    if stats:
+        # Update goal with final outcome data
+        if "goal" not in meta:
+            meta["goal"] = {}
+        outcome = stats.get("outcome", {})
+        if outcome:
+            meta["goal"]["target"] = outcome.get("target", meta.get("goal", {}).get("target", 0))
+            meta["goal"]["accepted"] = outcome.get("accepted", 0)
+            meta["goal"]["rejected"] = outcome.get("rejected", 0)
+            meta["goal"]["status"] = outcome.get("status", "completed")
+        # Also capture overall stats
+        overall = stats.get("overall", {})
+        if overall:
+            meta["total_tasks"] = overall.get("total_tasks", meta.get("total_tasks"))
+        # Use started_at/completed_at from stats if available
+        if stats.get("started_at"):
+            meta["started_at"] = stats["started_at"]
+        if stats.get("completed_at"):
+            meta["completed_at"] = stats["completed_at"]
+
+    return meta if meta else None
 
 
 def summarize(
@@ -324,7 +395,7 @@ def summarize(
         })
 
     # Keep recent batch-fatal/completion events visible even if batch cards collapsed.
-    alerts.extend(collect_recent_batch_failure_alerts(lanes["failed"]))
+    alerts.extend(collect_recent_batch_failure_alerts(lanes))
     alerts.extend(collect_recent_batch_completion_alerts(lanes))
 
     batches: dict[str, Any] = {}
@@ -351,12 +422,24 @@ def summarize(
         if not has_live_work and not (batch_id in selected_set and has_terminal_tasks):
             # Hide stale/idle leftovers that linger in brain state unless selected.
             continue
+
+        # For active batches, persist metadata for later retrieval
+        if meta and batch_id in active_batch_ids:
+            _persist_batch_meta(shared_path, batch_id, meta)
+
+        # For non-active batches with no live metadata, try loading persisted metadata
+        if not meta and batch_id not in active_batch_ids:
+            persisted = _load_batch_meta(shared_path, batch_id)
+            if persisted:
+                meta = persisted
+
         plan_name = str(meta.get("plan") or "").strip() if isinstance(meta, dict) else ""
         if not plan_name:
             plan_name = _resolve_batch_plan(shared_path, batch_id, active_batches)
         batch_info: dict[str, Any] = {
             "plan": plan_name or None,
             "started_at": meta.get("started_at") if isinstance(meta, dict) else None,
+            "completed_at": meta.get("completed_at") if isinstance(meta, dict) else None,
             "total_hint": meta.get("total_tasks") if isinstance(meta, dict) else None,
             "counts": counts,
             "priority": meta.get("priority", "normal") if isinstance(meta, dict) else "normal",

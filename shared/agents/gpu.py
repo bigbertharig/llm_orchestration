@@ -19,6 +19,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 import signal
@@ -42,6 +43,8 @@ logging.basicConfig(
 # Constants
 # =============================================================================
 VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'meta']
+DEFAULT_LLM_MIN_TIER = 1
+SPLIT_META_TIMEOUT_SECONDS = 300
 
 # Timing
 EXTERNAL_HEARTBEAT_INTERVAL = 30  # seconds - filesystem heartbeat to brain
@@ -86,6 +89,9 @@ class GPUAgent:
         if not shared_path.is_absolute():
             shared_path = (config_dir / shared_path).resolve()
         self.shared_path = shared_path
+        self.model_catalog = self._load_model_catalog(config_dir)
+        self.model_tier_by_id = self._build_model_tier_map(self.model_catalog)
+        self.model_meta_by_id = self._build_model_meta_map(self.model_catalog)
 
         # Task queue paths
         self.queue_path = self.shared_path / "tasks" / "queue"
@@ -101,6 +107,8 @@ class GPUAgent:
         # Signals
         self.signals_path = self.shared_path / "signals"
         self.signals_path.mkdir(parents=True, exist_ok=True)
+        self.split_state_dir = self.signals_path / "split_llm"
+        self.split_state_dir.mkdir(parents=True, exist_ok=True)
 
         # Logs
         self.log_path = self.shared_path / "logs"
@@ -109,6 +117,7 @@ class GPUAgent:
 
         # Ollama config
         self.model = self.gpu_config.get("model")
+        self.model_tier = int(self.model_tier_by_id.get(self.model, DEFAULT_LLM_MIN_TIER))
         self.port = self.gpu_config.get("port")
         self.api_url = f"http://localhost:{self.port}/api/generate" if self.port else None
         self.worker_keep_alive = str(self.config.get("worker_keep_alive", "-1"))
@@ -130,6 +139,14 @@ class GPUAgent:
         self.running = True
         self.state = "cold"       # "cold" or "hot"
         self.model_loaded = False
+        self.loaded_model: Optional[str] = None
+        self.loaded_tier: int = 0
+        self.runtime_placement: str = "single_gpu"
+        self.runtime_group_id: Optional[str] = None
+        self.runtime_port: Optional[int] = self.port
+        self.runtime_ollama_url: Optional[str] = f"http://localhost:{self.port}" if self.port else None
+        self.split_runtime_owner: bool = False
+        self.split_runtime_process: Optional[subprocess.Popen] = None
         self.ollama_process: Optional[subprocess.Popen] = None
 
         # Worker tracking
@@ -197,6 +214,88 @@ class GPUAgent:
             sys.exit(1)
         with open(config_path) as f:
             return json.load(f)
+
+    def _load_model_catalog(self, config_dir: Path) -> Dict[str, Any]:
+        raw_path = str(self.config.get("model_catalog_path", "models.catalog.json")).strip()
+        catalog_path = Path(raw_path)
+        if not catalog_path.is_absolute():
+            catalog_path = (config_dir / catalog_path).resolve()
+        if not catalog_path.exists():
+            print(f"ERROR: Model catalog not found: {catalog_path}")
+            print("  Set model_catalog_path in config.json or create models.catalog.json.")
+            sys.exit(1)
+        try:
+            with open(catalog_path, "r", encoding="utf-8") as f:
+                catalog = json.load(f)
+        except Exception as exc:
+            print(f"ERROR: Failed to load model catalog {catalog_path}: {exc}")
+            sys.exit(1)
+        models = catalog.get("models", [])
+        if not isinstance(models, list) or not models:
+            print(f"ERROR: Model catalog {catalog_path} must contain a non-empty 'models' list.")
+            sys.exit(1)
+        return catalog
+
+    def _build_model_tier_map(self, catalog: Dict[str, Any]) -> Dict[str, int]:
+        tier_map: Dict[str, int] = {}
+        for item in catalog.get("models", []):
+            model_id = str(item.get("id", "")).strip()
+            tier = item.get("tier")
+            if not model_id:
+                continue
+            if not isinstance(tier, int) or tier < 1:
+                continue
+            tier_map[model_id] = int(tier)
+        return tier_map
+
+    def _build_model_meta_map(self, catalog: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        model_meta: Dict[str, Dict[str, Any]] = {}
+        for item in catalog.get("models", []):
+            model_id = str(item.get("id", "")).strip()
+            if not model_id:
+                continue
+            placement = str(item.get("placement", "single_gpu") or "single_gpu").strip()
+            groups: List[Dict[str, Any]] = []
+            split_groups = item.get("split_groups", [])
+            if isinstance(split_groups, list):
+                for g in split_groups:
+                    if not isinstance(g, dict):
+                        continue
+                    members = [str(m).strip() for m in g.get("members", []) if str(m).strip()]
+                    if len(members) < 2:
+                        continue
+                    gid = str(g.get("id") or f"group_{'_'.join(sorted(members))}").strip()
+                    try:
+                        port = int(g.get("port"))
+                    except Exception:
+                        port = None
+                    groups.append({"id": gid, "members": members, "port": port})
+
+            # Backward-compatible pair schema: allowed_pairs:[["gpu-1","gpu-3"], ...]
+            if not groups and isinstance(item.get("allowed_pairs"), list):
+                for idx, pair in enumerate(item.get("allowed_pairs", []), start=1):
+                    if not isinstance(pair, list):
+                        continue
+                    members = [str(m).strip() for m in pair if str(m).strip()]
+                    if len(members) < 2:
+                        continue
+                    gid = f"group_{'_'.join(sorted(members))}"
+                    groups.append({"id": gid, "members": members, "port": None})
+
+            model_meta[model_id] = {
+                "placement": placement,
+                "split_groups": groups,
+                "tier": int(self.model_tier_by_id.get(model_id, DEFAULT_LLM_MIN_TIER)),
+            }
+        return model_meta
+
+    def _split_reservation_path(self, group_id: str) -> Path:
+        safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(group_id))
+        return self.split_state_dir / f"{safe}.json"
+
+    def _is_group_member(self, group: Dict[str, Any]) -> bool:
+        members = [str(m).strip() for m in group.get("members", []) if str(m).strip()]
+        return self.name in members
 
     def _get_gpu_config(self, gpu_name: str) -> dict:
         for gpu in self.config["gpus"]:
@@ -362,6 +461,12 @@ class GPUAgent:
                 self.ollama_healthy = True
                 # Model was lost in restart
                 self.model_loaded = False
+                self.loaded_model = None
+                self.loaded_tier = 0
+                self.runtime_placement = "single_gpu"
+                self.runtime_group_id = None
+                self.runtime_port = self.port
+                self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
                 self.state = "cold"
                 self.logger.info("Ollama restarted successfully after health check failures")
             except Exception as e:
@@ -376,8 +481,8 @@ class GPUAgent:
 
         return health
 
-    def load_model(self):
-        """Load LLM model into VRAM. Transitions GPU to Hot state."""
+    def load_model(self, model_id: Optional[str] = None):
+        """Load an LLM model into VRAM on this worker's dedicated Ollama runtime."""
         if self.model_loaded:
             return
 
@@ -385,7 +490,12 @@ class GPUAgent:
             self.logger.warning("Cannot load model - no Ollama port configured")
             return
 
-        self.logger.info(f"Loading model {self.model} into VRAM...")
+        target_model = str(model_id or self.model or "").strip()
+        if not target_model:
+            self.logger.warning("Cannot load model - target model missing")
+            return
+
+        self.logger.info(f"Loading model {target_model} into VRAM...")
         start_time = time.time()
 
         try:
@@ -393,7 +503,7 @@ class GPUAgent:
             response = requests.post(
                 self.api_url,
                 json={
-                    "model": self.model,
+                    "model": target_model,
                     "prompt": "Hello",
                     "stream": False,
                     "keep_alive": self.worker_keep_alive,
@@ -407,20 +517,31 @@ class GPUAgent:
             response.raise_for_status()
 
             # Readiness gate: only mark hot once generation is reliably responsive.
-            if not self._wait_for_model_ready(max_wait_seconds=90):
+            if not self._wait_for_model_ready(model_id=target_model, max_wait_seconds=90):
                 raise RuntimeError("model readiness probe timed out after load")
 
             elapsed = int(time.time() - start_time)
             self.model_loaded = True
+            self.loaded_model = target_model
+            self.loaded_tier = int(self.model_tier_by_id.get(target_model, self.model_tier))
+            self.runtime_placement = str(
+                self.model_meta_by_id.get(target_model, {}).get("placement", "single_gpu")
+            )
+            if self.runtime_placement != "split_gpu":
+                self.runtime_group_id = None
+            self.runtime_port = self.port
+            self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
             self.state = "hot"
             self.logger.info(f"Model loaded in {elapsed}s - GPU is now HOT")
 
         except Exception as e:
             self.model_loaded = False
+            self.loaded_model = None
+            self.loaded_tier = 0
             self.state = "cold"
             self.logger.error(f"Failed to load model: {e}")
 
-    def _wait_for_model_ready(self, max_wait_seconds: int = 90) -> bool:
+    def _wait_for_model_ready(self, model_id: str, max_wait_seconds: int = 90) -> bool:
         """
         Probe Ollama until model is actually ready to serve.
         Prevents immediate LLM task claims while model is still warming.
@@ -436,7 +557,7 @@ class GPUAgent:
                 r = requests.post(
                     self.api_url,
                     json={
-                        "model": self.model,
+                        "model": model_id,
                         "prompt": "READY?",
                         "stream": False,
                         "keep_alive": self.worker_keep_alive,
@@ -460,7 +581,7 @@ class GPUAgent:
         self.logger.warning(f"Model readiness probe failed/timed out: {last_error}")
         return False
 
-    def _wait_for_model_unloaded(self, max_wait_seconds: int = 30) -> bool:
+    def _wait_for_model_unloaded(self, model_id: str, max_wait_seconds: int = 30) -> bool:
         """Poll Ollama until this model no longer appears as loaded."""
         if not self.port:
             return True
@@ -475,7 +596,7 @@ class GPUAgent:
                 if r.status_code == 200:
                     models = r.json().get("models", [])
                     loaded_names = [m.get("name", "") for m in models]
-                    if self.model not in loaded_names:
+                    if model_id not in loaded_names:
                         return True
                 else:
                     last_error = f"status={r.status_code}"
@@ -486,7 +607,7 @@ class GPUAgent:
         self.logger.warning(f"Model unload verify timed out: {last_error}")
         return False
 
-    def unload_model(self):
+    def unload_model(self, model_id: Optional[str] = None):
         """Unload LLM model from VRAM. Transitions GPU to Cold state.
 
         Retries up to 3 times with 5s backoff on failure, since a failed unload
@@ -499,20 +620,31 @@ class GPUAgent:
         if not self.api_url:
             return
 
-        self.logger.info(f"Unloading model {self.model} to free VRAM...")
+        target_model = str(model_id or self.loaded_model or self.model or "").strip()
+        if not target_model:
+            self.logger.warning("Cannot unload model - target model missing")
+            return
+
+        self.logger.info(f"Unloading model {target_model} to free VRAM...")
 
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
                 response = requests.post(
                     self.api_url,
-                    json={"model": self.model, "prompt": "", "keep_alive": 0},
+                    json={"model": target_model, "prompt": "", "keep_alive": 0},
                     timeout=30
                 )
 
                 if response.status_code == 200:
-                    if self._wait_for_model_unloaded(max_wait_seconds=30):
+                    if self._wait_for_model_unloaded(model_id=target_model, max_wait_seconds=30):
                         self.model_loaded = False
+                        self.loaded_model = None
+                        self.loaded_tier = 0
+                        self.runtime_placement = "single_gpu"
+                        self.runtime_group_id = None
+                        self.runtime_port = self.port
+                        self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
                         self.state = "cold"
                         self.logger.info("Model unloaded - GPU is now COLD")
                         return
@@ -836,6 +968,200 @@ class GPUAgent:
         # explicitly transitions them to hot.
         return ['meta', 'script']
 
+    def _set_split_runtime_loaded(self, model_id: str, group: Dict[str, Any], as_owner: bool):
+        self.model_loaded = True
+        self.loaded_model = model_id
+        self.loaded_tier = int(self.model_tier_by_id.get(model_id, DEFAULT_LLM_MIN_TIER))
+        self.runtime_placement = "split_gpu"
+        self.runtime_group_id = str(group.get("id", "")).strip() or None
+        try:
+            self.runtime_port = int(group.get("port"))
+        except Exception:
+            self.runtime_port = None
+        self.runtime_ollama_url = (
+            f"http://localhost:{self.runtime_port}" if self.runtime_port else None
+        )
+        self.split_runtime_owner = bool(as_owner)
+        self.state = "hot"
+
+    def _clear_split_runtime_loaded(self):
+        self.model_loaded = False
+        self.loaded_model = None
+        self.loaded_tier = 0
+        self.runtime_placement = "single_gpu"
+        self.runtime_group_id = None
+        self.runtime_port = self.port
+        self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
+        self.split_runtime_owner = False
+        self.state = "cold"
+
+    def _start_split_runtime(self, group: Dict[str, Any], model_id: str) -> bool:
+        try:
+            members = [str(m).strip() for m in group.get("members", []) if str(m).strip()]
+            if len(members) < 2:
+                self.logger.error(f"split runtime start failed: invalid members {members}")
+                return False
+            try:
+                port = int(group.get("port"))
+            except Exception:
+                self.logger.error(f"split runtime start failed: missing/invalid port in {group}")
+                return False
+
+            member_gpu_ids = []
+            for member in members:
+                cfg = self._get_gpu_config(member)
+                member_gpu_ids.append(str(cfg["id"]))
+
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = ",".join(member_gpu_ids)
+            env["OLLAMA_HOST"] = f"127.0.0.1:{port}"
+
+            proc = subprocess.Popen(
+                ["ollama", "serve"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.split_runtime_process = proc
+
+            deadline = time.time() + 20
+            ready = False
+            while time.time() < deadline:
+                try:
+                    r = requests.get(f"http://127.0.0.1:{port}/api/tags", timeout=1.5)
+                    if r.status_code == 200:
+                        ready = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.4)
+            if not ready:
+                self.logger.error(f"split runtime failed to start on port {port}")
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                self.split_runtime_process = None
+                return False
+
+            # Warm/load the target model on shared runtime.
+            r = requests.post(
+                f"http://127.0.0.1:{port}/api/generate",
+                json={
+                    "model": model_id,
+                    "prompt": "Hello",
+                    "stream": False,
+                    "keep_alive": self.worker_keep_alive,
+                    "options": {
+                        "num_gpu": 999,
+                        "num_ctx": self.worker_num_ctx,
+                    }
+                },
+                timeout=600
+            )
+            r.raise_for_status()
+            return True
+        except Exception as exc:
+            self.logger.error(f"split runtime start failed: {exc}")
+            if self.split_runtime_process:
+                try:
+                    self.split_runtime_process.terminate()
+                except Exception:
+                    pass
+                self.split_runtime_process = None
+            return False
+
+    def _stop_split_runtime(self):
+        if self.split_runtime_process:
+            try:
+                self.split_runtime_process.terminate()
+                self.split_runtime_process.wait(timeout=5)
+            except Exception:
+                try:
+                    self.split_runtime_process.kill()
+                except Exception:
+                    pass
+            self.split_runtime_process = None
+        self.split_runtime_owner = False
+
+    def _join_split_reservation(self, reservation: Dict[str, Any], reservation_path: Path) -> Dict[str, Any]:
+        members = [str(m).strip() for m in reservation.get("members", []) if str(m).strip()]
+        if self.name not in members:
+            return reservation
+        joined = reservation.get("joined", {})
+        if not isinstance(joined, dict):
+            joined = {}
+        if not joined.get(self.name):
+            joined[self.name] = {
+                "joined_at": datetime.now().isoformat(),
+            }
+            reservation["joined"] = joined
+            reservation["updated_at"] = datetime.now().isoformat()
+            with open(reservation_path, "w", encoding="utf-8") as f:
+                json.dump(reservation, f, indent=2)
+            self.logger.info(
+                f"Joined split reservation {reservation.get('group_id')} "
+                f"for model {reservation.get('target_model')}"
+            )
+        return reservation
+
+    def _service_split_reservations(self):
+        """Background sync so non-claiming partner can join and mirror split state."""
+        for res_file in self.split_state_dir.glob("*.json"):
+            if str(res_file).endswith(".lock"):
+                continue
+            lock = FileLock(str(res_file) + ".lock", timeout=1)
+            try:
+                with lock:
+                    if not res_file.exists():
+                        continue
+                    with open(res_file, "r", encoding="utf-8") as f:
+                        reservation = json.load(f)
+
+                    members = [str(m).strip() for m in reservation.get("members", []) if str(m).strip()]
+                    if self.name not in members:
+                        continue
+
+                    reservation = self._join_split_reservation(reservation, res_file)
+
+                    status = str(reservation.get("status", "")).strip()
+                    model_id = str(reservation.get("target_model", "")).strip()
+                    group = {
+                        "id": reservation.get("group_id"),
+                        "members": members,
+                        "port": reservation.get("port"),
+                    }
+                    launcher = str(reservation.get("launcher", "")).strip()
+                    joined = reservation.get("joined", {}) if isinstance(reservation.get("joined"), dict) else {}
+                    all_joined = all(bool(joined.get(m)) for m in members)
+
+                    if status in {"waiting_partner", "joining"} and all_joined and self.name == launcher:
+                        ok = self._start_split_runtime(group, model_id)
+                        reservation["status"] = "ready" if ok else "failed"
+                        reservation["ready_at"] = datetime.now().isoformat() if ok else None
+                        reservation["updated_at"] = datetime.now().isoformat()
+                        with open(res_file, "w", encoding="utf-8") as f:
+                            json.dump(reservation, f, indent=2)
+                        if ok:
+                            self._set_split_runtime_loaded(model_id, group, as_owner=True)
+                        else:
+                            self._clear_split_runtime_loaded()
+                        continue
+
+                    if status == "ready":
+                        # Non-owner mirrors loaded split runtime state.
+                        if self.name != launcher:
+                            self._set_split_runtime_loaded(model_id, group, as_owner=False)
+                        return
+
+                    if status in {"unloaded", "failed", "expired"}:
+                        if self.runtime_group_id == reservation.get("group_id"):
+                            self._clear_split_runtime_loaded()
+            except Timeout:
+                continue
+            except Exception:
+                continue
+
     def _can_claim_meta_task(self, task: Dict) -> bool:
         """Enforce hot/cold ownership rules for meta tasks."""
         command = task.get("command", "")
@@ -845,6 +1171,20 @@ class GPUAgent:
         if command == "unload_llm":
             # Only hot workers should claim unload commands.
             return self.model_loaded
+        if command == "load_split_llm":
+            target_model = str(task.get("target_model", "")).strip()
+            target_tier = int(self.model_tier_by_id.get(target_model, DEFAULT_LLM_MIN_TIER))
+            if self.model_loaded and self.loaded_tier >= target_tier:
+                return False
+            groups = task.get("candidate_groups", [])
+            if not isinstance(groups, list):
+                return False
+            return any(self._is_group_member(g) for g in groups if isinstance(g, dict))
+        if command == "unload_split_llm":
+            target_group = str(task.get("group_id", "")).strip()
+            if not target_group:
+                return self.runtime_placement == "split_gpu"
+            return self.runtime_group_id == target_group
         # Unknown meta command: allow claim so it can fail explicitly.
         return True
 
@@ -1024,6 +1364,25 @@ class GPUAgent:
                             f"Skipping llm task {task['task_id'][:8]}: model not loaded yet"
                         )
                         continue
+                    if task_class == "llm":
+                        try:
+                            required_tier = int(
+                                task.get("llm_min_tier", DEFAULT_LLM_MIN_TIER) or DEFAULT_LLM_MIN_TIER
+                            )
+                        except Exception:
+                            required_tier = DEFAULT_LLM_MIN_TIER
+                        if self.loaded_tier < required_tier:
+                            self.logger.debug(
+                                f"Skipping llm task {task['task_id'][:8]}: "
+                                f"needs tier {required_tier}, this GPU has tier {self.loaded_tier}"
+                            )
+                            continue
+                        required_placement = str(task.get("llm_placement", "")).strip()
+                        if required_placement == "split_gpu" and self.runtime_placement != "split_gpu":
+                            self.logger.debug(
+                                f"Skipping llm task {task['task_id'][:8]}: requires split runtime"
+                            )
+                            continue
 
                     env_ok, env_reason = self._check_task_env_requirements(task)
                     if not env_ok:
@@ -1113,18 +1472,20 @@ class GPUAgent:
             "--task", json.dumps(task),
         ]
 
-        # Pass Ollama URL if available (for LLM tasks)
-        if self.port:
-            worker_cmd.extend(["--ollama-url", f"http://localhost:{self.port}"])
+        # Pass active runtime endpoint if available (for LLM tasks).
+        if self.runtime_ollama_url:
+            worker_cmd.extend(["--ollama-url", self.runtime_ollama_url])
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
         # Ensure script-style worker tasks can self-identify and self-route.
         env["WORKER_NAME"] = self.name
-        if self.model:
+        if self.loaded_model:
+            env["WORKER_MODEL"] = str(self.loaded_model)
+        elif self.model:
             env["WORKER_MODEL"] = str(self.model)
-        if self.port:
-            env["WORKER_OLLAMA_URL"] = f"http://localhost:{self.port}"
+        if self.runtime_ollama_url:
+            env["WORKER_OLLAMA_URL"] = self.runtime_ollama_url
 
         proc = subprocess.Popen(
             worker_cmd,
@@ -1293,7 +1654,8 @@ class GPUAgent:
         for worker_id, info in self.active_workers.items():
             active_task_info.append({
                 "worker_id": worker_id,
-                "task_id": info["task"]["task_id"][:8],
+                # Publish full task_id so brain orphan recovery can match exactly.
+                "task_id": info["task"]["task_id"],
                 "task_class": info["task"].get("task_class", "cpu"),
                 "task_name": info["task"].get("name", ""),
                 "vram_estimate_mb": info["vram_estimate"],
@@ -1309,6 +1671,14 @@ class GPUAgent:
             "name": self.name,
             "state": self.state,
             "model_loaded": self.model_loaded,
+            "loaded_model": self.loaded_model,
+            "loaded_tier": self.loaded_tier,
+            "configured_model": self.model,
+            "configured_model_tier": self.model_tier,
+            "runtime_placement": self.runtime_placement,
+            "runtime_group_id": self.runtime_group_id,
+            "runtime_port": self.runtime_port,
+            "runtime_ollama_url": self.runtime_ollama_url,
             "ollama_healthy": self.ollama_healthy,
             "ollama": ollama_health,
             "last_updated": datetime.now().isoformat(),
@@ -1446,11 +1816,13 @@ class GPUAgent:
         self.logger.info(f"Handling meta task: {command}")
 
         if command == "load_llm":
-            self.load_model()
+            target_model = str(task.get("target_model", "")).strip() or None
+            self.load_model(model_id=target_model)
             result = {
                 "success": self.model_loaded,
                 "output": f"Model {'loaded' if self.model_loaded else 'failed to load'}",
                 "model_loaded": self.model_loaded,
+                "loaded_model": self.loaded_model,
                 "worker": self.name,
                 "max_vram_used_mb": 0,
             }
@@ -1460,6 +1832,141 @@ class GPUAgent:
                 "success": not self.model_loaded,
                 "output": f"Model {'unloaded' if not self.model_loaded else 'failed to unload'}",
                 "model_loaded": self.model_loaded,
+                "loaded_model": self.loaded_model,
+                "worker": self.name,
+                "max_vram_used_mb": 0,
+            }
+        elif command == "load_split_llm":
+            target_model = str(task.get("target_model", "")).strip()
+            groups = task.get("candidate_groups", [])
+            if not target_model or not isinstance(groups, list):
+                result = {
+                    "success": False,
+                    "error": "load_split_llm missing target_model/candidate_groups",
+                    "worker": self.name,
+                    "max_vram_used_mb": 0,
+                }
+            else:
+                chosen = None
+                for g in groups:
+                    if isinstance(g, dict) and self._is_group_member(g):
+                        chosen = g
+                        break
+                if not chosen:
+                    result = {
+                        "success": False,
+                        "error": "worker not eligible for any candidate split group",
+                        "worker": self.name,
+                        "max_vram_used_mb": 0,
+                    }
+                else:
+                    group_id = str(chosen.get("id", "")).strip()
+                    members = [str(m).strip() for m in chosen.get("members", []) if str(m).strip()]
+                    launcher = sorted(members)[0] if members else self.name
+                    reservation_path = self._split_reservation_path(group_id)
+                    lock = FileLock(str(reservation_path) + ".lock", timeout=5)
+                    with lock:
+                        now_iso = datetime.now().isoformat()
+                        reservation = {
+                            "group_id": group_id,
+                            "target_model": target_model,
+                            "status": "waiting_partner",
+                            "members": members,
+                            "port": chosen.get("port"),
+                            "launcher": launcher,
+                            "joined": {self.name: {"joined_at": now_iso}},
+                            "created_at": now_iso,
+                            "updated_at": now_iso,
+                        }
+                        if reservation_path.exists():
+                            with open(reservation_path, "r", encoding="utf-8") as f:
+                                existing = json.load(f)
+                            if str(existing.get("status", "")) == "ready":
+                                reservation = existing
+                            else:
+                                joined = existing.get("joined", {})
+                                if isinstance(joined, dict):
+                                    joined[self.name] = {"joined_at": now_iso}
+                                else:
+                                    joined = {self.name: {"joined_at": now_iso}}
+                                reservation.update(existing)
+                                reservation["joined"] = joined
+                                reservation["updated_at"] = now_iso
+                        with open(reservation_path, "w", encoding="utf-8") as f:
+                            json.dump(reservation, f, indent=2)
+
+                    deadline = time.time() + SPLIT_META_TIMEOUT_SECONDS
+                    success = False
+                    failure_reason = ""
+                    while time.time() < deadline:
+                        self._service_split_reservations()
+                        try:
+                            with open(reservation_path, "r", encoding="utf-8") as f:
+                                reservation = json.load(f)
+                        except Exception:
+                            failure_reason = "reservation disappeared"
+                            break
+                        status = str(reservation.get("status", "")).strip()
+                        if status == "ready":
+                            success = True
+                            break
+                        if status in {"failed", "expired", "unloaded"}:
+                            failure_reason = f"reservation status={status}"
+                            break
+                        time.sleep(2)
+
+                    if not success and not failure_reason:
+                        failure_reason = "split load timed out waiting for partner readiness"
+                        try:
+                            lock = FileLock(str(reservation_path) + ".lock", timeout=2)
+                            with lock:
+                                if reservation_path.exists():
+                                    with open(reservation_path, "r", encoding="utf-8") as f:
+                                        reservation = json.load(f)
+                                    reservation["status"] = "expired"
+                                    reservation["updated_at"] = datetime.now().isoformat()
+                                    with open(reservation_path, "w", encoding="utf-8") as f:
+                                        json.dump(reservation, f, indent=2)
+                        except Exception:
+                            pass
+
+                    result = {
+                        "success": success,
+                        "output": (
+                            f"Split model loaded: {target_model} group={group_id}"
+                            if success else f"Split load failed: {failure_reason}"
+                        ),
+                        "model_loaded": self.model_loaded,
+                        "loaded_model": self.loaded_model,
+                        "runtime_group_id": self.runtime_group_id,
+                        "worker": self.name,
+                        "max_vram_used_mb": 0,
+                    }
+        elif command == "unload_split_llm":
+            group_id = str(task.get("group_id", "")).strip() or str(self.runtime_group_id or "")
+            reservation_path = self._split_reservation_path(group_id) if group_id else None
+            if reservation_path and reservation_path.exists():
+                try:
+                    lock = FileLock(str(reservation_path) + ".lock", timeout=5)
+                    with lock:
+                        with open(reservation_path, "r", encoding="utf-8") as f:
+                            reservation = json.load(f)
+                        reservation["status"] = "unloaded"
+                        reservation["updated_at"] = datetime.now().isoformat()
+                        with open(reservation_path, "w", encoding="utf-8") as f:
+                            json.dump(reservation, f, indent=2)
+                except Exception:
+                    pass
+            if self.split_runtime_owner:
+                self._stop_split_runtime()
+            if self.runtime_placement == "split_gpu":
+                self._clear_split_runtime_loaded()
+            result = {
+                "success": True,
+                "output": f"Split runtime unloaded for group {group_id or '-'}",
+                "model_loaded": self.model_loaded,
+                "loaded_model": self.loaded_model,
+                "runtime_group_id": self.runtime_group_id,
                 "worker": self.name,
                 "max_vram_used_mb": 0,
             }
@@ -1525,6 +2032,7 @@ class GPUAgent:
 
                 self._check_abort_signal()
                 self._check_kill_signal()
+                self._service_split_reservations()
 
                 # Thermal safety check every internal tick
                 gpu_stats_check = self._get_gpu_stats()
@@ -1562,8 +2070,13 @@ class GPUAgent:
                     handled_meta_commands = set()
                     for task in claimed:
                         if task.get("task_class") == "meta":
-                            cmd = task.get("command", "")
-                            if cmd in handled_meta_commands:
+                            cmd = str(task.get("command", ""))
+                            dedup_key = json.dumps({
+                                "command": cmd,
+                                "target_model": task.get("target_model"),
+                                "group_id": task.get("group_id"),
+                            }, sort_keys=True)
+                            if dedup_key in handled_meta_commands:
                                 self.logger.info(
                                     f"Dedup: skipping duplicate {cmd} meta task "
                                     f"{task['task_id'][:8]}")
@@ -1575,7 +2088,7 @@ class GPUAgent:
                                             "worker": self.name, "max_vram_used_mb": 0},
                                     peak_vram_mb=0))
                             else:
-                                handled_meta_commands.add(cmd)
+                                handled_meta_commands.add(dedup_key)
                                 self._handle_meta_task(task)
                         else:
                             self._spawn_worker(task)
@@ -1616,6 +2129,7 @@ class GPUAgent:
 
         # Stop Ollama
         self.stop_ollama()
+        self._stop_split_runtime()
 
         self.logger.info("Cleanup complete")
 

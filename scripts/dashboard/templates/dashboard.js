@@ -830,6 +830,8 @@ function renderBatchChains(data, allowedBatchIds = null) {
     if (allowedBatchIds && !allowedBatchIds.has(batchId)) return;
     const stages = chain.stage_order || [];
     const stageTypes = chain.stage_types || {};
+    const collapsedStages = chain.collapsed_order || stages;
+    const collapsedTypes = chain.collapsed_types || stageTypes;
     if (!stages.length) return;
     const totalRows = chain.row_count || (chain.rows || []).length;
 
@@ -844,8 +846,36 @@ function renderBatchChains(data, allowedBatchIds = null) {
         }
       });
     });
+
+    // Aggregate counts for collapsed stages (sum across all _round_NNNN variants)
+    const collapsedLaneCounts = {};
+    collapsedStages.forEach(cs => {
+      collapsedLaneCounts[cs] = { queue: 0, processing: 0, private: 0, complete: 0, failed: 0 };
+    });
+    const roundSuffixRe = /^(.+?)_round_\d+$/;
+    stages.forEach(s => {
+      const match = s.match(roundSuffixRe);
+      const base = match ? match[1] : s;
+      if (collapsedLaneCounts[base]) {
+        const counts = stageLaneCounts[s] || {};
+        collapsedLaneCounts[base].queue += counts.queue || 0;
+        collapsedLaneCounts[base].processing += counts.processing || 0;
+        collapsedLaneCounts[base].private += counts.private || 0;
+        collapsedLaneCounts[base].complete += counts.complete || 0;
+        collapsedLaneCounts[base].failed += counts.failed || 0;
+      }
+    });
+
     const stageStatus = (s) => {
       const c = stageLaneCounts[s] || {};
+      if (c.processing > 0) return 'processing';
+      if (c.queue > 0 || c.private > 0) return 'queued';
+      if (c.failed > 0 && c.complete === 0) return 'failed';
+      if (c.complete > 0 && c.queue === 0 && c.processing === 0 && c.private === 0) return 'complete';
+      return 'waiting';
+    };
+    const collapsedStageStatus = (s) => {
+      const c = collapsedLaneCounts[s] || {};
       if (c.processing > 0) return 'processing';
       if (c.queue > 0 || c.private > 0) return 'queued';
       if (c.failed > 0 && c.complete === 0) return 'failed';
@@ -860,7 +890,15 @@ function renderBatchChains(data, allowedBatchIds = null) {
       if (status === 'failed') return `<span style="color:#ff6b6b">${s}</span>`;
       return s;
     };
-    const chainHeader = stages.map(formatStage).join(' <span style="color:#9db4c8">-></span> ');
+    const formatCollapsedStage = (s) => {
+      const status = collapsedStageStatus(s);
+      if (status === 'processing') return `<strong style="color:#4cc9f0">${s}</strong>`;
+      if (status === 'queued') return `<span style="color:#f9c74f">${s}</span>`;
+      if (status === 'complete') return `<span style="color:#4ad66d">${s}</span>`;
+      if (status === 'failed') return `<span style="color:#ff6b6b">${s}</span>`;
+      return s;
+    };
+    const chainHeader = collapsedStages.map(formatCollapsedStage).join(' <span style="color:#9db4c8">-></span> ');
     if (!chainState[batchId]) {
       chainState[batchId] = { collapsed: true, page: 1, sortKey: 'item', sortDir: 'asc' };
     }
@@ -977,9 +1015,10 @@ function refreshFromData(data) {
     let stage = 'idle';
     let stageRank = 0;
     const hasLiveWork = (c.processing > 0) || (c.queue > 0) || (c.private > 0);
-    if (hasLiveWork && c.failed > 0) { stage = 'processing (errors)'; stageRank = 3; }
+    if (hasLiveWork && c.failed > 0) { stage = 'processing (warnings)'; stageRank = 3; }
     else if (c.processing > 0) { stage = 'processing'; stageRank = 3; }
-    else if (c.failed > 0) { stage = 'failed'; stageRank = 4; }
+    else if (c.failed > 0 && c.complete === 0) { stage = 'failed'; stageRank = 4; }
+    else if (c.failed > 0 && c.complete > 0) { stage = 'complete (warnings)'; stageRank = 5; }
     else if (c.queue > 0 || c.private > 0) { stage = 'queued'; stageRank = 2; }
     else if (total > 0 && c.complete >= total) { stage = 'complete'; stageRank = 5; }
     else if (c.complete > 0) { stage = 'partial'; stageRank = 1; }
@@ -1052,9 +1091,22 @@ async function refresh() {
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
-    const trackedIds = [...loadTrackedBatches()].filter(Boolean);
+    const trackedIds = [...loadTrackedBatches()]
+      .map(x => String(x || '').trim())
+      .filter(Boolean)
+      .filter(x => /^[A-Za-z0-9_.:-]{1,80}$/.test(x))
+      .slice(0, 40);
     const query = trackedIds.length ? `?batch_ids=${encodeURIComponent(trackedIds.join(','))}` : '';
-    const res = await fetch(`/api/status${query}`, { cache: 'no-store' });
+    let res;
+    try {
+      res = await fetch(`/api/status${query}`, { cache: 'no-store' });
+    } catch (err) {
+      // Recover from malformed/local-storage-driven query failures by retrying
+      // without tracked ids and clearing local tracked state.
+      if (!query) throw err;
+      saveTrackedBatches(new Set());
+      res = await fetch('/api/status', { cache: 'no-store' });
+    }
     if (!res.ok) {
       console.error('Dashboard refresh failed:', res.status, res.statusText);
       const stamp = lastRefreshOkAt ? `last good ${new Date(lastRefreshOkAt).toLocaleTimeString()}` : 'no successful refresh yet';
@@ -1069,7 +1121,8 @@ async function refresh() {
     console.error('Dashboard refresh error:', err);
     const stamp = lastRefreshOkAt ? `last good ${new Date(lastRefreshOkAt).toLocaleTimeString()}` : 'no successful refresh yet';
     const meta = document.getElementById('meta');
-    if (meta) meta.textContent = `Update error - ${stamp}`;
+    const hint = err && err.message ? ` (${String(err.message).slice(0, 120)})` : '';
+    if (meta) meta.textContent = `Update error${hint} - ${stamp}`;
   } finally {
     refreshInFlight = false;
   }

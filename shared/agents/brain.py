@@ -52,6 +52,7 @@ logging.basicConfig(
 # =============================================================================
 VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'brain', 'meta']
 VALID_VRAM_POLICIES = ['default', 'infer', 'fixed']
+DEFAULT_LLM_MIN_TIER = 1
 PRIORITY_TIER_TO_VALUE = {
     "low": 3,
     "normal": 5,
@@ -84,6 +85,12 @@ class Brain(BrainGoalMixin):
         if not shared_path.is_absolute():
             shared_path = (config_dir / shared_path).resolve()
         self.shared_path = shared_path
+        self.model_catalog = self._load_model_catalog(config_dir)
+        self.model_tier_by_id = self._build_model_tier_map(self.model_catalog)
+        self.model_meta_by_id = self._build_model_meta_map(self.model_catalog)
+        self.default_llm_min_tier = int(
+            self.model_catalog.get("default_llm_min_tier", DEFAULT_LLM_MIN_TIER)
+        )
 
         # Public task queue (workers see this)
         self.queue_path = self.shared_path / "tasks" / "queue"
@@ -190,6 +197,95 @@ class Brain(BrainGoalMixin):
             sys.exit(1)
         with open(config_path) as f:
             return json.load(f)
+
+    def _load_model_catalog(self, config_dir: Path) -> Dict[str, Any]:
+        """Load model capability catalog used for llm tier scheduling."""
+        raw_path = str(self.config.get("model_catalog_path", "models.catalog.json")).strip()
+        catalog_path = Path(raw_path)
+        if not catalog_path.is_absolute():
+            catalog_path = (config_dir / catalog_path).resolve()
+
+        if not catalog_path.exists():
+            print(f"ERROR: Model catalog not found: {catalog_path}")
+            print("  Set model_catalog_path in config.json or create models.catalog.json.")
+            sys.exit(1)
+
+        try:
+            with open(catalog_path, "r", encoding="utf-8") as f:
+                catalog = json.load(f)
+        except Exception as exc:
+            print(f"ERROR: Failed to load model catalog {catalog_path}: {exc}")
+            sys.exit(1)
+
+        models = catalog.get("models", [])
+        if not isinstance(models, list) or not models:
+            print(f"ERROR: Model catalog {catalog_path} must contain a non-empty 'models' list.")
+            sys.exit(1)
+
+        for item in models:
+            model_id = str(item.get("id", "")).strip()
+            tier = item.get("tier")
+            if not model_id:
+                print(f"ERROR: Invalid model catalog entry missing 'id': {item}")
+                sys.exit(1)
+            if not isinstance(tier, int) or tier < 1:
+                print(f"ERROR: Invalid tier for model '{model_id}': {tier}")
+                sys.exit(1)
+
+        self.logger.info(f"Loaded model catalog from {catalog_path}")
+        return catalog
+
+    def _build_model_tier_map(self, catalog: Dict[str, Any]) -> Dict[str, int]:
+        tier_map: Dict[str, int] = {}
+        for item in catalog.get("models", []):
+            model_id = str(item.get("id", "")).strip()
+            tier = int(item.get("tier", DEFAULT_LLM_MIN_TIER))
+            if model_id:
+                tier_map[model_id] = max(1, tier)
+        return tier_map
+
+    def _build_model_meta_map(self, catalog: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        model_meta: Dict[str, Dict[str, Any]] = {}
+        for item in catalog.get("models", []):
+            model_id = str(item.get("id", "")).strip()
+            if not model_id:
+                continue
+            placement = str(item.get("placement", "single_gpu") or "single_gpu").strip()
+            split_groups: List[Dict[str, Any]] = []
+
+            if isinstance(item.get("split_groups"), list):
+                for g in item.get("split_groups", []):
+                    if not isinstance(g, dict):
+                        continue
+                    members = [str(m).strip() for m in g.get("members", []) if str(m).strip()]
+                    if len(members) < 2:
+                        continue
+                    group_id = str(g.get("id") or f"group_{'_'.join(sorted(members))}").strip()
+                    try:
+                        port = int(g.get("port"))
+                    except Exception:
+                        port = None
+                    split_groups.append({"id": group_id, "members": members, "port": port})
+
+            # Backward-compatible pair schema.
+            if not split_groups and isinstance(item.get("allowed_pairs"), list):
+                next_port = 11440
+                for pair in item.get("allowed_pairs", []):
+                    if not isinstance(pair, list):
+                        continue
+                    members = [str(m).strip() for m in pair if str(m).strip()]
+                    if len(members) < 2:
+                        continue
+                    group_id = f"group_{'_'.join(sorted(members))}"
+                    split_groups.append({"id": group_id, "members": members, "port": next_port})
+                    next_port += 1
+
+            model_meta[model_id] = {
+                "tier": int(self.model_tier_by_id.get(model_id, DEFAULT_LLM_MIN_TIER)),
+                "placement": placement,
+                "split_groups": split_groups,
+            }
+        return model_meta
 
     def _verify_core_security(self):
         """Verify core/ directory is properly secured before starting.
@@ -1135,6 +1231,9 @@ class Brain(BrainGoalMixin):
                     task_class: str = None,
                     vram_estimate_mb: Optional[int] = None,
                     vram_estimate_source: Optional[str] = None,
+                    llm_min_tier: Optional[int] = None,
+                    llm_model: Optional[str] = None,
+                    llm_placement: Optional[str] = None,
                     batch_priority: str = "normal",
                     preemptible: bool = True) -> Dict[str, Any]:
         """Create a new task.
@@ -1158,6 +1257,29 @@ class Brain(BrainGoalMixin):
         if executor == "brain" and task_class != "brain":
             task_class = "brain"
 
+        if task_class == "llm":
+            if llm_model:
+                llm_model = str(llm_model).strip()
+                if llm_model and llm_model not in self.model_tier_by_id:
+                    definition_error = f"unknown llm_model '{llm_model}'"
+                if llm_model:
+                    if not llm_placement:
+                        llm_placement = str(
+                            self.model_meta_by_id.get(llm_model, {}).get("placement", "")
+                        ).strip() or None
+            if llm_min_tier is None and llm_model:
+                llm_min_tier = self.model_tier_by_id.get(llm_model, self.default_llm_min_tier)
+            if llm_min_tier is None:
+                llm_min_tier = self.default_llm_min_tier
+            try:
+                llm_min_tier = int(llm_min_tier)
+            except Exception:
+                definition_error = f"invalid llm_min_tier '{llm_min_tier}'"
+                llm_min_tier = self.default_llm_min_tier
+            if llm_min_tier < 1:
+                definition_error = f"invalid llm_min_tier '{llm_min_tier}' (must be >= 1)"
+                llm_min_tier = self.default_llm_min_tier
+
         task = {
             "task_id": str(uuid.uuid4()),
             "type": task_type,
@@ -1179,6 +1301,13 @@ class Brain(BrainGoalMixin):
         if isinstance(vram_estimate_mb, int) and vram_estimate_mb > 0:
             task["vram_estimate_mb"] = int(vram_estimate_mb)
             task["vram_estimate_source"] = vram_estimate_source or "plan"
+
+        if task_class == "llm":
+            task["llm_min_tier"] = int(llm_min_tier or self.default_llm_min_tier)
+            if llm_model:
+                task["llm_model"] = llm_model
+            if llm_placement:
+                task["llm_placement"] = llm_placement
 
         # Mark task with definition error so it goes to failed/ immediately
         if definition_error:
@@ -1345,6 +1474,9 @@ Required JSON format:
         ### task_id
         - **executor**: brain|worker
         - **task_class**: cpu|script|llm|brain
+        - **llm_min_tier**: 1  (optional, llm tasks only)
+        - **llm_model**: qwen2.5:7b  (optional, llm tasks only)
+        - **llm_placement**: single_gpu|split_gpu (optional, llm tasks only)
         - **command**: `shell command here`
         - **depends_on**: task1, task2
         - **foreach**: manifest.videos  (optional - expands to N tasks)
@@ -1373,6 +1505,9 @@ Required JSON format:
                 "batch_size": 1,
                 "vram_policy": None,
                 "vram_estimate_mb": None,
+                "llm_min_tier": None,
+                "llm_model": None,
+                "llm_placement": None,
             }
 
             for line in lines[1:]:
@@ -1390,6 +1525,26 @@ Required JSON format:
                     match = re.search(r'`([^`]+)`', line)
                     if match:
                         task["command"] = match.group(1)
+                elif line.startswith('- **llm_min_tier**:'):
+                    raw = line.split(':', 1)[1].strip()
+                    try:
+                        task["llm_min_tier"] = max(1, int(raw))
+                    except ValueError:
+                        self.logger.warning(
+                            f"Invalid llm_min_tier '{raw}' for {task_id}, defaulting from catalog"
+                        )
+                        task["llm_min_tier"] = None
+                elif line.startswith('- **llm_model**:'):
+                    model_id = line.split(':', 1)[1].strip()
+                    task["llm_model"] = model_id or None
+                elif line.startswith('- **llm_placement**:'):
+                    placement = line.split(':', 1)[1].strip().lower()
+                    if placement in {"single_gpu", "split_gpu"}:
+                        task["llm_placement"] = placement
+                    elif placement:
+                        self.logger.warning(
+                            f"Invalid llm_placement '{placement}' for {task_id}, ignoring"
+                        )
                 elif line.startswith('- **depends_on**:'):
                     deps = line.split(':', 1)[1].strip()
                     if deps.lower() != 'none':
@@ -1424,6 +1579,26 @@ Required JSON format:
                         task["vram_estimate_mb"] = None
 
             if task["command"]:  # Only add tasks with commands
+                if task.get("task_class") == "llm":
+                    if task.get("llm_model"):
+                        catalog_tier = self.model_tier_by_id.get(task["llm_model"])
+                        if catalog_tier is None:
+                            self.logger.warning(
+                                f"Unknown llm_model '{task['llm_model']}' for {task_id}; will fail at task creation"
+                            )
+                        elif task.get("llm_min_tier") is None:
+                            task["llm_min_tier"] = catalog_tier
+                        if not task.get("llm_placement"):
+                            task["llm_placement"] = str(
+                                self.model_meta_by_id.get(task["llm_model"], {}).get("placement", "")
+                            ) or None
+                    if task.get("llm_min_tier") is None:
+                        task["llm_min_tier"] = self.default_llm_min_tier
+                else:
+                    task["llm_min_tier"] = None
+                    task["llm_model"] = None
+                    task["llm_placement"] = None
+
                 if task.get("task_class") == "script" and not task.get("vram_policy"):
                     task["vram_policy"] = "infer"
                 elif not task.get("vram_policy"):
@@ -1732,6 +1907,9 @@ Required JSON format:
                 task_class=task_def.get("task_class"),
                 vram_estimate_mb=vram_estimate_mb,
                 vram_estimate_source=vram_estimate_source,
+                llm_min_tier=task_def.get("llm_min_tier"),
+                llm_model=task_def.get("llm_model"),
+                llm_placement=task_def.get("llm_placement"),
                 batch_priority=batch_priority_label,
                 preemptible=batch_preemptible,
             )
@@ -1755,6 +1933,9 @@ Required JSON format:
                     "command": command,
                     "executor": task_def.get("executor", "worker"),
                     "task_class": task_def.get("task_class"),
+                    "llm_min_tier": task_def.get("llm_min_tier"),
+                    "llm_model": task_def.get("llm_model"),
+                    "llm_placement": task_def.get("llm_placement"),
                     "priority": batch_priority_value,
                     "depends_on": list(task_def.get("depends_on", [])),
                 }
@@ -3395,8 +3576,19 @@ JSON only:"""
                     is_orphan = True
                 else:
                     # Worker is alive, but verify it still claims this task.
-                    active_task_ids = worker_state.get("active_task_ids", [])
-                    is_claimed = bool(task_id and task_id in active_task_ids)
+                    active_task_ids = [
+                        str(x).strip() for x in (worker_state.get("active_task_ids", []) or []) if str(x).strip()
+                    ]
+                    short_task_id = task_id[:8]
+                    # Backward compatibility with older GPU heartbeats that reported
+                    # truncated 8-char task IDs.
+                    is_claimed = bool(
+                        task_id and (
+                            task_id in active_task_ids
+                            or short_task_id in active_task_ids
+                            or any(task_id.startswith(active_id) for active_id in active_task_ids if len(active_id) == 8)
+                        )
+                    )
                     if is_claimed:
                         continue
 
@@ -3450,10 +3642,7 @@ JSON only:"""
                         "previous_worker": assigned_to,
                         "elapsed_sec": int(elapsed),
                         "worker_running": worker_state is not None,
-                        "worker_claimed_task": bool(
-                            worker_state is not None
-                            and task_id in (worker_state.get("active_task_ids", []) or [])
-                        ),
+                        "worker_claimed_task": bool(worker_state is not None and is_claimed),
                         "action": "requeued"
                     }
                 )
@@ -3649,6 +3838,8 @@ JSON only:"""
             "cpu": 0,
             "script": 0,
             "llm": 0,
+            "llm_split_required": 0,
+            "llm_max_tier": 0,
             "meta": 0,
             "brain_tasks": 0,
             "worker_tasks": 0
@@ -3672,6 +3863,15 @@ JSON only:"""
                 task_class = task.get("task_class", "cpu")
                 if task_class in stats:
                     stats[task_class] += 1
+                if task_class == "llm":
+                    placement = str(task.get("llm_placement", "")).strip()
+                    if placement == "split_gpu":
+                        stats["llm_split_required"] += 1
+                    try:
+                        llm_tier = int(task.get("llm_min_tier", self.default_llm_min_tier) or self.default_llm_min_tier)
+                    except Exception:
+                        llm_tier = self.default_llm_min_tier
+                    stats["llm_max_tier"] = max(stats["llm_max_tier"], llm_tier)
 
             except Exception as e:
                 self.logger.debug(f"Failed to analyze task {task_file}: {e}")
@@ -3696,12 +3896,26 @@ JSON only:"""
 
         return states
 
-    def _has_existing_meta_task(self, command: str) -> bool:
+    def _meta_task_signature(self, task: Dict[str, Any]) -> str:
+        key = {
+            "command": task.get("command"),
+            "target_model": task.get("target_model"),
+            "group_id": task.get("group_id"),
+            "candidate_groups": task.get("candidate_groups"),
+        }
+        return json.dumps(key, sort_keys=True)
+
+    def _has_existing_meta_task(self, command: str, meta: Optional[Dict[str, Any]] = None) -> bool:
         """Check if a meta task with the given command already exists in queue or processing.
 
         Prevents duplicate meta tasks when the brain restarts or timing is tight
         between queue checks and task insertion.
         """
+        expected = {"command": command}
+        if isinstance(meta, dict):
+            expected.update(meta)
+        expected_sig = self._meta_task_signature(expected)
+
         # Check queue
         for task_file in self.queue_path.glob("*.json"):
             if str(task_file).endswith('.lock'):
@@ -3709,7 +3923,7 @@ JSON only:"""
             try:
                 with open(task_file) as f:
                     task = json.load(f)
-                if task.get("task_class") == "meta" and task.get("command") == command:
+                if task.get("task_class") == "meta" and self._meta_task_signature(task) == expected_sig:
                     self.logger.debug(f"Dedup: {command} already in queue ({task['task_id'][:8]})")
                     return True
             except Exception:
@@ -3722,7 +3936,7 @@ JSON only:"""
             try:
                 with open(task_file) as f:
                     task = json.load(f)
-                if task.get("task_class") == "meta" and task.get("command") == command:
+                if task.get("task_class") == "meta" and self._meta_task_signature(task) == expected_sig:
                     self.logger.debug(f"Dedup: {command} already in processing ({task['task_id'][:8]})")
                     return True
             except Exception:
@@ -3730,7 +3944,7 @@ JSON only:"""
 
         return False
 
-    def _insert_resource_task(self, command: str):
+    def _insert_resource_task(self, command: str, meta: Optional[Dict[str, Any]] = None):
         """Insert a resource task (load_llm or unload_llm) for workers to claim.
 
         Performs a dedup scan first — skips insertion if the same command is already
@@ -3738,7 +3952,10 @@ JSON only:"""
         or under race conditions.
         """
         # Cooldown: avoid rapid repeated resource commands.
-        last_at = self.last_resource_task_at.get(command)
+        dedup_key = command
+        if isinstance(meta, dict) and meta:
+            dedup_key = f"{command}:{json.dumps(meta, sort_keys=True)}"
+        last_at = self.last_resource_task_at.get(dedup_key)
         if last_at:
             elapsed = (datetime.now() - last_at).total_seconds()
             if elapsed < self.resource_task_cooldown_seconds:
@@ -3750,7 +3967,7 @@ JSON only:"""
                 return
 
         # Dedup: check if this exact command already exists
-        if self._has_existing_meta_task(command):
+        if self._has_existing_meta_task(command, meta=meta):
             self.log_decision("RESOURCE_DEDUP",
                 f"Skipping {command} — already exists in queue/processing", {})
             return
@@ -3770,9 +3987,12 @@ JSON only:"""
             "created_by": self.name,
             "retry_count": 0
         }
+        if isinstance(meta, dict):
+            for k, v in meta.items():
+                task[k] = v
         self.save_to_public(task)
         self.log_decision("RESOURCE_TASK", f"Inserted {command} task", {"task_id": task["task_id"][:8]})
-        self.last_resource_task_at[command] = datetime.now()
+        self.last_resource_task_at[dedup_key] = datetime.now()
 
         # Track load_llm requests to detect when GPUs don't pick them up
         if command == "load_llm":
@@ -3834,6 +4054,52 @@ JSON only:"""
                 }
             )
 
+    def _choose_split_model_for_tier(self, min_tier: int) -> Optional[str]:
+        candidates = []
+        for model_id, meta in self.model_meta_by_id.items():
+            if str(meta.get("placement", "")) != "split_gpu":
+                continue
+            tier = int(meta.get("tier", self.default_llm_min_tier))
+            if tier < min_tier:
+                continue
+            candidates.append((tier, model_id))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
+
+    def _split_groups_for_model(self, model_id: str) -> List[Dict[str, Any]]:
+        meta = self.model_meta_by_id.get(model_id, {})
+        groups = meta.get("split_groups", [])
+        if not isinstance(groups, list):
+            return []
+        normalized = []
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            members = [str(m).strip() for m in g.get("members", []) if str(m).strip()]
+            if len(members) < 2:
+                continue
+            group_id = str(g.get("id") or f"group_{'_'.join(sorted(members))}").strip()
+            try:
+                port = int(g.get("port"))
+            except Exception:
+                port = None
+            normalized.append({"id": group_id, "members": members, "port": port})
+        return normalized
+
+    def _has_pending_meta_command(self, command: str) -> bool:
+        for lane in (self.queue_path, self.processing_path):
+            for task_file in lane.glob("*.json"):
+                try:
+                    with open(task_file) as f:
+                        task = json.load(f)
+                    if task.get("task_class") == "meta" and str(task.get("command", "")) == command:
+                        return True
+                except Exception:
+                    continue
+        return False
+
     def _make_resource_decisions(self, gpu_status: List[Dict], running_gpus: Dict, queue_stats: Dict):
         """Make decisions about GPU resource allocation based on current state."""
         active_gpus = [g for g in gpu_status if g["util_pct"] > 10 or g["mem_used_mb"] > 1000]
@@ -3843,6 +4109,19 @@ JSON only:"""
         gpu_states = self._get_gpu_states()
         gpus_with_model = [g for g, s in gpu_states.items() if s.get("model_loaded", False)]
         gpus_without_model = [g for g, s in gpu_states.items() if not s.get("model_loaded", False)]
+        split_loaded = [
+            g for g, s in gpu_states.items()
+            if s.get("model_loaded", False) and str(s.get("runtime_placement", "")) == "split_gpu"
+        ]
+        max_loaded_tier = 0
+        for s in gpu_states.values():
+            if not s.get("model_loaded", False):
+                continue
+            try:
+                tier = int(s.get("loaded_tier", 0))
+            except Exception:
+                tier = 0
+            max_loaded_tier = max(max_loaded_tier, tier)
 
         # Track unhealthy GPUs (Ollama circuit breaker tripped)
         unhealthy_gpus = [g for g, s in gpu_states.items()
@@ -3860,11 +4139,13 @@ JSON only:"""
             f"Agents: {len(running_gpus)}/{len(self.gpu_agents)}, "
             f"Queue: {queue_stats['total_pending']} (cpu:{queue_stats['cpu']}, script:{queue_stats['script']}, llm:{queue_stats['llm']}), "
             f"Processing: {queue_stats['processing_count']}, Stuck: {queue_stats['stuck_tasks']}, "
-            f"Hot GPUs: {len(gpus_with_model)}",
+            f"Hot GPUs: {len(gpus_with_model)}, split-ready: {len(split_loaded)}",
             {
                 "total_power_w": round(total_power, 1),
                 "running_gpus": list(running_gpus.keys()),
                 "hot_gpus": gpus_with_model,
+                "split_loaded": split_loaded,
+                "max_loaded_tier": max_loaded_tier,
                 "queue_stats": queue_stats
             })
 
@@ -3906,8 +4187,77 @@ JSON only:"""
             if not task_in_queue and not task_in_processing:
                 del self.load_llm_requests[task_id]
 
+        inserted_resource_task = False
+
+        # Tier/placement-aware split loading: if queue needs split runtime and none is ready,
+        # enqueue a targeted load_split_llm task before generic hot/cold balancing.
+        required_max_tier = int(queue_stats.get("llm_max_tier", 0) or 0)
+        split_needed = int(queue_stats.get("llm_split_required", 0) or 0) > 0
+        if (
+            (split_needed or required_max_tier >= 2)
+            and not self._has_pending_meta_command("load_split_llm")
+        ):
+            split_model = self._choose_split_model_for_tier(max(2, required_max_tier))
+            if split_model:
+                split_groups = self._split_groups_for_model(split_model)
+                viable_groups = []
+                for g in split_groups:
+                    members = g.get("members", [])
+                    if not all(member in running_gpus for member in members):
+                        continue
+                    if any(member in unhealthy_gpus for member in members):
+                        continue
+                    viable_groups.append(g)
+                if viable_groups:
+                    ready_groups = {
+                        str(s.get("runtime_group_id", "")).strip()
+                        for s in gpu_states.values()
+                        if s.get("model_loaded", False)
+                        and str(s.get("runtime_placement", "")) == "split_gpu"
+                        and str(s.get("loaded_model", "")) == split_model
+                    }
+                    has_ready_target = any(g.get("id") in ready_groups for g in viable_groups)
+                    if not has_ready_target:
+                        self.log_decision(
+                            "RESOURCE_DECISION",
+                            f"Need split tier capacity for model {split_model} - inserting load_split_llm",
+                            {
+                                "split_needed": split_needed,
+                                "required_max_tier": required_max_tier,
+                                "candidate_groups": viable_groups,
+                            }
+                        )
+                        self._insert_resource_task(
+                            "load_split_llm",
+                            meta={
+                                "target_model": split_model,
+                                "candidate_groups": viable_groups,
+                            },
+                        )
+                        inserted_resource_task = True
+        elif required_max_tier < 2 and split_loaded and not self._has_pending_meta_command("unload_split_llm"):
+            split_groups_loaded = sorted({
+                str(s.get("runtime_group_id", "")).strip()
+                for s in gpu_states.values()
+                if s.get("model_loaded", False)
+                and str(s.get("runtime_placement", "")) == "split_gpu"
+                and str(s.get("runtime_group_id", "")).strip()
+            })
+            if split_groups_loaded:
+                target_group = split_groups_loaded[0]
+                self.log_decision(
+                    "RESOURCE_DECISION",
+                    f"No tier-2 llm demand - inserting unload_split_llm for {target_group}",
+                    {"loaded_split_groups": split_groups_loaded}
+                )
+                self._insert_resource_task(
+                    "unload_split_llm",
+                    meta={"group_id": target_group},
+                )
+                inserted_resource_task = True
+
         # Check if there's already a meta task in queue OR processing
-        has_pending_resource = queue_stats.get("meta", 0) > 0
+        has_pending_resource = queue_stats.get("meta", 0) > 0 or inserted_resource_task
 
         if not has_pending_resource:
             for task_file in self.processing_path.glob("*.json"):

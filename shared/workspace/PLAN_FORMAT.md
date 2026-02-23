@@ -262,6 +262,9 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 ### task_id
 - **executor**: brain|worker
 - **task_class**: cpu|script|llm|brain
+- **llm_min_tier**: 1  (optional, llm tasks only)
+- **llm_model**: qwen2.5:7b  (optional, llm tasks only)
+- **llm_placement**: single_gpu|split_gpu  (optional, llm tasks only)
 - **command**: `shell command here`
 - **depends_on**: task1, task2
 - **requires**: path1, path2
@@ -277,6 +280,9 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 | `task_id` | Any unique name | Used for dependency references |
 | `executor` | `brain` or `worker` | Who runs this task (routing control) |
 | `task_class` | `cpu`, `script`, `llm`, or `brain` | **Required.** What resources the task needs (see below) |
+| `llm_min_tier` | Integer >= 1 | **Optional (llm).** Minimum model capability tier required to claim task |
+| `llm_model` | Model ID from catalog | **Optional (llm).** Preferred model; implies minimum tier from catalog |
+| `llm_placement` | `single_gpu` or `split_gpu` | **Optional (llm).** Placement constraint when a task must run on split runtime |
 | `command` | Shell command in backticks | What to execute |
 | `depends_on` | Comma-separated task IDs or `none` | Tasks that must complete first |
 | `requires` | Comma-separated file paths/patterns | **Required.** Inputs this task expects to read |
@@ -286,7 +292,7 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 | `vram_policy` | `default`, `infer`, `fixed` | **Optional (script).** How brain sets script VRAM estimate |
 | `vram_estimate_mb` | Integer MB | **Optional (script).** Explicit VRAM estimate used when `fixed` |
 
-**Important:** `executor`, `task_class`, `command`, `depends_on`, `requires`, and `produces` are required in every task. `foreach`, `batch_size`, `vram_policy`, and `vram_estimate_mb` are optional. If `task_class` is missing, the task goes to `failed/` immediately. The brain will attempt to auto-fix by inferring the class from command keywords, but plans should always specify it explicitly.
+**Important:** `executor`, `task_class`, `command`, `depends_on`, `requires`, and `produces` are required in every task. `foreach`, `batch_size`, `vram_policy`, `vram_estimate_mb`, `llm_min_tier`, `llm_model`, and `llm_placement` are optional. If `task_class` is missing, the task goes to `failed/` immediately. The brain will attempt to auto-fix by inferring the class from command keywords, but plans should always specify it explicitly.
 
 ### Executor Routing (Brain vs Worker)
 
@@ -338,6 +344,56 @@ Workers prioritize tasks they're optimized for:
 - **llm tasks**: Fixed 5GB estimate, not stackable - if GPU has LLM loaded, it's dedicated to that
 - **script tasks**: **Planner must estimate per-script** - these vary widely and are the priority for VRAM optimization
 - **meta tasks**: Zero VRAM (model load/unload commands)
+
+**LLM tier hierarchy:**
+- LLM tasks can declare `llm_min_tier`.
+- Workers can claim only when `loaded_tier >= llm_min_tier`.
+- Higher-tier loaded models can run lower-tier tasks.
+- `llm_placement: split_gpu` requires a split runtime group; single workers must not claim those tasks.
+
+### Capability-Based LLM Routing
+
+Use this precedence when defining LLM tasks:
+
+1. If a task must run on split runtime, set `llm_placement: split_gpu`.
+2. Set `llm_min_tier` to the lowest acceptable capability.
+3. Optionally set `llm_model` when you have a specific preferred model.
+
+Runtime claim rule:
+- A worker can claim an LLM task when `loaded_tier >= llm_min_tier`.
+- If `llm_placement: split_gpu`, the worker must be in a ready split group runtime.
+
+Planning guidance:
+- Put hardware topology in the model catalog (`models.catalog.json`), not in plan logic.
+- Plans declare requirements (`llm_min_tier` / `llm_placement`), brain maps to available workers/groups.
+
+### LLM Examples
+
+7B doc-review style task:
+
+```markdown
+### worker_doc_claims_shard_0
+- **executor**: worker
+- **task_class**: llm
+- **llm_model**: qwen2.5:7b
+- **llm_min_tier**: 1
+- **command**: `python {PLAN_PATH}/scripts/worker_doc_claims.py ... --model qwen2.5:7b`
+- **depends_on**: warm_workers
+```
+
+14B split code-review style task:
+
+```markdown
+### worker_review
+- **executor**: worker
+- **task_class**: llm
+- **llm_model**: qwen2.5:14b
+- **llm_min_tier**: 2
+- **llm_placement**: split_gpu
+- **foreach**: {BATCH_PATH}/analysis_manifest.json:slices
+- **command**: `python {PLAN_PATH}/scripts/worker_review.py ... --model qwen2.5:14b`
+- **depends_on**: build_scope_manifest
+```
 
 **Note:** There's also a `meta` task class used internally by the brain for model loading/unloading. Plans should not use this class - the brain inserts these tasks automatically based on queue state.
 

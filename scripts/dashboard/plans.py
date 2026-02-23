@@ -370,6 +370,37 @@ def default_plan_config(shared_path: Path, plan_name: str) -> dict[str, Any]:
             "PRIORITY": "normal",
             "PREEMPTIBLE": True,
         }
+    if plan_name == "research_contact_enrichment":
+        return {
+            "INPUT_FILE": "/mnt/shared/plans/arms/research_contact_enrichment/input/sample_contacts.csv",
+            "SEARCH_DEPTH": "basic",
+            "OUTPUT_FORMAT": "both",
+            "RUN_MODE": "fresh",
+            "PRIORITY": "normal",
+            "PREEMPTIBLE": True,
+        }
+    if plan_name == "research_topic_research":
+        return {
+            "TOPIC": "example topic",
+            "DAYS": "30",
+            "DEPTH": "default",
+            "SEARCH_MODE": "daily",
+            "STOP_TERMS": "",
+            "BLOCKED_DOMAINS": "",
+            "RUN_MODE": "fresh",
+            "PRIORITY": "normal",
+            "PREEMPTIBLE": True,
+        }
+    if plan_name == "research_event_discovery":
+        return {
+            "QUERY": "floods in the US in the past 5 years",
+            "MAX_EVENTS": "20",
+            "MIN_SIGNIFICANCE": "50",
+            "OUTPUT_FORMAT": "both",
+            "RUN_MODE": "fresh",
+            "PRIORITY": "normal",
+            "PREEMPTIBLE": True,
+        }
     return {"RUN_MODE": "fresh", "PRIORITY": "normal", "PREEMPTIBLE": True}
 
 

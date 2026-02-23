@@ -10,6 +10,7 @@
 
   "shared_path": "../",
   "permissions_path": "permissions/",
+  "model_catalog_path": "models.catalog.json",
   "ollama_host": "http://localhost:11434",
   "brain_keep_alive": "30m",
   "worker_keep_alive": "30m",
@@ -63,8 +64,8 @@
     "max_temp_c": 80,
     "gpu_temp_warning_c": 75,
     "gpu_temp_critical_c": 90,
-    "cpu_temp_warning_c": 80,
-    "cpu_temp_critical_c": 95,
+    "cpu_temp_warning_c": 78,
+    "cpu_temp_critical_c": 99,
     "max_vram_percent": 95,
     "max_power_w": 140
   },
@@ -74,9 +75,16 @@
   },
 
   "thermal_pause": {
-    "initial_seconds": 60,
-    "max_seconds": 600,
-    "backoff_factor": 2.0,
-    "resume_margin_c": 3
+    "initial_seconds": 30,
+    "max_seconds": 300,
+    "backoff_factor": 1.8,
+    "resume_margin_c": 4
+  },
+
+  "cpu_agent": {
+    "resource_limits": {
+      "cpu_temp_warning_c": 85,
+      "cpu_temp_critical_c": 95
+    }
   }
 }

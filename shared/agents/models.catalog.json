@@ -1,0 +1,42 @@
+{
+  "_comment": "Model capability catalog for tier-based scheduling.",
+  "schema_version": 1,
+  "default_llm_min_tier": 1,
+  "models": [
+    {
+      "id": "qwen2.5:7b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "tags": [
+        "general",
+        "fast"
+      ]
+    },
+    {
+      "id": "qwen2.5:14b",
+      "tier": 2,
+      "placement": "split_gpu",
+      "split_groups": [
+        {
+          "id": "pair_1_3",
+          "members": [
+            "gpu-1",
+            "gpu-3"
+          ],
+          "port": 11440
+        },
+        {
+          "id": "pair_4_5",
+          "members": [
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11441
+        }
+      ],
+      "tags": [
+        "higher_reasoning"
+      ]
+    }
+  ]
+}

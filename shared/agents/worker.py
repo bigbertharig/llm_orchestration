@@ -92,6 +92,13 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
         }
 
     api_url = f"{ollama_url}/api/generate"
+    task_model = str(task.get("llm_model", "")).strip() or str(model or "").strip()
+    if not task_model:
+        return {
+            "success": False,
+            "error": "LLM task but no model resolved",
+            "worker": gpu_name,
+        }
     system_prompt = _get_system_prompt(task_type)
     full_prompt = f"{system_prompt}\n\n"
     if context:
@@ -110,7 +117,7 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
         response = requests.post(
             api_url,
             json={
-                "model": model,
+                "model": task_model,
                 "prompt": full_prompt,
                 "stream": False,
                 "options": {"num_ctx": worker_num_ctx},
@@ -130,19 +137,19 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
             "output": output,
             "tokens": result.get("eval_count", 0),
             "duration_seconds": elapsed,
-            "model": model,
+            "model": task_model,
             "worker": gpu_name,
         }
 
     except requests.Timeout:
-        _log_training_sample(task, prompt, "", "timeout", gpu_name, model)
+        _log_training_sample(task, prompt, "", "timeout", gpu_name, task_model)
         return {
             "success": False,
             "error": "Task timed out",
             "worker": gpu_name,
         }
     except Exception as e:
-        _log_training_sample(task, prompt, str(e), "failure", gpu_name, model)
+        _log_training_sample(task, prompt, str(e), "failure", gpu_name, task_model)
         return {
             "success": False,
             "error": str(e),
@@ -236,6 +243,9 @@ def main():
         if gpu["name"] == args.gpu_name:
             model = gpu.get("model")
             break
+    env_model = str(os.environ.get("WORKER_MODEL", "")).strip()
+    if env_model:
+        model = env_model
 
     # Set log path env for training samples
     config_dir = Path(args.config).parent

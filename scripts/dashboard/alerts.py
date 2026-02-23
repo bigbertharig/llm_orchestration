@@ -6,12 +6,33 @@ from .utils import format_duration_short, heartbeat_age_seconds, parse_iso_datet
 
 
 def collect_recent_batch_failure_alerts(
-    failed_tasks: list[dict[str, Any]],
+    tasks_by_lane: dict[str, list[dict[str, Any]]],
     window_seconds: int = 1800,
     limit: int = 12,
 ) -> list[dict[str, Any]]:
-    """Surface recent batch-fatal signals even after active batch cards clear."""
+    """Surface recent batch failure signals with hard-fail vs warning severity."""
+    failed_tasks = tasks_by_lane.get("failed", [])
+    queue_tasks = tasks_by_lane.get("queue", [])
+    processing_tasks = tasks_by_lane.get("processing", [])
+    private_tasks = tasks_by_lane.get("private", [])
+    complete_tasks = tasks_by_lane.get("complete", [])
     best_by_batch: dict[str, tuple[int, dict[str, Any]]] = {}
+
+    def _batch_has_live_work(batch_id: str) -> bool:
+        return any(str(t.get("batch_id") or "").strip() == batch_id for t in queue_tasks) or any(
+            str(t.get("batch_id") or "").strip() == batch_id for t in processing_tasks
+        ) or any(str(t.get("batch_id") or "").strip() == batch_id for t in private_tasks)
+
+    def _batch_has_successful_compile(batch_id: str) -> bool:
+        for task in complete_tasks:
+            if str(task.get("batch_id") or "").strip() != batch_id:
+                continue
+            if str(task.get("name") or "").strip() != "compile_output":
+                continue
+            result = task.get("result") if isinstance(task.get("result"), dict) else {}
+            if bool(result.get("success")):
+                return True
+        return False
 
     for task in failed_tasks:
         batch_id = str(task.get("batch_id") or "").strip()
@@ -59,14 +80,29 @@ def collect_recent_batch_failure_alerts(
             score += 2
 
         snippet = error_text[:240]
+        batch_live = _batch_has_live_work(batch_id)
+        batch_completed = _batch_has_successful_compile(batch_id)
+        hard_failure = (not batch_live) and (not batch_completed)
+
+        if hard_failure:
+            message = f"Batch {batch_id} failed at {name}: {snippet}"
+            severity = "bad"
+        else:
+            message = (
+                f"Batch {batch_id} warning at {name}: {snippet} "
+                f"(task failed after retries; batch still active or recovered)"
+            )
+            severity = "warn"
+
         alert = {
-            "severity": "bad",
+            "severity": severity,
             "worker": batch_id,
             "age_s": age_s,
-            "message": f"Batch {batch_id} failed at {name}: {snippet}",
-            "sticky": True,
-            "sticky_id": f"batch-failure:{batch_id}",
+            "message": message,
         }
+        if hard_failure:
+            alert["sticky"] = True
+            alert["sticky_id"] = f"batch-failure:{batch_id}"
 
         prev = best_by_batch.get(batch_id)
         if prev is None or score > prev[0]:

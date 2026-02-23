@@ -1,44 +1,31 @@
-# LLM Orchestration — Quick Reference
+# LLM Orchestration — Context (Short)
 
-Multi-GPU LLM orchestration: Claude writes plans, Brain interprets and sequences, GPU agents execute tasks via workers.
+Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 
-## Where To Find Things
+## Read First
+- `workspace/quickstart.md` (submit, monitor, kill plan)
+- `workspace/PLAN_FORMAT.md` (task schema)
+- `workspace/brain-behavior.md` (brain loop details)
+- `core/RULES.md` (immutable safety constraints)
 
-| Topic | Read This |
-|-------|-----------|
-| Architecture & hardware | `workspace/architecture.md` |
-| Plan format spec | `workspace/PLAN_FORMAT.md` |
-| Quick start (status, submit, monitor) | `workspace/quickstart.md` |
-| Brain loop & task handling | `workspace/brain-behavior.md` |
-| End-to-end workflow | `workspace/distributed_work_guide.md` |
-| Network setup (NFS, SSH, static IPs) | `workspace/NETWORK_SETUP.md` |
-| Hardware config & GPU assignment | `agents/config.json`, `agents/setup.py` |
-| Security rules | `core/RULES.md` |
-| Benchmarking guide | `workspace/llm_benchmark_testing_guide.md` |
-| Priority tasks (do first) | `workspace/implement/` |
-| Dashboard (web UI) | `scripts/dashboard.py` — run via `python scripts/dashboard.py`, access at http://localhost:8787 |
-| Cloud escalation artifact schema | `workspace/escalation_artifact_schema.md` |
-| Plan organization (shoulders & arms) | `plans/README_SHOULDERS_ARMS.md` |
+## Key Paths
+- `shared/agents/` code + config
+- `shared/plans/` shoulders/arms plan repos
+- `shared/tasks/{queue,processing,complete,failed}/` runtime lanes
+- `shared/brain/` brain state + private tasks
+- `shared/gpus/`, `shared/cpus/` worker heartbeats
+- `shared/logs/brain_decisions.log` primary decision log
 
-## File Layout
+## Non-Negotiables
+- Fail fast with clear errors.
+- No backward-compatibility hacks.
+- Don’t run plan scripts directly; always submit through `submit.py` or dashboard.
 
-```
-shared/
-├── agents/        # brain.py, gpu.py, worker.py, executor.py, setup.py, startup.py
-├── core/          # PROTECTED (root-owned) — system prompt, rules, escalation
-├── workspace/     # Docs, implement/, future/, human/, archive/
-├── plans/         # Plan folders (each its own git repo, gitignored from main)
-├── tasks/         # Runtime queue (queue/, processing/, complete/, failed/)
-├── brain/         # Brain state, private_tasks/, escalations/ (runtime)
-├── gpus/          # GPU heartbeats (runtime)
-├── signals/       # GPU control signals (runtime)
-└── logs/          # Logs
+## Start Plan (GPU rig)
+```bash
+python3 /mnt/shared/agents/submit.py \
+  /mnt/shared/plans/arms/<plan_name> \
+  --config '{"KEY":"VALUE"}'
 ```
 
-## Key Principles
-
-- No backwards compatibility — one clean way, delete old patterns
-- Fail fast with clear errors
-- shared/ lives on external drive, bind-mounted into repo, NFS-shared to GPU rig
-- Plans are independent git repos (shared/plans/ is gitignored from main repo)
-- Priority tasks go in workspace/implement/, completed work archived to workspace/archive/
+For complex JSON quoting, use the temp-file method in `workspace/quickstart.md`.

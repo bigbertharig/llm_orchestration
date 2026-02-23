@@ -240,6 +240,9 @@ class BrainGoalMixin:
                     task_class=template.get("task_class"),
                     vram_estimate_mb=template.get("vram_estimate_mb"),
                     vram_estimate_source=template.get("vram_estimate_source"),
+                    llm_min_tier=template.get("llm_min_tier"),
+                    llm_model=template.get("llm_model"),
+                    llm_placement=template.get("llm_placement"),
                     batch_priority=str(template.get("batch_priority", "normal") or "normal"),
                     preemptible=bool(template.get("preemptible", True)),
                 )
@@ -483,6 +486,9 @@ class BrainGoalMixin:
                     depends_on=depends_on,
                     executor=str(tpl.get("executor", "worker") or "worker"),
                     task_class=str(tpl.get("task_class", "") or "").lower() or None,
+                    llm_min_tier=tpl.get("llm_min_tier"),
+                    llm_model=tpl.get("llm_model"),
+                    llm_placement=tpl.get("llm_placement"),
                     batch_priority=batch_priority,
                     preemptible=batch_preemptible,
                 )
@@ -572,6 +578,9 @@ class BrainGoalMixin:
                 depends_on=depends_on,
                 executor=str(tpl.get("executor", "worker") or "worker"),
                 task_class=str(tpl.get("task_class", "") or "").lower() or None,
+                llm_min_tier=tpl.get("llm_min_tier"),
+                llm_model=tpl.get("llm_model"),
+                llm_placement=tpl.get("llm_placement"),
                 batch_priority=batch_priority,
                 preemptible=batch_preemptible,
             )

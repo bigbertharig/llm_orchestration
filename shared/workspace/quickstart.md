@@ -70,25 +70,79 @@ First run on new hardware? Run `python setup.py` first to generate `config.json`
 
 ## Submitting a Plan
 
-```bash
-cd ~/llm_orchestration
-source ~/ml-env/bin/activate
+**Important:** Always submit plans through these channels. Do not run plan scripts directly — this bypasses path translation, task orchestration, and concurrent plan management.
 
-python scripts/submit.py shared/plans/shoulders/<plan_name> \
+### Plan Start Checklist (Do This Every Time)
+
+1. Verify agents are running (`brain.py` + `gpu.py` workers).
+2. Pick a plan folder under `/mnt/shared/plans/shoulders/<plan>` or `/mnt/shared/plans/arms/<plan>`.
+3. Build a valid JSON config for all required inputs in that plan's `## Inputs`.
+4. Submit with `python3 /mnt/shared/agents/submit.py ... --config '<json>'`.
+5. Capture returned `Task ID` and `batch_id` from logs.
+6. Monitor progress in `brain_decisions.log` and `tasks/{queue,processing,complete,failed}`.
+
+### Path Mounting (GPU Rig vs Pi)
+
+The shared drive mounts at different paths depending on the host:
+
+| Host | Shared Drive Path |
+|------|-------------------|
+| GPU Rig | `/mnt/shared/` |
+| Pi (control plane) | `/media/bryan/shared/` |
+
+The submit script handles path translation automatically. Always use the path appropriate for the host you're running on.
+
+### Option 1: From GPU Rig (direct)
+
+```bash
+python3 /mnt/shared/agents/submit.py \
+  /mnt/shared/plans/arms/<plan_name> \
   --config '{"VAR1": "value1", "VAR2": "value2"}'
 ```
 
-**Example - dc_integration:**
+### Option 2: From Pi (via SSH)
+
 ```bash
-python scripts/submit.py shared/plans/shoulders/dc_integration \
-  --config '{
-    "ZIM_PATH": "/path/to/videos.zim",
-    "SOURCE_ID": "my-source",
-    "OUTPUT_FOLDER": "/tmp/output"
-  }'
+ssh gpu "python3 /mnt/shared/agents/submit.py \
+  /mnt/shared/plans/arms/<plan_name> \
+  --config '{\"VAR1\": \"value1\", \"VAR2\": \"value2\"}'"
 ```
 
-Runnable plans live in `shared/plans/shoulders/` (contracts). Full project code lives in `shared/plans/arms/`. See [PLAN_FORMAT.md](PLAN_FORMAT.md) for plan authoring.
+### Option 3: Dashboard (recommended for operators)
+
+Navigate to `http://localhost:8787/controls` and use the "Start Plan" interface. Config templates and input hints are shown automatically.
+
+### Example - research_event_discovery:
+
+```bash
+# From GPU rig:
+python3 /mnt/shared/agents/submit.py \
+  /mnt/shared/plans/arms/research_event_discovery \
+  --config '{"QUERY": "floods in the US in 2025", "MAX_EVENTS": "20"}'
+
+# From Pi via SSH:
+ssh gpu "python3 /mnt/shared/agents/submit.py \
+  /mnt/shared/plans/arms/research_event_discovery \
+  --config '{\"QUERY\": \"floods in the US in 2025\", \"MAX_EVENTS\": \"20\"}'"
+```
+
+### Safer Config Submission (Avoid Shell Escaping Errors)
+
+When JSON quoting gets long, write config to a file and compact it with Python:
+
+```bash
+cat >/tmp/plan_config.json <<'JSON'
+{
+  "VAR1": "value1",
+  "VAR2": "value2"
+}
+JSON
+
+CONFIG=$(python3 -c 'import json;print(json.dumps(json.load(open("/tmp/plan_config.json")),separators=(",",":")))')
+python3 /mnt/shared/agents/submit.py /mnt/shared/plans/arms/<plan_name> --config "$CONFIG"
+```
+
+Runnable plans live in `shared/plans/shoulders/` (contracts) or `shared/plans/arms/` (implementations). See [PLAN_FORMAT.md](PLAN_FORMAT.md) for plan authoring.
 
 ---
 
