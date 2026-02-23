@@ -81,6 +81,8 @@ tr:last-child td { border-bottom: 0; }
 .pill.gpu { background: rgba(255,169,77,.15); color: var(--gpu); }
 .pill.cpu { background: rgba(93,180,255,.15); color: var(--cpu); }
 .pill.llm { background: rgba(245,169,127,.16); color: var(--llm); }
+.pill.llm7b { background: rgba(245,169,127,.16); color: #ffc49e; }
+.pill.llm14b { background: rgba(255,132,97,.18); color: #ff9f87; }
 .pill.meta { background: rgba(203,166,247,.16); color: var(--meta); }
 .pill.script { background: rgba(116,199,236,.16); color: var(--script); }
 .pill.taskcpu { background: rgba(148,226,213,.16); color: var(--taskcpu); }

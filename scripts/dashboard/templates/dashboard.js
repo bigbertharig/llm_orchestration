@@ -163,22 +163,46 @@ function typeBadge(type) {
   return `<span class="pill ${type}">${type}</span>`;
 }
 
-function taskType(cls) {
-  const norm = (cls || '').toLowerCase();
+function inferLlmTier(task) {
+  const t = task || {};
+  const modelText = [
+    t.llm_model,
+    t.model,
+    t.command,
+    t.name
+  ].map(v => String(v || '').toLowerCase()).join(' ');
+  if (/\b14b\b/.test(modelText)) return 'llm14b';
+  if (/\b7b\b/.test(modelText)) return 'llm7b';
+  return 'llm';
+}
+
+function taskType(clsOrTask, taskObj = null) {
+  const task = (clsOrTask && typeof clsOrTask === 'object') ? clsOrTask : (taskObj || null);
+  const norm = task ? String(task.task_class || '').toLowerCase() : String(clsOrTask || '').toLowerCase();
   if (norm === 'cpu') return 'cpu';
-  if (norm === 'llm') return 'llm';
+  if (norm === 'llm') return inferLlmTier(task);
   if (norm === 'script') return 'gpu';
   if (norm === 'meta') return 'meta';
   return norm || '-';
 }
-function classBadge(cls, executor = '') {
+function classBadge(cls, executor = '', task = null) {
   if (String(executor || '').toLowerCase() === 'brain') {
     return `<span class="pill brain">BRAIN</span>`;
   }
-  const type = taskType(cls);
-  const map = { cpu: 'taskcpu', llm: 'llm', gpu: 'script', meta: 'meta', brain: 'brain' };
+  const type = task ? taskType(task) : taskType(cls);
+  const map = {
+    cpu: 'taskcpu',
+    llm: 'llm',
+    llm7b: 'llm7b',
+    llm14b: 'llm14b',
+    gpu: 'script',
+    meta: 'meta',
+    brain: 'brain'
+  };
   const key = map[type] || 'script';
-  return `<span class="pill ${key}">${String(type).toUpperCase()}</span>`;
+  const labelMap = { llm7b: 'LLM 7B', llm14b: 'LLM 14B' };
+  const label = labelMap[type] || String(type).toUpperCase();
+  return `<span class="pill ${key}">${label}</span>`;
 }
 function executorBadge(executor) {
   const e = (executor || 'worker').toLowerCase() === 'brain' ? 'brain' : 'worker';
@@ -349,7 +373,7 @@ function isSystemMetaTaskName(taskName) {
 }
 
 function renderTaskLane(targetId, items) {
-  const classes = [...new Set(items.map(t => taskType(t.task_class)).filter(Boolean))].sort();
+  const classes = [...new Set(items.map(t => taskType(t)).filter(Boolean))].sort();
   const executors = [...new Set(items.map(t => (t.executor || 'worker').toLowerCase()).filter(Boolean))].sort();
   const sort = laneState.sort || 'task_asc';
   const showRuntime = activeLane === 'processing';
@@ -358,7 +382,7 @@ function renderTaskLane(targetId, items) {
   const showQueuedAt = activeLane === 'queue';
 
   let filtered = items.filter(t => {
-    const cls = taskType(t.task_class);
+    const cls = taskType(t);
     const task = (t.name || '').toLowerCase();
     const worker = (t.assigned_to || '').toLowerCase();
     const executor = (t.executor || 'worker').toLowerCase();
@@ -385,8 +409,8 @@ function renderTaskLane(targetId, items) {
   filtered.sort((a, b) => {
     const aval = (key) => String(a[key] || '').toLowerCase();
     const bval = (key) => String(b[key] || '').toLowerCase();
-    const atype = taskType(a.task_class);
-    const btype = taskType(b.task_class);
+    const atype = taskType(a);
+    const btype = taskType(b);
     if (sort === 'class_asc') return atype.localeCompare(btype);
     if (sort === 'class_desc') return btype.localeCompare(atype);
     if (sort === 'task_asc') return aval('name').localeCompare(bval('name'));
@@ -455,7 +479,7 @@ function renderTaskLane(targetId, items) {
     '';
 
   const rows = filtered.map(t => [
-    classBadge(t.task_class, t.executor),
+    classBadge(t.task_class, t.executor, t),
     truncCell(t.name, 42, false),
     truncCell(t.assigned_to, 24, false),
     executorBadge(t.executor),
