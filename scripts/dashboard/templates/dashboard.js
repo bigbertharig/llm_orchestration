@@ -804,6 +804,7 @@ function renderWorkerTabs(workers) {
 function renderWorkerTable(workers, type) {
   if (type === 'gpu') {
     const splitGroupTotals = {};
+    const splitGroupHoldings = {};
     workers.forEach((w) => {
       const gid = String(w.runtime_group_id || '').trim();
       const placement = String(w.runtime_placement || '').trim();
@@ -811,12 +812,19 @@ function renderWorkerTable(workers, type) {
       if (!splitGroupTotals[gid]) {
         splitGroupTotals[gid] = { used: 0, total: 0, members: 0 };
       }
+      if (!splitGroupHoldings[gid]) {
+        splitGroupHoldings[gid] = new Set();
+      }
       if (w.vram_used_mb !== null && w.vram_used_mb !== undefined) {
         splitGroupTotals[gid].used += Number(w.vram_used_mb) || 0;
       }
       if (w.vram_total_mb !== null && w.vram_total_mb !== undefined) {
         splitGroupTotals[gid].total += Number(w.vram_total_mb) || 0;
       }
+      (w.holding || []).forEach((h) => {
+        const text = String(h || '').trim();
+        if (text) splitGroupHoldings[gid].add(text);
+      });
       splitGroupTotals[gid].members += 1;
     });
     const stateLabel = (w) => {
@@ -837,6 +845,16 @@ function renderWorkerTable(workers, type) {
       if (!grp || grp.members < 2 || grp.total <= 0) return self;
       return `${self} (grp ${grp.used}/${grp.total})`;
     };
+    const holdingLabel = (w) => {
+      const gid = String(w.runtime_group_id || '').trim();
+      const placement = String(w.runtime_placement || '').trim();
+      if (!gid || placement !== 'split_gpu') {
+        return truncCell((w.holding || []).slice(0,2).join(' | ') || '-', 64, true);
+      }
+      const groupItems = [...(splitGroupHoldings[gid] || new Set())].slice(0, 3);
+      const groupText = groupItems.length ? `GROUP ${groupItems.join(' | ')}` : 'GROUP -';
+      return truncCell(groupText, 80, true);
+    };
     const rows = workers.map(w => [
       fmt(w.name),
       stateLabel(w),
@@ -847,7 +865,7 @@ function renderWorkerTable(workers, type) {
       fmt(w.power_w),
       vram(w),
       fmt(w.thermal_cause && w.thermal_cause !== 'none' ? w.thermal_cause : '-'),
-      truncCell((w.holding || []).slice(0,2).join(' | ') || '-', 64, true),
+      holdingLabel(w),
       `<span class="${hbClass(w.age_s)}">${fmt(w.age_s)}</span>`
     ]);
     document.getElementById('workerTable').innerHTML = table(
