@@ -108,7 +108,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return {}
 
     def _gpu_ssh(self, remote_cmd: str, timeout_s: int = 180) -> dict[str, Any]:
-        cmd = ["ssh", "-o", "BatchMode=yes", "gpu", "bash", "-lc", remote_cmd]
+        # Pass remote command as a single shell-quoted argument so ssh does not
+        # split `bash -lc` arguments and silently execute a different command.
+        cmd = ["ssh", "-o", "BatchMode=yes", "gpu", f"bash -lc {shlex.quote(remote_cmd)}"]
         try:
             proc = subprocess.run(
                 cmd,
@@ -132,6 +134,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "cmd": " ".join(cmd),
                 "error": f"timeout after {timeout_s}s",
             }
+
+    def _gpu_has_git(self) -> tuple[bool, str]:
+        """Return whether git is available on the GPU host plus diagnostics."""
+        out = self._gpu_ssh("command -v git >/dev/null 2>&1 && echo __OK__ || echo __MISSING__", timeout_s=20)
+        stdout = str(out.get("stdout", ""))
+        if out.get("ok") and "__OK__" in stdout:
+            return True, ""
+        detail = str(out.get("stderr", "")).strip() or stdout.strip() or "git not found on gpu host"
+        return False, detail
 
     def _control_options(self) -> dict[str, Any]:
         brain = load_brain_state(self.shared_path)
@@ -204,6 +215,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         local_kill = scripts_dir / "kill_plan.py"
         cmd = f"python3 {shlex.quote(str(local_kill))} {shlex.quote(batch_id)} --keep-workers --keep-models --no-default-warm"
         out = run_shell(cmd, timeout_s=240)
+        cleaned = self._cleanup_stale_processing_heartbeats()
+        out["cleanup"] = cleaned
+        if cleaned.get("errors"):
+            out["stderr"] = f"{out.get('stderr', '')}\nheartbeat_cleanup_errors={cleaned.get('errors')}".strip()
         out["message"] = f"Killed batch {batch_id}" if out.get("ok") else f"Failed to kill batch {batch_id}"
         return out
 
@@ -218,6 +233,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             out["stderr"] = f"{out.get('stderr', '')}\nheartbeat_cleanup_errors={cleaned.get('errors')}".strip()
         out["message"] = "Killed all active batches" if out.get("ok") else "Failed to kill all active batches"
         return out
+
+    def _cleanup_stale(self) -> dict[str, Any]:
+        cleaned = self._cleanup_stale_processing_heartbeats()
+        errors = cleaned.get("errors") if isinstance(cleaned, dict) else []
+        ok = not errors
+        msg = (
+            f"Cleanup stale complete: removed={int(cleaned.get('removed', 0))}, kept={int(cleaned.get('kept', 0))}"
+            if isinstance(cleaned, dict)
+            else "Cleanup stale complete"
+        )
+        return {
+            "ok": ok,
+            "message": msg if ok else f"{msg} (with errors)",
+            "cleanup": cleaned,
+            "stderr": "" if ok else f"heartbeat_cleanup_errors={errors}",
+        }
 
     def _cleanup_stale_processing_heartbeats(self) -> dict[str, Any]:
         processing_dir = self.shared_path / "tasks" / "processing"
@@ -346,15 +377,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
             cfg_obj["REPO_URL"] = repo_url_clean
             if plan_name == "github_analyzer":
                 cfg_obj["REPO_PATH"] = ""
-        if plan_name == "github_analyzer":
-            # Dashboard submissions are exploratory-only: keep in standard mode.
-            cfg_obj["ANALYSIS_DEPTH"] = "standard"
         if claimed_clean:
             cfg_obj["CLAIMED_BEHAVIOR"] = claimed_clean
         if inline_clean:
             inline_path = write_inline_input_file(self.shared_path, plan_name, inline_clean, plan_scope=scope)
             chosen_key = next((k for k in INLINE_FILE_KEYS if k in cfg_obj), "QUERY_FILE")
             cfg_obj[chosen_key] = inline_path
+
+        # github_analyzer resolves REPO_URL by cloning when REPO_PATH is empty.
+        # Preflight this dependency so dashboard users get an immediate actionable error.
+        if plan_name == "github_analyzer":
+            repo_path_cfg = str(cfg_obj.get("REPO_PATH", "") or "").strip()
+            repo_url_cfg = str(cfg_obj.get("REPO_URL", "") or "").strip()
+            if repo_url_cfg and not repo_path_cfg:
+                has_git, detail = self._gpu_has_git()
+                if not has_git:
+                    return {
+                        "ok": False,
+                        "message": (
+                            "Cannot submit github_analyzer with REPO_URL because git is missing on GPU host. "
+                            "Provide REPO_PATH to a local checkout, or install git on gpu host."
+                        ),
+                        "stderr": detail[-4000:],
+                    }
 
         cfg_payload = json.dumps(cfg_obj, separators=(",", ":"))
         plan_path = f"/mnt/shared/plans/{scope}/{plan_name}"
@@ -451,6 +496,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/status":
             raw_batch_ids = parse_qs(parsed.query).get("batch_ids", [""])
             selected_batch_ids: list[str] = []
+            invalid_batch_ids: list[str] = []
             if raw_batch_ids:
                 joined = ",".join(raw_batch_ids)
                 for part in joined.split(","):
@@ -458,13 +504,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     if not bid:
                         continue
                     if not BATCH_ID_RE.fullmatch(bid):
-                        self._send_json(
-                            {"ok": False, "message": f"invalid batch_id in query: {bid!r}"},
-                            status=HTTPStatus.BAD_REQUEST,
-                        )
-                        return
+                        invalid_batch_ids.append(bid)
+                        continue
                     selected_batch_ids.append(bid)
-            self._send_json(summarize(self.shared_path, self.config, selected_batch_ids=selected_batch_ids))
+            payload = summarize(self.shared_path, self.config, selected_batch_ids=selected_batch_ids)
+            if invalid_batch_ids:
+                alerts = payload.get("alerts")
+                if not isinstance(alerts, list):
+                    alerts = []
+                    payload["alerts"] = alerts
+                bad = ", ".join(invalid_batch_ids[:5])
+                if len(invalid_batch_ids) > 5:
+                    bad += ", ..."
+                alerts.append(
+                    {
+                        "severity": "warn",
+                        "worker": "dashboard",
+                        "message": f"Ignored invalid tracked batch_ids: {bad}",
+                    }
+                )
+            self._send_json(payload)
             return
         if parsed.path == "/api/control/options":
             self._send_json(self._control_options())
@@ -486,6 +545,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/control/kill_all_active":
             self._send_json(self._kill_all_active())
+            return
+        if parsed.path == "/api/control/cleanup_stale":
+            self._send_json(self._cleanup_stale())
             return
         if parsed.path == "/api/control/return_default":
             self._send_json(self._return_default())

@@ -16,6 +16,7 @@ const PLAN_HIDDEN_KEYS = {
     'REPO_URL',
     'CLAIMED_BEHAVIOR',
     'ANALYSIS_DEPTH',
+    'RUN_MODE',
     'HOT_WORKERS',
     'WORKER_MODEL',
     'WORKER_SHARDS',
@@ -83,6 +84,8 @@ function setQuickInputsFromConfig(planName, cfg) {
   const obj = (cfg && typeof cfg === 'object') ? cfg : {};
   document.getElementById('quickRepoUrl').value = String(obj.REPO_URL || '');
   document.getElementById('quickClaim').value = String(obj.CLAIMED_BEHAVIOR || '');
+  const depth = String(obj.ANALYSIS_DEPTH || 'standard').toLowerCase();
+  document.getElementById('quickDepth').value = depth === 'deep' ? 'deep' : 'standard';
 }
 
 function getCurrentConfig() {
@@ -394,6 +397,11 @@ async function killAllActive() {
   await refreshOptions();
 }
 
+async function cleanupStale() {
+  showResult(await api('/api/control/cleanup_stale', {}));
+  await refreshOptions();
+}
+
 async function returnDefault() {
   showResult(await api('/api/control/return_default', {}));
   await refreshOptions();
@@ -412,9 +420,14 @@ async function startPlan() {
   const starterFile = document.getElementById('starterFile').value;
   const highPriority = document.getElementById('highPriority').checked;
   const quickRepoUrl = document.getElementById('quickRepoUrl').value;
+  const quickDepth = document.getElementById('quickDepth').value;
   const quickClaim = document.getElementById('quickClaim').value;
   const cfg = { ...getCurrentConfig(), ...readFormConfig() };
   if (quickRepoUrl && quickRepoUrl.trim()) cfg.REPO_URL = quickRepoUrl.trim();
+  if (planName === 'github_analyzer') {
+    cfg.ANALYSIS_DEPTH = (quickDepth === 'deep') ? 'deep' : 'standard';
+    cfg.RUN_MODE = 'fresh';
+  }
   if (quickClaim && quickClaim.trim()) cfg.CLAIMED_BEHAVIOR = quickClaim.trim();
   cfg.PRIORITY = highPriority ? 'high' : 'normal';
   cfg.PREEMPTIBLE = true;

@@ -95,6 +95,42 @@ def clear_task_queue(batch_id: str = None):
                 print(f"  Removed orphan lock: {lock.name}")
 
 
+def clear_orphan_heartbeats(batch_id: str = None):
+    """Remove stale heartbeat files left behind after batch cleanup.
+
+    Removes any heartbeat without a matching task JSON. For targeted batch kills,
+    also removes heartbeat files whose matching task JSON belongs to that batch.
+    """
+    processing_dir = TASKS_DIR / "processing"
+    if not processing_dir.exists():
+        return
+
+    removed = 0
+    for hb in processing_dir.glob("*.heartbeat.json"):
+        task_id = hb.name.replace(".heartbeat.json", "")
+        task_json = processing_dir / f"{task_id}.json"
+        if not task_json.exists():
+            if _safe_unlink(hb):
+                removed += 1
+                print(f"  Removed orphan heartbeat: {hb.name}")
+            continue
+
+        if not batch_id:
+            continue
+        try:
+            with open(task_json) as f:
+                task = json.load(f)
+            if task.get("batch_id") == batch_id and _safe_unlink(hb):
+                removed += 1
+                print(f"  Removed batch heartbeat: {hb.name}")
+        except Exception:
+            if _safe_unlink(hb):
+                removed += 1
+                print(f"  Removed unreadable heartbeat: {hb.name}")
+    if removed:
+        print(f"  Heartbeats removed: {removed}")
+
+
 def clear_private_tasks(batch_id: str = None):
     """Clear brain private tasks.
 
@@ -259,6 +295,9 @@ def main():
 
     # Step 2.5: Clear private tasks so brain has a clean slate too
     clear_private_tasks(args.batch_id)
+
+    # Step 2.6: Remove stale processing heartbeats that can make workers look stuck.
+    clear_orphan_heartbeats(args.batch_id)
 
     # Step 3: Kill workers (optional)
     if not args.keep_workers:

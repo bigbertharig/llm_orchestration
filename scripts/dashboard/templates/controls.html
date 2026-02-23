@@ -52,6 +52,7 @@ textarea { width: 100%; min-height: 120px; font-family: "JetBrains Mono", monosp
         <select id="killBatch"></select>
         <button class="danger" onclick="killPlan()">Kill selected batch</button>
         <button class="danger" onclick="killAllActive()">Kill all active</button>
+        <button class="warn" onclick="cleanupStale()">Cleanup stale</button>
       </div>
       <div class="k">Kills selected/all active batches without shutting down workers.</div>
       <div class="row">
@@ -97,6 +98,15 @@ textarea { width: 100%; min-height: 120px; font-family: "JetBrains Mono", monosp
             <div class="field-row">
               <div class="field-key">REPO_URL (quick)</div>
               <div><input id="quickRepoUrl" placeholder="https://github.com/owner/repo" /></div>
+            </div>
+            <div class="field-row">
+              <div class="field-key">ANALYSIS_DEPTH (quick)</div>
+              <div>
+                <select id="quickDepth">
+                  <option value="standard">standard</option>
+                  <option value="deep">deep</option>
+                </select>
+              </div>
             </div>
             <div class="field-row">
               <div class="field-key">CLAIMED_BEHAVIOR (quick)</div>
