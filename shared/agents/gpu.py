@@ -111,6 +111,8 @@ class GPUAgent:
         self.signals_path.mkdir(parents=True, exist_ok=True)
         self.split_state_dir = self.signals_path / "split_llm"
         self.split_state_dir.mkdir(parents=True, exist_ok=True)
+        self.model_load_lock_path = self.signals_path / "model_load.global.lock"
+        self.model_load_owner_path = self.signals_path / "model_load.global.json"
 
         # Logs
         self.log_path = self.shared_path / "logs"
@@ -503,7 +505,7 @@ class GPUAgent:
         self.logger.info(f"Loading model {target_model} into VRAM...")
         start_time = time.time()
 
-        try:
+        def _do_load():
             # Initial pull/load request (can block while weights are loaded)
             response = requests.post(
                 self.api_url,
@@ -525,6 +527,12 @@ class GPUAgent:
             if not self._wait_for_model_ready(model_id=target_model, max_wait_seconds=90):
                 raise RuntimeError("model readiness probe timed out after load")
 
+        try:
+            self._run_with_global_model_load_lock(
+                phase="single_model_load",
+                fn=_do_load,
+                max_wait_seconds=900,
+            )
             elapsed = int(time.time() - start_time)
             self.model_loaded = True
             self.loaded_model = target_model
@@ -545,6 +553,41 @@ class GPUAgent:
             self.loaded_tier = 0
             self.state = "cold"
             self.logger.error(f"Failed to load model: {e}")
+
+    def _run_with_global_model_load_lock(self, phase: str, fn, max_wait_seconds: int = 900):
+        lock = FileLock(str(self.model_load_lock_path), timeout=1)
+        deadline = time.time() + max_wait_seconds
+        while time.time() < deadline:
+            try:
+                lock.acquire(timeout=1)
+                break
+            except Timeout:
+                self._touch_meta_task(phase=f"{phase}_waiting_global_lock")
+                time.sleep(1)
+        else:
+            raise RuntimeError(f"global model load lock timeout after {max_wait_seconds}s")
+
+        try:
+            owner = {
+                "worker": self.name,
+                "pid": os.getpid(),
+                "phase": phase,
+                "acquired_at": datetime.now().isoformat(),
+            }
+            with open(self.model_load_owner_path, "w", encoding="utf-8") as f:
+                json.dump(owner, f, indent=2)
+            self._touch_meta_task(phase=f"{phase}_global_lock_acquired", force=True)
+            return fn()
+        finally:
+            try:
+                if self.model_load_owner_path.exists():
+                    self.model_load_owner_path.unlink()
+            except Exception:
+                pass
+            try:
+                lock.release()
+            except Exception:
+                pass
 
     def _wait_for_model_ready(self, model_id: str, max_wait_seconds: int = 90) -> bool:
         """
@@ -1055,47 +1098,57 @@ class GPUAgent:
                 return False
 
             # Warm/load the target model on shared runtime.
-            warmup_deadline = time.time() + 600
-            last_warmup_error = ""
-            while time.time() < warmup_deadline:
-                self._touch_meta_task(phase="warming_split_runtime")
-                try:
-                    r = requests.post(
-                        f"http://127.0.0.1:{port}/api/generate",
-                        json={
-                            "model": model_id,
-                            "prompt": "Hello",
-                            "stream": False,
-                            "keep_alive": self.worker_keep_alive,
-                            "options": {
-                                "num_gpu": 999,
-                                "num_ctx": self.worker_num_ctx,
-                            }
-                        },
-                        timeout=25
-                    )
-                    if r.status_code < 400:
-                        return True
-                    response_excerpt = (r.text or "").strip().replace("\n", " ")
-                    if len(response_excerpt) > 300:
-                        response_excerpt = response_excerpt[:300] + "..."
-                    last_warmup_error = (
-                        f"warmup HTTP {r.status_code} for model {model_id} on port {port}: {response_excerpt}"
-                    )
-                except Exception as exc:
-                    last_warmup_error = str(exc)
-                time.sleep(2)
+            def _warm_split_runtime():
+                warmup_deadline = time.time() + 600
+                last_warmup_error = ""
+                while time.time() < warmup_deadline:
+                    self._touch_meta_task(phase="warming_split_runtime")
+                    try:
+                        r = requests.post(
+                            f"http://127.0.0.1:{port}/api/generate",
+                            json={
+                                "model": model_id,
+                                "prompt": "Hello",
+                                "stream": False,
+                                "keep_alive": self.worker_keep_alive,
+                                "options": {
+                                    "num_gpu": 999,
+                                    "num_ctx": self.worker_num_ctx,
+                                }
+                            },
+                            timeout=25
+                        )
+                        if r.status_code < 400:
+                            return True
+                        response_excerpt = (r.text or "").strip().replace("\n", " ")
+                        if len(response_excerpt) > 300:
+                            response_excerpt = response_excerpt[:300] + "..."
+                        last_warmup_error = (
+                            f"warmup HTTP {r.status_code} for model {model_id} on port {port}: {response_excerpt}"
+                        )
+                    except Exception as exc:
+                        last_warmup_error = str(exc)
+                    time.sleep(2)
+                raise RuntimeError(
+                    f"warmup timeout for model {model_id} on port {port}: {last_warmup_error or 'no response'}"
+                )
 
-            self.last_split_runtime_error = (
-                f"warmup timeout for model {model_id} on port {port}: {last_warmup_error or 'no response'}"
-            )
-            self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
             try:
-                proc.terminate()
-            except Exception:
-                pass
-            self.split_runtime_process = None
-            return False
+                self._run_with_global_model_load_lock(
+                    phase="split_model_load",
+                    fn=_warm_split_runtime,
+                    max_wait_seconds=900,
+                )
+                return True
+            except Exception as exc:
+                self.last_split_runtime_error = str(exc)
+                self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                self.split_runtime_process = None
+                return False
         except Exception as exc:
             self.last_split_runtime_error = str(exc)
             self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
