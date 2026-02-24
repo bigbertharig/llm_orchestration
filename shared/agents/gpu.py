@@ -1172,9 +1172,12 @@ class GPUAgent:
                         continue
 
                     if status == "ready":
-                        # Non-owner mirrors loaded split runtime state.
-                        if self.name != launcher:
-                            self._set_split_runtime_loaded(model_id, group, as_owner=False)
+                        # Both members mirror ready state; launcher is authoritative owner.
+                        self._set_split_runtime_loaded(
+                            model_id,
+                            group,
+                            as_owner=(self.name == launcher),
+                        )
                         return
 
                     if status in {"unloaded", "failed", "expired"}:
@@ -1404,6 +1407,16 @@ class GPUAgent:
                         if required_placement == "split_gpu" and self.runtime_placement != "split_gpu":
                             self.logger.debug(
                                 f"Skipping llm task {task['task_id'][:8]}: requires split runtime"
+                            )
+                            continue
+                        if (
+                            required_placement == "split_gpu"
+                            and self.runtime_placement == "split_gpu"
+                            and not self.split_runtime_owner
+                        ):
+                            # Treat split pair as one logical worker: only launcher/owner claims.
+                            self.logger.debug(
+                                f"Skipping llm task {task['task_id'][:8]}: split runtime follower"
                             )
                             continue
 
@@ -1700,6 +1713,7 @@ class GPUAgent:
             "configured_model_tier": self.model_tier,
             "runtime_placement": self.runtime_placement,
             "runtime_group_id": self.runtime_group_id,
+            "split_runtime_owner": self.split_runtime_owner,
             "runtime_port": self.runtime_port,
             "runtime_ollama_url": self.runtime_ollama_url,
             "ollama_healthy": self.ollama_healthy,
