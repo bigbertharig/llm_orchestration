@@ -1373,6 +1373,23 @@ class GPUAgent:
         except Exception:
             return False
 
+    def _split_runtime_has_model_loaded(self, port: Any, model_id: str) -> bool:
+        try:
+            port_int = int(port)
+        except Exception:
+            return False
+        if not model_id:
+            return False
+        try:
+            r = requests.get(f"http://127.0.0.1:{port_int}/api/ps", timeout=2)
+            if r.status_code != 200:
+                return False
+            models = r.json().get("models", [])
+            loaded_names = [str(m.get("name", "")).strip() for m in models if isinstance(m, dict)]
+            return model_id in loaded_names
+        except Exception:
+            return False
+
     def _service_split_reservations(self):
         """Background sync so non-claiming partner can join and mirror split state."""
         for res_file in self.split_state_dir.glob("*.json"):
@@ -1403,9 +1420,41 @@ class GPUAgent:
                     launcher = str(reservation.get("launcher", "")).strip()
                     joined = reservation.get("joined", {}) if isinstance(reservation.get("joined"), dict) else {}
                     all_joined = all(bool(joined.get(m)) for m in members)
+                    port = group.get("port")
+
+                    # If the split runtime is already loaded on the shared port, finalize
+                    # to ready instead of re-launching and risking a false "port in use" failure.
+                    if (
+                        status == "loading"
+                        and self._split_runtime_has_model_loaded(port=port, model_id=model_id)
+                    ):
+                        reservation["status"] = "ready"
+                        reservation["ready_at"] = reservation.get("ready_at") or datetime.now().isoformat()
+                        reservation.pop("error", None)
+                        reservation["updated_at"] = datetime.now().isoformat()
+                        with open(res_file, "w", encoding="utf-8") as f:
+                            json.dump(reservation, f, indent=2)
+                        status = "ready"
 
                     if status in {"waiting_partner", "joining", "loading"} and all_joined:
-                        if launcher not in members or not self._is_gpu_heartbeat_fresh(launcher):
+                        launcher_needs_election = False
+                        if launcher not in members:
+                            launcher_needs_election = True
+                        elif status in {"waiting_partner", "joining"} and not self._is_gpu_heartbeat_fresh(launcher):
+                            launcher_needs_election = True
+                        elif status == "loading":
+                            # Be conservative once loading has started. Re-election while the split
+                            # runtime is warming can race with success and corrupt reservation state.
+                            if (
+                                not self._is_gpu_heartbeat_fresh(launcher)
+                                and not self._split_runtime_has_model_loaded(port=port, model_id=model_id)
+                            ):
+                                owner = self._read_global_model_load_owner() or {}
+                                owner_worker = str(owner.get("worker", "")).strip()
+                                owner_phase = str(owner.get("phase", "")).strip()
+                                if owner_worker not in members or owner_phase != "split_model_load":
+                                    launcher_needs_election = True
+                        if launcher_needs_election:
                             reservation["launcher"] = self.name
                             launcher = self.name
                         if self.name == launcher:
