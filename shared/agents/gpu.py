@@ -1810,7 +1810,14 @@ class GPUAgent:
         command = task.get("command", "")
         if command == "load_llm":
             # Only cold workers should claim load commands.
-            return not self.model_loaded
+            if self.model_loaded:
+                return False
+            candidates = task.get("candidate_workers", [])
+            if isinstance(candidates, list) and candidates:
+                allowed = {str(name).strip() for name in candidates if str(name).strip()}
+                if allowed and self.name not in allowed:
+                    return False
+            return True
         if command == "unload_llm":
             # Only hot workers should claim unload commands.
             return self.model_loaded

@@ -259,7 +259,12 @@ def _count_existing_meta_tasks(shared_path: Path, command: str) -> int:
     return count
 
 
-def _enqueue_startup_load_llm(shared_path: Path, created_by: str, count: int):
+def _enqueue_startup_load_llm(
+    shared_path: Path,
+    created_by: str,
+    count: int,
+    preferred_workers: list[str] | None = None,
+):
     """Insert N startup load_llm meta tasks into the public queue."""
     if count <= 0:
         return
@@ -275,6 +280,7 @@ def _enqueue_startup_load_llm(shared_path: Path, created_by: str, count: int):
         )
         return
 
+    preferred_order = [str(w).strip() for w in (preferred_workers or []) if str(w).strip()]
     for idx in range(to_add):
         task = {
             "task_id": str(uuid.uuid4()),
@@ -291,6 +297,8 @@ def _enqueue_startup_load_llm(shared_path: Path, created_by: str, count: int):
             "created_by": created_by,
             "retry_count": 0,
         }
+        if idx < len(preferred_order):
+            task["candidate_workers"] = [preferred_order[idx]]
         task_file = queue_path / f"{task['task_id']}.json"
         with open(task_file, "w") as f:
             json.dump(task, f, indent=2)
@@ -627,6 +635,7 @@ def main():
             shared_path=Path(config["shared_path"]),
             created_by="startup",
             count=warm_target,
+            preferred_workers=["gpu-2"],
         )
 
     # --- Running ---
