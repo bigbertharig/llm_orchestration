@@ -3843,6 +3843,8 @@ JSON only:"""
             "llm": 0,
             "llm_split_required": 0,
             "llm_max_tier": 0,
+            "llm_model_demand": {},
+            "llm_split_model_demand": {},
             "meta": 0,
             "brain_tasks": 0,
             "worker_tasks": 0
@@ -3868,6 +3870,16 @@ JSON only:"""
                     stats[task_class] += 1
                 if task_class == "llm":
                     placement = str(task.get("llm_placement", "")).strip()
+                    llm_model = str(task.get("llm_model", "")).strip()
+                    if llm_model:
+                        stats["llm_model_demand"][llm_model] = (
+                            int(stats["llm_model_demand"].get(llm_model, 0)) + 1
+                        )
+                        model_meta = self.model_meta_by_id.get(llm_model, {})
+                        if str(model_meta.get("placement", "")) == "split_gpu":
+                            stats["llm_split_model_demand"][llm_model] = (
+                                int(stats["llm_split_model_demand"].get(llm_model, 0)) + 1
+                            )
                     if placement == "split_gpu":
                         stats["llm_split_required"] += 1
                     try:
@@ -4057,7 +4069,26 @@ JSON only:"""
                 }
             )
 
-    def _choose_split_model_for_tier(self, min_tier: int) -> Optional[str]:
+    def _choose_split_model_for_tier(
+        self,
+        min_tier: int,
+        preferred_models: Optional[List[str]] = None,
+    ) -> Optional[str]:
+        if isinstance(preferred_models, list):
+            for model_id in preferred_models:
+                model_id = str(model_id or "").strip()
+                if not model_id:
+                    continue
+                meta = self.model_meta_by_id.get(model_id, {})
+                if str(meta.get("placement", "")) != "split_gpu":
+                    continue
+                try:
+                    tier = int(meta.get("tier", self.default_llm_min_tier))
+                except Exception:
+                    tier = self.default_llm_min_tier
+                if tier >= min_tier:
+                    return model_id
+
         candidates = []
         for model_id, meta in self.model_meta_by_id.items():
             if str(meta.get("placement", "")) != "split_gpu":
@@ -4200,7 +4231,21 @@ JSON only:"""
             (split_needed or required_max_tier >= 2)
             and not self._has_pending_meta_command("load_split_llm")
         ):
-            split_model = self._choose_split_model_for_tier(max(2, required_max_tier))
+            split_model_demand = queue_stats.get("llm_split_model_demand", {})
+            preferred_split_models: List[str] = []
+            if isinstance(split_model_demand, dict):
+                preferred_split_models = [
+                    str(model_id)
+                    for model_id, _ in sorted(
+                        split_model_demand.items(),
+                        key=lambda item: (-int(item[1]), str(item[0])),
+                    )
+                ]
+
+            split_model = self._choose_split_model_for_tier(
+                min_tier=max(2, required_max_tier),
+                preferred_models=preferred_split_models,
+            )
             if split_model:
                 split_groups = self._split_groups_for_model(split_model)
                 viable_groups = []
@@ -4227,6 +4272,7 @@ JSON only:"""
                             {
                                 "split_needed": split_needed,
                                 "required_max_tier": required_max_tier,
+                                "preferred_split_models": preferred_split_models,
                                 "candidate_groups": viable_groups,
                             }
                         )

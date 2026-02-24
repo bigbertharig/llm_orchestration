@@ -147,6 +147,7 @@ class GPUAgent:
         self.runtime_ollama_url: Optional[str] = f"http://localhost:{self.port}" if self.port else None
         self.split_runtime_owner: bool = False
         self.split_runtime_process: Optional[subprocess.Popen] = None
+        self.last_split_runtime_error: str = ""
         self.ollama_process: Optional[subprocess.Popen] = None
 
         # Worker tracking
@@ -996,15 +997,18 @@ class GPUAgent:
         self.state = "cold"
 
     def _start_split_runtime(self, group: Dict[str, Any], model_id: str) -> bool:
+        self.last_split_runtime_error = ""
         try:
             members = [str(m).strip() for m in group.get("members", []) if str(m).strip()]
             if len(members) < 2:
-                self.logger.error(f"split runtime start failed: invalid members {members}")
+                self.last_split_runtime_error = f"invalid split members: {members}"
+                self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
                 return False
             try:
                 port = int(group.get("port"))
             except Exception:
-                self.logger.error(f"split runtime start failed: missing/invalid port in {group}")
+                self.last_split_runtime_error = f"missing/invalid split port in group {group}"
+                self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
                 return False
 
             member_gpu_ids = []
@@ -1036,7 +1040,8 @@ class GPUAgent:
                     pass
                 time.sleep(0.4)
             if not ready:
-                self.logger.error(f"split runtime failed to start on port {port}")
+                self.last_split_runtime_error = f"split runtime failed to start on port {port}"
+                self.logger.error(self.last_split_runtime_error)
                 try:
                     proc.terminate()
                 except Exception:
@@ -1059,10 +1064,24 @@ class GPUAgent:
                 },
                 timeout=600
             )
-            r.raise_for_status()
+            if r.status_code >= 400:
+                response_excerpt = (r.text or "").strip().replace("\n", " ")
+                if len(response_excerpt) > 300:
+                    response_excerpt = response_excerpt[:300] + "..."
+                self.last_split_runtime_error = (
+                    f"warmup HTTP {r.status_code} for model {model_id} on port {port}: {response_excerpt}"
+                )
+                self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                self.split_runtime_process = None
+                return False
             return True
         except Exception as exc:
-            self.logger.error(f"split runtime start failed: {exc}")
+            self.last_split_runtime_error = str(exc)
+            self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
             if self.split_runtime_process:
                 try:
                     self.split_runtime_process.terminate()
@@ -1138,6 +1157,10 @@ class GPUAgent:
                     if status in {"waiting_partner", "joining"} and all_joined and self.name == launcher:
                         ok = self._start_split_runtime(group, model_id)
                         reservation["status"] = "ready" if ok else "failed"
+                        if ok:
+                            reservation.pop("error", None)
+                        else:
+                            reservation["error"] = str(self.last_split_runtime_error or "split runtime failed")
                         reservation["ready_at"] = datetime.now().isoformat() if ok else None
                         reservation["updated_at"] = datetime.now().isoformat()
                         with open(res_file, "w", encoding="utf-8") as f:
@@ -1864,36 +1887,82 @@ class GPUAgent:
                     members = [str(m).strip() for m in chosen.get("members", []) if str(m).strip()]
                     launcher = sorted(members)[0] if members else self.name
                     reservation_path = self._split_reservation_path(group_id)
-                    lock = FileLock(str(reservation_path) + ".lock", timeout=5)
-                    with lock:
-                        now_iso = datetime.now().isoformat()
-                        reservation = {
-                            "group_id": group_id,
-                            "target_model": target_model,
-                            "status": "waiting_partner",
-                            "members": members,
-                            "port": chosen.get("port"),
-                            "launcher": launcher,
-                            "joined": {self.name: {"joined_at": now_iso}},
-                            "created_at": now_iso,
-                            "updated_at": now_iso,
+                    lock = FileLock(str(reservation_path) + ".lock", timeout=2)
+                    lock_wait_deadline = time.time() + 30
+                    reservation_written = False
+                    while time.time() < lock_wait_deadline:
+                        try:
+                            with lock:
+                                now_iso = datetime.now().isoformat()
+                                reservation = {
+                                    "group_id": group_id,
+                                    "target_model": target_model,
+                                    "status": "waiting_partner",
+                                    "members": members,
+                                    "port": chosen.get("port"),
+                                    "launcher": launcher,
+                                    "joined": {self.name: {"joined_at": now_iso}},
+                                    "created_at": now_iso,
+                                    "updated_at": now_iso,
+                                }
+                                if reservation_path.exists():
+                                    with open(reservation_path, "r", encoding="utf-8") as f:
+                                        existing = json.load(f)
+                                    existing_status = str(existing.get("status", "")).strip()
+                                    existing_model = str(existing.get("target_model", "")).strip()
+                                    terminal_statuses = {"failed", "expired", "unloaded"}
+                                    if (
+                                        existing_status == "ready"
+                                        and existing_model == target_model
+                                    ):
+                                        reservation = existing
+                                    elif (
+                                        existing_model == target_model
+                                        and existing_status not in terminal_statuses
+                                    ):
+                                        joined = existing.get("joined", {})
+                                        if isinstance(joined, dict):
+                                            joined[self.name] = {"joined_at": now_iso}
+                                        else:
+                                            joined = {self.name: {"joined_at": now_iso}}
+                                        reservation.update(existing)
+                                        reservation["joined"] = joined
+                                        reservation["updated_at"] = now_iso
+                                    else:
+                                        # Existing reservation is stale (terminal) or for a different model.
+                                        # Replace it with a fresh reservation for this target model.
+                                        reservation["created_at"] = now_iso
+                                        reservation["updated_at"] = now_iso
+                                with open(reservation_path, "w", encoding="utf-8") as f:
+                                    json.dump(reservation, f, indent=2)
+                            reservation_written = True
+                            break
+                        except Timeout:
+                            self.logger.info(
+                                f"Split reservation lock busy for {group_id}; retrying join for {target_model}"
+                            )
+                            self._service_split_reservations()
+                            time.sleep(0.5)
+                    if not reservation_written:
+                        result = {
+                            "success": False,
+                            "output": (
+                                f"Split load failed: unable to acquire reservation lock for {group_id} "
+                                "after 30s"
+                            ),
+                            "model_loaded": self.model_loaded,
+                            "loaded_model": self.loaded_model,
+                            "runtime_group_id": self.runtime_group_id,
+                            "worker": self.name,
+                            "max_vram_used_mb": 0,
                         }
-                        if reservation_path.exists():
-                            with open(reservation_path, "r", encoding="utf-8") as f:
-                                existing = json.load(f)
-                            if str(existing.get("status", "")) == "ready":
-                                reservation = existing
-                            else:
-                                joined = existing.get("joined", {})
-                                if isinstance(joined, dict):
-                                    joined[self.name] = {"joined_at": now_iso}
-                                else:
-                                    joined = {self.name: {"joined_at": now_iso}}
-                                reservation.update(existing)
-                                reservation["joined"] = joined
-                                reservation["updated_at"] = now_iso
-                        with open(reservation_path, "w", encoding="utf-8") as f:
-                            json.dump(reservation, f, indent=2)
+                        self.outbox.append(WorkerResult(
+                            task_id=task["task_id"],
+                            task=task,
+                            result=result,
+                            peak_vram_mb=0,
+                        ))
+                        return
 
                     deadline = time.time() + SPLIT_META_TIMEOUT_SECONDS
                     success = False
@@ -1911,7 +1980,11 @@ class GPUAgent:
                             success = True
                             break
                         if status in {"failed", "expired", "unloaded"}:
-                            failure_reason = f"reservation status={status}"
+                            reservation_error = str(reservation.get("error", "")).strip()
+                            if reservation_error:
+                                failure_reason = f"reservation status={status}: {reservation_error}"
+                            else:
+                                failure_reason = f"reservation status={status}"
                             break
                         time.sleep(2)
 
