@@ -45,6 +45,7 @@ logging.basicConfig(
 VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'meta']
 DEFAULT_LLM_MIN_TIER = 1
 SPLIT_META_TIMEOUT_SECONDS = 300
+SPLIT_LAUNCHER_HEARTBEAT_MAX_AGE_SECONDS = 45
 
 # Timing
 EXTERNAL_HEARTBEAT_INTERVAL = 30  # seconds - filesystem heartbeat to brain
@@ -1124,12 +1125,29 @@ class GPUAgent:
             )
         return reservation
 
+    def _is_gpu_heartbeat_fresh(self, gpu_name: str, max_age_seconds: int = SPLIT_LAUNCHER_HEARTBEAT_MAX_AGE_SECONDS) -> bool:
+        try:
+            suffix = str(gpu_name).split("-")[-1]
+            heartbeat_path = self.shared_path / "gpus" / f"gpu_{suffix}" / "heartbeat.json"
+            if not heartbeat_path.exists():
+                return False
+            with open(heartbeat_path, "r", encoding="utf-8") as f:
+                heartbeat = json.load(f)
+            raw_last_updated = str(heartbeat.get("last_updated", "")).strip()
+            if not raw_last_updated:
+                return False
+            last_updated = datetime.fromisoformat(raw_last_updated)
+            return (datetime.now() - last_updated).total_seconds() <= float(max_age_seconds)
+        except Exception:
+            return False
+
     def _service_split_reservations(self):
         """Background sync so non-claiming partner can join and mirror split state."""
         for res_file in self.split_state_dir.glob("*.json"):
             if str(res_file).endswith(".lock"):
                 continue
             lock = FileLock(str(res_file) + ".lock", timeout=1)
+            start_runtime = None
             try:
                 with lock:
                     if not res_file.exists():
@@ -1154,21 +1172,21 @@ class GPUAgent:
                     joined = reservation.get("joined", {}) if isinstance(reservation.get("joined"), dict) else {}
                     all_joined = all(bool(joined.get(m)) for m in members)
 
-                    if status in {"waiting_partner", "joining"} and all_joined and self.name == launcher:
-                        ok = self._start_split_runtime(group, model_id)
-                        reservation["status"] = "ready" if ok else "failed"
-                        if ok:
-                            reservation.pop("error", None)
-                        else:
-                            reservation["error"] = str(self.last_split_runtime_error or "split runtime failed")
-                        reservation["ready_at"] = datetime.now().isoformat() if ok else None
-                        reservation["updated_at"] = datetime.now().isoformat()
-                        with open(res_file, "w", encoding="utf-8") as f:
-                            json.dump(reservation, f, indent=2)
-                        if ok:
-                            self._set_split_runtime_loaded(model_id, group, as_owner=True)
-                        else:
-                            self._clear_split_runtime_loaded()
+                    if status in {"waiting_partner", "joining", "loading"} and all_joined:
+                        if launcher not in members or not self._is_gpu_heartbeat_fresh(launcher):
+                            reservation["launcher"] = self.name
+                            launcher = self.name
+                        if self.name == launcher:
+                            if status != "loading":
+                                reservation["status"] = "loading"
+                                reservation["updated_at"] = datetime.now().isoformat()
+                            with open(res_file, "w", encoding="utf-8") as f:
+                                json.dump(reservation, f, indent=2)
+                            start_runtime = {
+                                "group": group,
+                                "model_id": model_id,
+                                "launcher": launcher,
+                            }
                         continue
 
                     if status == "ready":
@@ -1187,6 +1205,39 @@ class GPUAgent:
                 continue
             except Exception:
                 continue
+
+            if not start_runtime:
+                continue
+
+            ok = self._start_split_runtime(start_runtime["group"], start_runtime["model_id"])
+            try:
+                with lock:
+                    if not res_file.exists():
+                        continue
+                    with open(res_file, "r", encoding="utf-8") as f:
+                        reservation = json.load(f)
+                    if str(reservation.get("launcher", "")).strip() != self.name:
+                        continue
+                    reservation["status"] = "ready" if ok else "failed"
+                    if ok:
+                        reservation.pop("error", None)
+                        reservation["ready_at"] = datetime.now().isoformat()
+                    else:
+                        reservation["error"] = str(self.last_split_runtime_error or "split runtime failed")
+                    reservation["updated_at"] = datetime.now().isoformat()
+                    with open(res_file, "w", encoding="utf-8") as f:
+                        json.dump(reservation, f, indent=2)
+            except Exception:
+                pass
+
+            if ok:
+                self._set_split_runtime_loaded(
+                    start_runtime["model_id"],
+                    start_runtime["group"],
+                    as_owner=True,
+                )
+            else:
+                self._clear_split_runtime_loaded()
 
     def _can_claim_meta_task(self, task: Dict) -> bool:
         """Enforce hot/cold ownership rules for meta tasks."""
@@ -1899,7 +1950,7 @@ class GPUAgent:
                 else:
                     group_id = str(chosen.get("id", "")).strip()
                     members = [str(m).strip() for m in chosen.get("members", []) if str(m).strip()]
-                    launcher = sorted(members)[0] if members else self.name
+                    launcher = self.name
                     reservation_path = self._split_reservation_path(group_id)
                     lock = FileLock(str(reservation_path) + ".lock", timeout=2)
                     lock_wait_deadline = time.time() + 30
