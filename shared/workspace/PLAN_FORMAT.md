@@ -28,6 +28,11 @@ A plan tells the brain:
 
 The brain reads this as an LLM and generates shell tasks. The plan should be precise enough that the brain reliably generates correct commands, but flexible enough that it can make sensible decisions about parallelism, worker assignment, and error handling.
 
+Important parser behavior:
+- Brain substitutes only built-in variables (for example `{BATCH_ID}`, `{BATCH_PATH}`, `{PLAN_PATH}`) plus submission config keys.
+- Text like `(default: ...)` in `## Inputs` is documentation only unless the planner hardcodes the default in commands/scripts.
+- If a command references `{MISSING_VAR}`, it will remain literal and can break the run.
+
 ---
 
 ## Plan Location
@@ -285,14 +290,14 @@ The brain parses the `## Tasks` section directly. Each task is defined as:
 | `llm_placement` | `single_gpu` or `split_gpu` | **Optional (llm).** Placement constraint when a task must run on split runtime |
 | `command` | Shell command in backticks | What to execute |
 | `depends_on` | Comma-separated task IDs or `none` | Tasks that must complete first |
-| `requires` | Comma-separated file paths/patterns | **Required.** Inputs this task expects to read |
-| `produces` | Comma-separated file paths/patterns | **Required.** Outputs this task is responsible for writing |
+| `requires` | Comma-separated file paths/patterns | **Optional (documentation contract).** Inputs this task expects to read |
+| `produces` | Comma-separated file paths/patterns | **Optional (documentation contract).** Outputs this task is responsible for writing |
 | `foreach` | `path:jsonpath` | **Optional.** Expand to N tasks (see Foreach Expansion below) |
 | `batch_size` | Integer >= 1 | **Optional.** Group foreach items into micro-batch tasks (default `1`) |
 | `vram_policy` | `default`, `infer`, `fixed` | **Optional (script).** How brain sets script VRAM estimate |
 | `vram_estimate_mb` | Integer MB | **Optional (script).** Explicit VRAM estimate used when `fixed` |
 
-**Important:** `executor`, `task_class`, `command`, `depends_on`, `requires`, and `produces` are required in every task. `foreach`, `batch_size`, `vram_policy`, `vram_estimate_mb`, `llm_min_tier`, `llm_model`, and `llm_placement` are optional. If `task_class` is missing, the task goes to `failed/` immediately. The brain will attempt to auto-fix by inferring the class from command keywords, but plans should always specify it explicitly.
+**Important:** `executor`, `task_class`, `command`, and `depends_on` are required in every task. `requires`, `produces`, `foreach`, `batch_size`, `vram_policy`, `vram_estimate_mb`, `llm_min_tier`, `llm_model`, and `llm_placement` are optional. If `task_class` is missing, the task goes to `failed/` immediately. The brain will attempt to auto-fix by inferring the class from command keywords, but plans should always specify it explicitly.
 
 ### Executor Routing (Brain vs Worker)
 
@@ -317,13 +322,14 @@ Rule of thumb:
 
 ### Dataflow Contracts
 
-Use `requires` and `produces` to make task handoffs explicit and machine-checkable.
+Use `requires` and `produces` to make task handoffs explicit and reviewable.
 
 - `requires` should list concrete files (or explicit patterns) that must exist before the task can run.
 - `produces` should list the outputs the task guarantees when successful.
 - For `foreach` tasks, use `{ITEM.field}` in paths to bind per-item artifacts.
 - Downstream tasks should `require` outputs from upstream tasks. If an output is never consumed, remove it or document why.
 - Keep contracts tight: list only files that matter for orchestration and validation.
+- Current brain parser treats these as documentation/contracts (it does not gate execution on them yet).
 
 ### Task Classes
 
@@ -465,6 +471,8 @@ Example:
 `add_topics` task can use `depends_on: init, transcribe_whisper_{ITEM.id}` so each topic task is released as soon as its own transcript finishes.
 
 **Dependency behavior:** Tasks depending on a foreach task automatically wait for ALL expanded tasks. If `process` expands to 100 tasks, `aggregate` with `depends_on: process` waits for all 100.
+
+**Zero-item foreach:** If a valid foreach source expands to 0 items, the brain auto-completes the template task as a no-op success and continues dependency release. This prevents deadlocks on empty manifests.
 
 **Batching behavior (`batch_size > 1`):**
 - Brain groups foreach items into micro-batch tasks (e.g., `process_batch_0001_0004`).
