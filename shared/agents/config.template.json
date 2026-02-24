@@ -16,6 +16,20 @@
   "worker_keep_alive": "30m",
   "brain_context_tokens": 32768,
   "worker_context_tokens": 8192,
+  "review_lap_models": {
+    "extractor": {
+      "preferred": "qwen2.5:7b",
+      "fallback": "qwen2.5-coder:14b"
+    },
+    "verifier": {
+      "preferred": "qwen2.5-coder:14b",
+      "fallback": "qwen2.5:7b"
+    },
+    "adjudicator": {
+      "preferred": "qwen2.5-coder:14b",
+      "fallback": "qwen2.5:7b"
+    }
+  },
 
   "brain": {
     "name": "brain",
