@@ -7,6 +7,7 @@ goal discovery ordering, and execute_plan orchestration setup.
 import ast
 import json
 import re
+import shlex
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
