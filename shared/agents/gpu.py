@@ -52,6 +52,7 @@ EXTERNAL_HEARTBEAT_INTERVAL = 30  # seconds - filesystem heartbeat to brain
 ACTIVE_WORK_HEARTBEAT_INTERVAL = 5  # seconds - faster claims while work is active
 INTERNAL_POLL_INTERVAL = 5        # seconds - check worker status internally
 SIGNAL_CHECK_INTERVAL = 5         # seconds - check stop/abort signals
+META_TASK_HEARTBEAT_INTERVAL = 5  # seconds - keep ownership visible during long meta work
 
 # VRAM budget
 VRAM_BUDGET_RATIO = 0.8           # Use at most 80% of total VRAM
@@ -158,6 +159,8 @@ class GPUAgent:
         self.outbox: List[WorkerResult] = []
         # Internal status queue: workers post updates here every INTERNAL_POLL_INTERVAL
         self.status_queue: Queue = Queue()
+        self.active_meta_task: Optional[Dict[str, Any]] = None
+        self.last_meta_heartbeat: float = 0.0
 
         # VRAM budget tracking
         self.claimed_vram = 0  # Sum of VRAM estimates for currently running workers
@@ -1032,6 +1035,7 @@ class GPUAgent:
             deadline = time.time() + 20
             ready = False
             while time.time() < deadline:
+                self._touch_meta_task(phase="starting_split_runtime")
                 try:
                     r = requests.get(f"http://127.0.0.1:{port}/api/tags", timeout=1.5)
                     if r.status_code == 200:
@@ -1051,35 +1055,47 @@ class GPUAgent:
                 return False
 
             # Warm/load the target model on shared runtime.
-            r = requests.post(
-                f"http://127.0.0.1:{port}/api/generate",
-                json={
-                    "model": model_id,
-                    "prompt": "Hello",
-                    "stream": False,
-                    "keep_alive": self.worker_keep_alive,
-                    "options": {
-                        "num_gpu": 999,
-                        "num_ctx": self.worker_num_ctx,
-                    }
-                },
-                timeout=600
-            )
-            if r.status_code >= 400:
-                response_excerpt = (r.text or "").strip().replace("\n", " ")
-                if len(response_excerpt) > 300:
-                    response_excerpt = response_excerpt[:300] + "..."
-                self.last_split_runtime_error = (
-                    f"warmup HTTP {r.status_code} for model {model_id} on port {port}: {response_excerpt}"
-                )
-                self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
+            warmup_deadline = time.time() + 600
+            last_warmup_error = ""
+            while time.time() < warmup_deadline:
+                self._touch_meta_task(phase="warming_split_runtime")
                 try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                self.split_runtime_process = None
-                return False
-            return True
+                    r = requests.post(
+                        f"http://127.0.0.1:{port}/api/generate",
+                        json={
+                            "model": model_id,
+                            "prompt": "Hello",
+                            "stream": False,
+                            "keep_alive": self.worker_keep_alive,
+                            "options": {
+                                "num_gpu": 999,
+                                "num_ctx": self.worker_num_ctx,
+                            }
+                        },
+                        timeout=25
+                    )
+                    if r.status_code < 400:
+                        return True
+                    response_excerpt = (r.text or "").strip().replace("\n", " ")
+                    if len(response_excerpt) > 300:
+                        response_excerpt = response_excerpt[:300] + "..."
+                    last_warmup_error = (
+                        f"warmup HTTP {r.status_code} for model {model_id} on port {port}: {response_excerpt}"
+                    )
+                except Exception as exc:
+                    last_warmup_error = str(exc)
+                time.sleep(2)
+
+            self.last_split_runtime_error = (
+                f"warmup timeout for model {model_id} on port {port}: {last_warmup_error or 'no response'}"
+            )
+            self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            self.split_runtime_process = None
+            return False
         except Exception as exc:
             self.last_split_runtime_error = str(exc)
             self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
@@ -1667,11 +1683,19 @@ class GPUAgent:
     def _task_heartbeat_file(self, task_id: str) -> Path:
         return self.processing_path / f"{task_id}.heartbeat.json"
 
-    def _write_task_heartbeat(self, task_id: str, worker_id: str, pid: int, peak_vram_mb: int = 0):
+    def _write_task_heartbeat(
+        self,
+        task_id: str,
+        worker_id: str,
+        pid: int,
+        peak_vram_mb: int = 0,
+        is_meta: bool = False,
+    ):
         """Write per-task progress heartbeat for stuck-task detection."""
         hb = {
             "task_id": task_id,
             "worker_id": worker_id,
+            "is_meta": bool(is_meta),
             "gpu": self.name,
             "pid": pid,
             "peak_vram_mb": int(peak_vram_mb),
@@ -1690,6 +1714,44 @@ class GPUAgent:
                 hb_file.unlink()
         except Exception:
             pass
+
+    def _begin_meta_task(self, task: Dict[str, Any]):
+        self.active_meta_task = {
+            "task_id": task.get("task_id", ""),
+            "task_name": task.get("name", task.get("command", "meta")),
+            "started_at": time.time(),
+            "phase": "start",
+        }
+        self.last_meta_heartbeat = 0.0
+        self._touch_meta_task(force=True)
+
+    def _touch_meta_task(self, phase: Optional[str] = None, force: bool = False):
+        if not self.active_meta_task:
+            return
+        if phase:
+            self.active_meta_task["phase"] = phase
+        now = time.time()
+        if not force and (now - self.last_meta_heartbeat) < META_TASK_HEARTBEAT_INTERVAL:
+            return
+        task_id = str(self.active_meta_task.get("task_id", "")).strip()
+        if task_id:
+            self._write_task_heartbeat(
+                task_id,
+                f"{self.name}-meta",
+                os.getpid(),
+                peak_vram_mb=0,
+                is_meta=True,
+            )
+        self._write_heartbeat()
+        self.last_meta_heartbeat = now
+
+    def _end_meta_task(self):
+        if self.active_meta_task:
+            task_id = str(self.active_meta_task.get("task_id", "")).strip()
+            if task_id:
+                self._remove_task_heartbeat(task_id)
+        self.active_meta_task = None
+        self.last_meta_heartbeat = 0.0
 
     # =========================================================================
     # Filesystem I/O (batched per cycle)
@@ -1750,6 +1812,20 @@ class GPUAgent:
                 "pid": info["pid"],
                 "started_at": datetime.fromtimestamp(info["started_at"]).isoformat(),
             })
+        if self.active_meta_task:
+            active_task_info.append({
+                "worker_id": f"{self.name}-meta",
+                "task_id": str(self.active_meta_task.get("task_id", "")),
+                "task_class": "meta",
+                "task_name": str(self.active_meta_task.get("task_name", "meta")),
+                "vram_estimate_mb": 0,
+                "peak_vram_mb": 0,
+                "pid": os.getpid(),
+                "started_at": datetime.fromtimestamp(
+                    float(self.active_meta_task.get("started_at", time.time()))
+                ).isoformat(),
+                "phase": str(self.active_meta_task.get("phase", "")),
+            })
 
         cpu_temp = self._get_cpu_temp()
 
@@ -1781,8 +1857,11 @@ class GPUAgent:
             "throttle_status": gpu_stats["throttle_status"],
             "claimed_vram_mb": self.claimed_vram,
             "budget_available_mb": self._get_vram_budget(),
-            "active_workers": len(self.active_workers),
+            "active_workers": len(self.active_workers) + (1 if self.active_meta_task else 0),
             "active_tasks": active_task_info,
+            "meta_task_active": bool(self.active_meta_task),
+            "meta_task_id": str(self.active_meta_task.get("task_id", "")) if self.active_meta_task else None,
+            "meta_task_phase": str(self.active_meta_task.get("phase", "")) if self.active_meta_task else None,
             "thermal_constrained": constrained,
             "thermal_reasons": constrained_reasons,
             "thermal_pause_active": self.thermal_pause_active,
@@ -1902,9 +1981,11 @@ class GPUAgent:
         """Handle a meta task directly (no worker needed)."""
         command = task.get("command", "")
         self.logger.info(f"Handling meta task: {command}")
+        self._begin_meta_task(task)
 
         if command == "load_llm":
             target_model = str(task.get("target_model", "")).strip() or None
+            self._touch_meta_task(phase="load_llm")
             self.load_model(model_id=target_model)
             result = {
                 "success": self.model_loaded,
@@ -1915,6 +1996,7 @@ class GPUAgent:
                 "max_vram_used_mb": 0,
             }
         elif command == "unload_llm":
+            self._touch_meta_task(phase="unload_llm")
             self.unload_model()
             result = {
                 "success": not self.model_loaded,
@@ -1956,6 +2038,7 @@ class GPUAgent:
                     lock_wait_deadline = time.time() + 30
                     reservation_written = False
                     while time.time() < lock_wait_deadline:
+                        self._touch_meta_task(phase="acquiring_split_reservation")
                         try:
                             with lock:
                                 now_iso = datetime.now().isoformat()
@@ -2021,6 +2104,7 @@ class GPUAgent:
                             "worker": self.name,
                             "max_vram_used_mb": 0,
                         }
+                        self._end_meta_task()
                         self.outbox.append(WorkerResult(
                             task_id=task["task_id"],
                             task=task,
@@ -2033,6 +2117,7 @@ class GPUAgent:
                     success = False
                     failure_reason = ""
                     while time.time() < deadline:
+                        self._touch_meta_task(phase="waiting_split_ready")
                         self._service_split_reservations()
                         try:
                             with open(reservation_path, "r", encoding="utf-8") as f:
@@ -2117,6 +2202,7 @@ class GPUAgent:
             }
 
         # Meta tasks go straight to outbox (no worker subprocess)
+        self._end_meta_task()
         self.outbox.append(WorkerResult(
             task_id=task["task_id"],
             task=task,
@@ -2126,7 +2212,7 @@ class GPUAgent:
 
     def _has_active_work(self) -> bool:
         """Return True when the rig appears to be in an active batch."""
-        if self.active_workers or self.outbox:
+        if self.active_workers or self.outbox or self.active_meta_task:
             return True
 
         if next(self.queue_path.glob("*.json"), None):
