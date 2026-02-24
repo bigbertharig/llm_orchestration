@@ -4134,6 +4134,35 @@ JSON only:"""
                     continue
         return False
 
+    def _pending_split_group_ids(self, model_id: str, candidate_group_ids: List[str]) -> set[str]:
+        pending: set[str] = set()
+        wanted = {str(gid).strip() for gid in candidate_group_ids if str(gid).strip()}
+        if not wanted:
+            return pending
+
+        for lane in (self.queue_path, self.processing_path):
+            for task_file in lane.glob("*.json"):
+                try:
+                    with open(task_file) as f:
+                        task = json.load(f)
+                except Exception:
+                    continue
+                if task.get("task_class") != "meta" or str(task.get("command", "")) != "load_split_llm":
+                    continue
+                if str(task.get("target_model", "")) != str(model_id):
+                    continue
+                groups = task.get("candidate_groups", [])
+                if not isinstance(groups, list) or not groups:
+                    pending |= wanted
+                    continue
+                for group in groups:
+                    if not isinstance(group, dict):
+                        continue
+                    gid = str(group.get("id", "")).strip()
+                    if gid and gid in wanted:
+                        pending.add(gid)
+        return pending
+
     def _make_resource_decisions(self, gpu_status: List[Dict], running_gpus: Dict, queue_stats: Dict):
         """Make decisions about GPU resource allocation based on current state."""
         active_gpus = [g for g in gpu_status if g["util_pct"] > 10 or g["mem_used_mb"] > 1000]
@@ -4227,10 +4256,7 @@ JSON only:"""
         # enqueue a targeted load_split_llm task before generic hot/cold balancing.
         required_max_tier = int(queue_stats.get("llm_max_tier", 0) or 0)
         split_needed = int(queue_stats.get("llm_split_required", 0) or 0) > 0
-        if (
-            (split_needed or required_max_tier >= 2)
-            and not self._has_pending_meta_command("load_split_llm")
-        ):
+        if (split_needed or required_max_tier >= 2):
             split_model_demand = queue_stats.get("llm_split_model_demand", {})
             preferred_split_models: List[str] = []
             if isinstance(split_model_demand, dict):
@@ -4257,30 +4283,47 @@ JSON only:"""
                         continue
                     viable_groups.append(g)
                 if viable_groups:
+                    viable_group_ids = [str(g.get("id", "")).strip() for g in viable_groups]
                     ready_groups = {
                         str(s.get("runtime_group_id", "")).strip()
                         for s in gpu_states.values()
                         if s.get("model_loaded", False)
                         and str(s.get("runtime_placement", "")) == "split_gpu"
                         and str(s.get("loaded_model", "")) == split_model
+                        and str(s.get("runtime_group_id", "")).strip() in viable_group_ids
                     }
-                    has_ready_target = any(g.get("id") in ready_groups for g in viable_groups)
-                    if not has_ready_target:
+                    pending_groups = self._pending_split_group_ids(split_model, viable_group_ids)
+                    llm_split_required_count = int(queue_stats.get("llm_split_required", 0) or 0)
+                    desired_group_count = min(
+                        len(viable_groups),
+                        max(1, llm_split_required_count),
+                    )
+
+                    unavailable_group_ids = ready_groups | pending_groups
+                    missing_groups = [
+                        g for g in viable_groups
+                        if str(g.get("id", "")).strip() not in unavailable_group_ids
+                    ]
+                    if len(unavailable_group_ids) < desired_group_count and missing_groups:
+                        target_group = missing_groups[0]
                         self.log_decision(
                             "RESOURCE_DECISION",
-                            f"Need split tier capacity for model {split_model} - inserting load_split_llm",
+                            f"Need more split tier capacity for model {split_model} - inserting load_split_llm",
                             {
                                 "split_needed": split_needed,
                                 "required_max_tier": required_max_tier,
                                 "preferred_split_models": preferred_split_models,
-                                "candidate_groups": viable_groups,
+                                "desired_group_count": desired_group_count,
+                                "ready_groups": sorted(ready_groups),
+                                "pending_groups": sorted(pending_groups),
+                                "target_group": target_group,
                             }
                         )
                         self._insert_resource_task(
                             "load_split_llm",
                             meta={
                                 "target_model": split_model,
-                                "candidate_groups": viable_groups,
+                                "candidate_groups": [target_group],
                             },
                         )
                         inserted_resource_task = True
