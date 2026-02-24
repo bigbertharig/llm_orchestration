@@ -158,6 +158,8 @@ class GPUAgent:
         self.split_runtime_owner: bool = False
         self.split_runtime_process: Optional[subprocess.Popen] = None
         self.last_split_runtime_error: str = ""
+        self.split_runtime_owner_meta_path: Optional[Path] = None
+        self.split_runtime_invariant_failures: int = 0
         self.ollama_process: Optional[subprocess.Popen] = None
 
         # Worker tracking
@@ -315,6 +317,10 @@ class GPUAgent:
     def _split_reservation_path(self, group_id: str) -> Path:
         safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(group_id))
         return self.split_state_dir / f"{safe}.json"
+
+    def _split_runtime_owner_meta_path_for_group(self, group_id: str) -> Path:
+        safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(group_id))
+        return self.split_state_dir / f"{safe}.runtime_owner.json"
 
     def _is_group_member(self, group: Dict[str, Any]) -> bool:
         members = [str(m).strip() for m in group.get("members", []) if str(m).strip()]
@@ -574,11 +580,15 @@ class GPUAgent:
         lock = FileLock(str(self.model_load_lock_path), timeout=1)
         deadline = time.time() + max_wait_seconds
         lease_acquired = False
+        next_wait_log = 0.0
         while time.time() < deadline:
             try:
                 lock.acquire(timeout=1)
                 if self._try_acquire_global_model_load_owner(phase=phase):
                     lease_acquired = True
+                    self.logger.info(
+                        f"GLOBAL_LOAD_LOCK_ACQUIRED phase={phase} worker={self.name} pid={os.getpid()}"
+                    )
                     break
                 self._touch_meta_task(phase=f"{phase}_waiting_global_lock")
             except Timeout:
@@ -588,6 +598,9 @@ class GPUAgent:
                     lock.release()
                 except Exception:
                     pass
+            if time.time() >= next_wait_log:
+                self.logger.info(f"GLOBAL_LOAD_LOCK_WAIT phase={phase} worker={self.name}")
+                next_wait_log = time.time() + 10
             time.sleep(1)
         else:
             raise RuntimeError(f"global model load lock timeout after {max_wait_seconds}s")
@@ -611,6 +624,9 @@ class GPUAgent:
                 pass
             try:
                 if lease_acquired:
+                    self.logger.info(
+                        f"GLOBAL_LOAD_LOCK_RELEASE phase={phase} worker={self.name} pid={os.getpid()}"
+                    )
                     self._release_global_model_load_owner()
             except Exception:
                 pass
@@ -686,6 +702,10 @@ class GPUAgent:
         except FileExistsError:
             owner = self._read_global_model_load_owner()
             if self._global_owner_is_stale(owner):
+                self.logger.warning(
+                    "GLOBAL_LOAD_LOCK_STALE_OWNER_TAKEOVER "
+                    f"worker={self.name} stale_owner={owner or {}}"
+                )
                 try:
                     self.model_load_owner_path.unlink()
                 except Exception:
@@ -1164,6 +1184,7 @@ class GPUAgent:
             f"http://localhost:{self.runtime_port}" if self.runtime_port else None
         )
         self.split_runtime_owner = bool(as_owner)
+        self.split_runtime_invariant_failures = 0
         self.state = "hot"
 
     def _clear_split_runtime_loaded(self):
@@ -1175,7 +1196,118 @@ class GPUAgent:
         self.runtime_port = self.port
         self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
         self.split_runtime_owner = False
+        self.split_runtime_invariant_failures = 0
         self.state = "cold"
+
+    def _read_json_file(self, path: Path) -> Optional[Dict[str, Any]]:
+        try:
+            if not path.exists():
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            return raw if isinstance(raw, dict) else None
+        except Exception:
+            return None
+
+    def _write_json_atomic(self, path: Path, payload: Dict[str, Any]):
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp_path, path)
+
+    def _is_pid_alive(self, pid: Any) -> bool:
+        try:
+            pid_int = int(pid)
+        except Exception:
+            return False
+        if pid_int <= 0:
+            return False
+        try:
+            os.kill(pid_int, 0)
+            return True
+        except Exception:
+            return False
+
+    def _write_split_runtime_owner_meta(self, group: Dict[str, Any], model_id: str, port: int, proc_pid: int):
+        group_id = str(group.get("id", "")).strip()
+        if not group_id:
+            return
+        payload = {
+            "group_id": group_id,
+            "launcher": self.name,
+            "members": [str(m).strip() for m in group.get("members", []) if str(m).strip()],
+            "model_id": str(model_id).strip(),
+            "port": int(port),
+            "pid": int(proc_pid),
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+        path = self._split_runtime_owner_meta_path_for_group(group_id)
+        self._write_json_atomic(path, payload)
+        self.split_runtime_owner_meta_path = path
+
+    def _touch_split_runtime_owner_meta(self):
+        if not self.split_runtime_owner_meta_path:
+            return
+        meta = self._read_json_file(self.split_runtime_owner_meta_path)
+        if not meta:
+            return
+        meta["updated_at"] = datetime.now().isoformat()
+        self._write_json_atomic(self.split_runtime_owner_meta_path, meta)
+
+    def _clear_split_runtime_owner_meta(self):
+        if self.split_runtime_owner_meta_path:
+            try:
+                self.split_runtime_owner_meta_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        self.split_runtime_owner_meta_path = None
+
+    def _split_runtime_owner_matches(
+        self,
+        port: Any,
+        model_id: str,
+        group_id: Optional[str] = None,
+        require_alive_pid: bool = False,
+    ) -> bool:
+        for meta_path in self.split_state_dir.glob("*.runtime_owner.json"):
+            meta = self._read_json_file(meta_path)
+            if not meta:
+                continue
+            try:
+                if int(meta.get("port")) != int(port):
+                    continue
+            except Exception:
+                continue
+            if str(meta.get("model_id", "")).strip() != str(model_id or "").strip():
+                continue
+            if group_id and str(meta.get("group_id", "")).strip() != str(group_id).strip():
+                continue
+            if require_alive_pid and not self._is_pid_alive(meta.get("pid")):
+                continue
+            return True
+        return False
+
+    def _set_reservation_status(
+        self,
+        reservation: Dict[str, Any],
+        status: str,
+        *,
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        old_status = str(reservation.get("status", "")).strip()
+        reservation["status"] = status
+        reservation["updated_at"] = datetime.now().isoformat()
+        if status == "ready":
+            reservation["ready_at"] = reservation.get("ready_at") or datetime.now().isoformat()
+        if old_status != status or reason:
+            self.logger.info(
+                "SPLIT_RESERVATION_TRANSITION "
+                f"group={reservation.get('group_id')} model={reservation.get('target_model')} "
+                f"worker={self.name} launcher={reservation.get('launcher')} "
+                f"{old_status or '-'}->{status} reason={reason or 'n/a'}"
+            )
+        return reservation
 
     def _start_split_runtime(self, group: Dict[str, Any], model_id: str) -> bool:
         self.last_split_runtime_error = ""
@@ -1200,6 +1332,7 @@ class GPUAgent:
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = ",".join(member_gpu_ids)
             env["OLLAMA_HOST"] = f"127.0.0.1:{port}"
+            startup_started = time.time()
 
             # Avoid hijacking a stale runtime on the split port; that can make
             # readiness checks pass against the wrong process and wedge warmup.
@@ -1223,17 +1356,20 @@ class GPUAgent:
                 stderr=subprocess.DEVNULL
             )
             self.split_runtime_process = proc
+            self._write_split_runtime_owner_meta(group=group, model_id=model_id, port=port, proc_pid=proc.pid)
 
             deadline = time.time() + 20
             ready = False
             while time.time() < deadline:
                 self._touch_meta_task(phase="starting_split_runtime")
+                self._touch_split_runtime_owner_meta()
                 if proc.poll() is not None:
                     self.last_split_runtime_error = (
                         f"split runtime exited during startup on port {port} rc={proc.returncode}"
                     )
                     self.logger.error(self.last_split_runtime_error)
                     self.split_runtime_process = None
+                    self._clear_split_runtime_owner_meta()
                     return False
                 try:
                     r = requests.get(f"http://127.0.0.1:{port}/api/tags", timeout=1.5)
@@ -1251,19 +1387,28 @@ class GPUAgent:
                 except Exception:
                     pass
                 self.split_runtime_process = None
+                self._clear_split_runtime_owner_meta()
                 return False
+            self.logger.info(
+                f"SPLIT_RUNTIME_START_READY group={group.get('id')} port={port} "
+                f"pid={proc.pid} startup_ms={int((time.time() - startup_started) * 1000)}"
+            )
 
             # Warm/load the target model on shared runtime.
             def _warm_split_runtime():
                 warmup_deadline = time.time() + 600
                 last_warmup_error = ""
+                warmup_started = time.time()
+                attempts = 0
                 while time.time() < warmup_deadline:
                     self._touch_meta_task(phase="warming_split_runtime")
+                    self._touch_split_runtime_owner_meta()
                     if proc.poll() is not None:
                         raise RuntimeError(
                             f"split runtime exited during warmup on port {port} rc={proc.returncode}"
                         )
                     try:
+                        attempts += 1
                         r = requests.post(
                             f"http://127.0.0.1:{port}/api/generate",
                             json={
@@ -1282,6 +1427,11 @@ class GPUAgent:
                             timeout=180
                         )
                         if r.status_code < 400:
+                            self.logger.info(
+                                f"SPLIT_RUNTIME_WARMUP_OK group={group.get('id')} port={port} "
+                                f"model={model_id} attempts={attempts} "
+                                f"warmup_ms={int((time.time() - warmup_started) * 1000)}"
+                            )
                             return True
                         response_excerpt = (r.text or "").strip().replace("\n", " ")
                         if len(response_excerpt) > 300:
@@ -1311,6 +1461,7 @@ class GPUAgent:
                 except Exception:
                     pass
                 self.split_runtime_process = None
+                self._clear_split_runtime_owner_meta()
                 return False
         except Exception as exc:
             self.last_split_runtime_error = str(exc)
@@ -1321,6 +1472,7 @@ class GPUAgent:
                 except Exception:
                     pass
                 self.split_runtime_process = None
+                self._clear_split_runtime_owner_meta()
             return False
 
     def _stop_split_runtime(self):
@@ -1334,6 +1486,7 @@ class GPUAgent:
                 except Exception:
                     pass
             self.split_runtime_process = None
+        self._clear_split_runtime_owner_meta()
         self.split_runtime_owner = False
 
     def _join_split_reservation(self, reservation: Dict[str, Any], reservation_path: Path) -> Dict[str, Any]:
@@ -1390,6 +1543,125 @@ class GPUAgent:
         except Exception:
             return False
 
+    def _split_runtime_has_expected_owner(self, port: Any, model_id: str, group_id: Optional[str] = None) -> bool:
+        if not next(self.split_state_dir.glob("*.runtime_owner.json"), None):
+            return True
+        return self._split_runtime_owner_matches(
+            port=port,
+            model_id=model_id,
+            group_id=group_id,
+            require_alive_pid=False,
+        )
+
+    def _split_runtime_has_any_listener(self, port: Any) -> bool:
+        try:
+            port_int = int(port)
+        except Exception:
+            return False
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.5)
+        try:
+            return sock.connect_ex(("127.0.0.1", port_int)) == 0
+        except Exception:
+            return False
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def _kill_local_listener_on_port(self, port: int):
+        try:
+            result = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True, timeout=3)
+            pids = set()
+            for line in result.stdout.splitlines():
+                if f":{port} " not in line:
+                    continue
+                for match in re.findall(r"pid=(\d+)", line):
+                    pids.add(int(match))
+            for pid in sorted(pids):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    self.logger.warning(f"SPLIT_ORPHAN_RECLAIM_KILL port={port} pid={pid}")
+                except Exception as exc:
+                    self.logger.warning(f"SPLIT_ORPHAN_RECLAIM_KILL_FAIL port={port} pid={pid}: {exc}")
+        except Exception as exc:
+            self.logger.warning(f"SPLIT_ORPHAN_RECLAIM_SCAN_FAIL port={port}: {exc}")
+
+    def _reclaim_orphan_split_ports_on_startup(self):
+        seen_ports = set()
+        for meta in self.model_meta_by_id.values():
+            for group in meta.get("split_groups", []) or []:
+                members = [str(m).strip() for m in group.get("members", []) if str(m).strip()]
+                if self.name not in members:
+                    continue
+                try:
+                    port = int(group.get("port"))
+                except Exception:
+                    continue
+                if port in seen_ports:
+                    continue
+                seen_ports.add(port)
+                group_id = str(group.get("id", "")).strip()
+                reservation = self._read_json_file(self._split_reservation_path(group_id)) if group_id else None
+                status = str((reservation or {}).get("status", "")).strip()
+                if status in {"waiting_partner", "joining", "loading", "ready"}:
+                    continue
+                if not self._split_runtime_has_any_listener(port):
+                    continue
+                self.logger.warning(
+                    f"SPLIT_ORPHAN_RECLAIM_STARTUP port={port} group={group_id or '-'} "
+                    f"reservation_status={status or 'missing'}"
+                )
+                self._kill_local_listener_on_port(port)
+
+    def _check_split_runtime_invariants(self):
+        if self.runtime_placement != "split_gpu":
+            self.split_runtime_invariant_failures = 0
+            return
+        if self.active_meta_task:
+            return
+        group_id = str(self.runtime_group_id or "").strip()
+        model_id = str(self.loaded_model or "").strip()
+        port = self.runtime_port
+        if not group_id or not model_id or not port:
+            self.split_runtime_invariant_failures += 1
+            return
+
+        reason = ""
+        reservation = self._read_json_file(self._split_reservation_path(group_id))
+        if not reservation:
+            reason = "reservation_missing"
+        else:
+            status = str(reservation.get("status", "")).strip()
+            target_model = str(reservation.get("target_model", "")).strip()
+            if status != "ready":
+                reason = f"reservation_status_{status or 'none'}"
+            elif target_model != model_id:
+                reason = f"reservation_model_{target_model or 'none'}"
+
+        if not reason and not self._split_runtime_has_model_loaded(port, model_id):
+            reason = "port_model_missing"
+        if not reason and not self._split_runtime_has_expected_owner(port, model_id, group_id):
+            reason = "owner_meta_mismatch"
+
+        if reason:
+            self.split_runtime_invariant_failures += 1
+            if self.split_runtime_invariant_failures == 1:
+                self.logger.warning(
+                    f"SPLIT_INVARIANT_WARN group={group_id} model={model_id} port={port} reason={reason}"
+                )
+            elif self.split_runtime_invariant_failures >= 3:
+                self.logger.error(
+                    f"SPLIT_INVARIANT_CLEAR group={group_id} model={model_id} port={port} reason={reason}"
+                )
+                if self.split_runtime_owner:
+                    self._stop_split_runtime()
+                self._clear_split_runtime_loaded()
+            return
+
+        self.split_runtime_invariant_failures = 0
+
     def _service_split_reservations(self):
         """Background sync so non-claiming partner can join and mirror split state."""
         for res_file in self.split_state_dir.glob("*.json"):
@@ -1427,11 +1699,18 @@ class GPUAgent:
                     if (
                         status == "loading"
                         and self._split_runtime_has_model_loaded(port=port, model_id=model_id)
+                        and self._split_runtime_has_expected_owner(
+                            port=port,
+                            model_id=model_id,
+                            group_id=str(group.get("id") or ""),
+                        )
                     ):
-                        reservation["status"] = "ready"
-                        reservation["ready_at"] = reservation.get("ready_at") or datetime.now().isoformat()
+                        reservation = self._set_reservation_status(
+                            reservation,
+                            "ready",
+                            reason="runtime_already_loaded",
+                        )
                         reservation.pop("error", None)
-                        reservation["updated_at"] = datetime.now().isoformat()
                         with open(res_file, "w", encoding="utf-8") as f:
                             json.dump(reservation, f, indent=2)
                         status = "ready"
@@ -1459,8 +1738,11 @@ class GPUAgent:
                             launcher = self.name
                         if self.name == launcher:
                             if status != "loading":
-                                reservation["status"] = "loading"
-                                reservation["updated_at"] = datetime.now().isoformat()
+                                reservation = self._set_reservation_status(
+                                    reservation,
+                                    "loading",
+                                    reason="launcher_starting_runtime",
+                                )
                             with open(res_file, "w", encoding="utf-8") as f:
                                 json.dump(reservation, f, indent=2)
                             start_runtime = {
@@ -1500,13 +1782,15 @@ class GPUAgent:
                         reservation = json.load(f)
                     if str(reservation.get("launcher", "")).strip() != self.name:
                         continue
-                    reservation["status"] = "ready" if ok else "failed"
+                    reservation = self._set_reservation_status(
+                        reservation,
+                        "ready" if ok else "failed",
+                        reason="runtime_started" if ok else "runtime_start_failed",
+                    )
                     if ok:
                         reservation.pop("error", None)
-                        reservation["ready_at"] = datetime.now().isoformat()
                     else:
                         reservation["error"] = str(self.last_split_runtime_error or "split runtime failed")
-                    reservation["updated_at"] = datetime.now().isoformat()
                     with open(res_file, "w", encoding="utf-8") as f:
                         json.dump(reservation, f, indent=2)
             except Exception:
@@ -2412,8 +2696,11 @@ class GPUAgent:
                                 if reservation_path.exists():
                                     with open(reservation_path, "r", encoding="utf-8") as f:
                                         reservation = json.load(f)
-                                    reservation["status"] = "expired"
-                                    reservation["updated_at"] = datetime.now().isoformat()
+                                    reservation = self._set_reservation_status(
+                                        reservation,
+                                        "expired",
+                                        reason="meta_wait_timeout",
+                                    )
                                     with open(reservation_path, "w", encoding="utf-8") as f:
                                         json.dump(reservation, f, indent=2)
                         except Exception:
@@ -2440,8 +2727,11 @@ class GPUAgent:
                     with lock:
                         with open(reservation_path, "r", encoding="utf-8") as f:
                             reservation = json.load(f)
-                        reservation["status"] = "unloaded"
-                        reservation["updated_at"] = datetime.now().isoformat()
+                        reservation = self._set_reservation_status(
+                            reservation,
+                            "unloaded",
+                            reason="meta_unload_split_llm",
+                        )
                         with open(reservation_path, "w", encoding="utf-8") as f:
                             json.dump(reservation, f, indent=2)
                 except Exception:
@@ -2503,6 +2793,7 @@ class GPUAgent:
         try:
             # Start Ollama if this GPU has a port
             self.start_ollama()
+            self._reclaim_orphan_split_ports_on_startup()
 
             # Signal ready to launcher
             flag_dir = Path("/tmp/llm-orchestration-flags")
@@ -2523,6 +2814,7 @@ class GPUAgent:
                 self._check_abort_signal()
                 self._check_kill_signal()
                 self._service_split_reservations()
+                self._check_split_runtime_invariants()
 
                 # Thermal safety check every internal tick
                 gpu_stats_check = self._get_gpu_stats()
