@@ -18,7 +18,7 @@ from typing import Any, Dict, List
 
 import requests
 
-DEFAULT_LLM_MIN_TIER = 1
+from brain_constants import DEFAULT_LLM_MIN_TIER
 
 
 class BrainCoreMixin:
@@ -575,4 +575,3 @@ class BrainCoreMixin:
     # =========================================================================
     # Private/Public Task List Management
     # =========================================================================
-

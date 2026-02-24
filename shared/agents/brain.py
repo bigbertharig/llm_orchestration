@@ -34,6 +34,7 @@ from typing import Optional, Dict, Any, List
 from filelock import FileLock, Timeout
 
 from brain_goal import BrainGoalMixin
+from brain_constants import DEFAULT_LLM_MIN_TIER
 from brain_core import BrainCoreMixin
 from brain_dispatch import BrainDispatchMixin
 from brain_plan import BrainPlanMixin
@@ -57,17 +58,6 @@ logging.basicConfig(
 #   - brain: Brain-only tasks (always executed by brain, never by workers)
 #   - meta: Model load/unload tasks (inserted by brain, claimed by GPU workers)
 # =============================================================================
-VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'brain', 'meta']
-VALID_VRAM_POLICIES = ['default', 'infer', 'fixed']
-DEFAULT_LLM_MIN_TIER = 1
-PRIORITY_TIER_TO_VALUE = {
-    "low": 3,
-    "normal": 5,
-    "high": 8,
-    "urgent": 10,
-}
-
-
 class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin, BrainMonitorMixin, BrainResourceMixin, BrainFailureMixin, BrainDispatchMixin):
     def __init__(self, config_path: str):
         self.config_path = Path(config_path)

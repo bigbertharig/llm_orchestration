@@ -11,8 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'brain', 'meta']
-VALID_VRAM_POLICIES = ['default', 'infer', 'fixed']
+from brain_constants import PRIORITY_TIER_TO_VALUE, VALID_TASK_CLASSES, VALID_VRAM_POLICIES
 
 
 class BrainPlanMixin:
@@ -961,4 +960,3 @@ Required JSON format:
     # =========================================================================
     # Task Handling
     # =========================================================================
-
