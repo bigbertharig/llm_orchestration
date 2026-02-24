@@ -794,6 +794,27 @@ class Brain(BrainGoalMixin):
                 pass
         return completed
 
+    def _complete_private_task_noop(self, task: Dict[str, Any], output: str):
+        """Mark a private task complete with a synthetic no-op result."""
+        task = dict(task)
+        now = datetime.now().isoformat()
+        task["status"] = "complete"
+        task["assigned_to"] = "brain"
+        task["started_at"] = task.get("started_at") or now
+        task["completed_at"] = now
+        task["result"] = {
+            "success": True,
+            "output": output,
+            "handler": "brain",
+            "return_code": 0,
+            "elapsed_seconds": 0.0,
+            "error": "",
+            "error_type": "",
+        }
+        out = self.complete_path / f"{task['task_id']}.json"
+        with open(out, "w") as f:
+            json.dump(task, f, indent=2)
+
     def check_and_release_tasks(self):
         """Check private tasks and release any whose dependencies are met."""
         for batch_id in list(self.active_batches.keys()):
@@ -857,14 +878,25 @@ class Brain(BrainGoalMixin):
                         else:
                             # Standard foreach: expand all items at once
                             expanded_names = self._expand_foreach_task(task, batch_id)
-                            if expanded_names:
+                            if expanded_names is None:
+                                all_released = False
+                            else:
                                 # Remove the template task
                                 if task_file.exists():
                                     task_file.unlink()
+                                # Mark zero-item foreach as a no-op success so it is visible in task history.
+                                if len(expanded_names) == 0:
+                                    self._complete_private_task_noop(
+                                        task,
+                                        f"No-op: foreach expansion produced 0 items from {foreach_spec}",
+                                    )
+                                    self.log_decision(
+                                        "FOREACH_EMPTY",
+                                        f"Completed '{task.get('name')}' as no-op (0 foreach items)",
+                                        {"task_id": task.get("task_id", "")[:8], "template": task.get("name")},
+                                    )
                                 # Update any tasks that depend on this one to depend on ALL expanded tasks
                                 self._update_foreach_dependents(batch_id, task.get("name"), expanded_names)
-                            else:
-                                all_released = False
                     else:
                         # Regular task - release to public queue
                         if task_file.exists():
@@ -883,7 +915,7 @@ class Brain(BrainGoalMixin):
             if all_released and len(private_tasks) > 0:
                 self._check_batch_completion(batch_id)
 
-    def _expand_foreach_task(self, template_task: Dict, batch_id: str) -> List[str]:
+    def _expand_foreach_task(self, template_task: Dict, batch_id: str) -> List[str] | None:
         """
         Expand a foreach task into N individual tasks.
 
@@ -897,7 +929,7 @@ class Brain(BrainGoalMixin):
         foreach_spec = template_task.get("foreach", "")
         if ":" not in foreach_spec:
             self.logger.error(f"Invalid foreach format: {foreach_spec} (expected path:jsonpath)")
-            return []
+            return None
 
         file_path, json_path = foreach_spec.rsplit(":", 1)
 
@@ -915,7 +947,7 @@ class Brain(BrainGoalMixin):
                 data = json.load(f)
         except Exception as e:
             self.logger.error(f"Failed to read foreach source {file_path}: {e}")
-            return []
+            return None
 
         # Navigate to the array using json_path (supports simple dotted paths)
         items = data
@@ -928,7 +960,7 @@ class Brain(BrainGoalMixin):
 
         if not isinstance(items, list):
             self.logger.error(f"foreach target is not a list: {json_path}")
-            return []
+            return None
 
         batch_size = max(1, int(template_task.get("batch_size", 1)))
         expanded_target = (len(items) + batch_size - 1) // batch_size
@@ -1662,7 +1694,7 @@ Required JSON format:
 
         foreach_ids = [t["id"] for t in task_defs if t.get("foreach")]
         if not foreach_ids:
-            return []
+                return None
 
         ancestor_ids: set[str] = set()
         stack = list(foreach_ids)
@@ -4106,7 +4138,7 @@ JSON only:"""
         meta = self.model_meta_by_id.get(model_id, {})
         groups = meta.get("split_groups", [])
         if not isinstance(groups, list):
-            return []
+            return None
         normalized = []
         for g in groups:
             if not isinstance(g, dict):
