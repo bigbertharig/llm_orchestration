@@ -4195,6 +4195,168 @@ JSON only:"""
                         pending.add(gid)
         return pending
 
+    def _split_reservation_file(self, group_id: str) -> Path:
+        return self.signals_path / "split_llm" / f"{group_id}.json"
+
+    def _read_split_reservation(self, group_id: str) -> Optional[Dict[str, Any]]:
+        path = self._split_reservation_file(group_id)
+        if not path.exists():
+            return None
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return None
+            return data
+        except Exception:
+            return None
+
+    def _write_split_reservation(self, group_id: str, reservation: Dict[str, Any]) -> bool:
+        path = self._split_reservation_file(group_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock = FileLock(str(path) + ".lock", timeout=1)
+        try:
+            with lock:
+                with open(path, "w") as f:
+                    json.dump(reservation, f, indent=2)
+            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to write split reservation {group_id}: {e}")
+            return False
+
+    def _probe_split_runtime_models(self, port: Optional[int], timeout_s: float = 1.5) -> Dict[str, Any]:
+        if not port:
+            return {"reachable": False, "models": [], "error": "missing_port"}
+        url = f"http://127.0.0.1:{int(port)}/api/ps"
+        try:
+            response = requests.get(url, timeout=timeout_s)
+            response.raise_for_status()
+            payload = response.json()
+            models = []
+            for item in payload.get("models", []) if isinstance(payload, dict) else []:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or item.get("model") or "").strip()
+                if name:
+                    models.append(name)
+            return {"reachable": True, "models": models, "error": None}
+        except Exception as e:
+            return {"reachable": False, "models": [], "error": str(e)}
+
+    def _reconcile_split_group_state(
+        self,
+        group: Dict[str, Any],
+        target_model: str,
+    ) -> Dict[str, Any]:
+        """Non-destructive split control-plane/runtime reconciliation.
+
+        Brain may repair reservation status to `ready` when the runtime is already
+        serving the target model. It does not stop processes or force-kill workers.
+        """
+        group_id = str(group.get("id", "")).strip()
+        port = group.get("port")
+        members = [str(m).strip() for m in group.get("members", []) if str(m).strip()]
+        reservation = self._read_split_reservation(group_id)
+        probe = self._probe_split_runtime_models(port)
+        models = [str(m).strip() for m in probe.get("models", []) if str(m).strip()]
+        target_loaded = target_model in models
+        status = str((reservation or {}).get("status", "")).strip()
+
+        if target_loaded:
+            if (
+                not reservation
+                or status != "ready"
+                or str(reservation.get("target_model", "")) != str(target_model)
+            ):
+                now = datetime.now().isoformat()
+                repaired = dict(reservation or {})
+                repaired.update(
+                    {
+                        "group_id": group_id,
+                        "target_model": target_model,
+                        "status": "ready",
+                        "members": members,
+                        "port": port,
+                        "updated_at": now,
+                        "ready_at": now,
+                    }
+                )
+                if reservation and reservation.get("created_at"):
+                    repaired["created_at"] = reservation.get("created_at")
+                else:
+                    repaired.setdefault("created_at", now)
+                wrote = self._write_split_reservation(group_id, repaired)
+                self.log_decision(
+                    "SPLIT_RECONCILE_READY",
+                    f"Reconciled split group {group_id} to ready from runtime probe",
+                    {
+                        "group_id": group_id,
+                        "port": port,
+                        "target_model": target_model,
+                        "reservation_status_before": status or None,
+                        "probe_models": models,
+                        "reservation_repaired": wrote,
+                    },
+                )
+            return {
+                "classification": "ready_real",
+                "group_id": group_id,
+                "port": port,
+                "probe_models": models,
+                "reservation_status": status or None,
+            }
+
+        if probe.get("reachable") and not target_loaded:
+            # Listener exists but target model is not loaded; treat as wedged/orphan-ish.
+            self.log_decision(
+                "SPLIT_RECONCILE_WEDGED_PORT",
+                f"Split group {group_id} port {port} reachable without target model",
+                {
+                    "group_id": group_id,
+                    "port": port,
+                    "target_model": target_model,
+                    "probe_models": models,
+                    "reservation_status": status or None,
+                },
+            )
+            return {
+                "classification": "wedged_port",
+                "group_id": group_id,
+                "port": port,
+                "probe_models": models,
+                "reservation_status": status or None,
+            }
+
+        if status in {"waiting_partner", "loading"}:
+            return {
+                "classification": "loading_control",
+                "group_id": group_id,
+                "port": port,
+                "probe_models": models,
+                "reservation_status": status,
+            }
+
+        if status == "ready":
+            self.log_decision(
+                "SPLIT_RECONCILE_STALE_READY",
+                f"Split group {group_id} reservation says ready but runtime probe missing target",
+                {
+                    "group_id": group_id,
+                    "port": port,
+                    "target_model": target_model,
+                    "probe_models": models,
+                    "reservation_status": status,
+                },
+            )
+
+        return {
+            "classification": "empty",
+            "group_id": group_id,
+            "port": port,
+            "probe_models": models,
+            "reservation_status": status or None,
+        }
+
     def _make_resource_decisions(self, gpu_status: List[Dict], running_gpus: Dict, queue_stats: Dict):
         """Make decisions about GPU resource allocation based on current state."""
         active_gpus = [g for g in gpu_status if g["util_pct"] > 10 or g["mem_used_mb"] > 1000]
@@ -4325,6 +4487,27 @@ JSON only:"""
                         and str(s.get("runtime_group_id", "")).strip() in viable_group_ids
                     }
                     pending_groups = self._pending_split_group_ids(split_model, viable_group_ids)
+                    reconciled_states = [
+                        self._reconcile_split_group_state(group, split_model)
+                        for group in viable_groups
+                    ]
+                    reconciled_ready_groups = {
+                        str(item.get("group_id", "")).strip()
+                        for item in reconciled_states
+                        if str(item.get("classification", "")) == "ready_real"
+                    }
+                    reconciled_loading_groups = {
+                        str(item.get("group_id", "")).strip()
+                        for item in reconciled_states
+                        if str(item.get("classification", "")) == "loading_control"
+                    }
+                    wedged_groups = {
+                        str(item.get("group_id", "")).strip()
+                        for item in reconciled_states
+                        if str(item.get("classification", "")) == "wedged_port"
+                    }
+                    ready_groups |= reconciled_ready_groups
+                    pending_groups |= reconciled_loading_groups
                     llm_split_required_count = int(queue_stats.get("llm_split_required", 0) or 0)
                     desired_group_count = min(
                         len(viable_groups),
@@ -4336,29 +4519,48 @@ JSON only:"""
                         g for g in viable_groups
                         if str(g.get("id", "")).strip() not in unavailable_group_ids
                     ]
+                    non_wedged_missing_groups = [
+                        g for g in missing_groups
+                        if str(g.get("id", "")).strip() not in wedged_groups
+                    ]
                     if len(unavailable_group_ids) < desired_group_count and missing_groups:
-                        target_group = missing_groups[0]
-                        self.log_decision(
-                            "RESOURCE_DECISION",
-                            f"Need more split tier capacity for model {split_model} - inserting load_split_llm",
-                            {
-                                "split_needed": split_needed,
-                                "required_max_tier": required_max_tier,
-                                "preferred_split_models": preferred_split_models,
-                                "desired_group_count": desired_group_count,
-                                "ready_groups": sorted(ready_groups),
-                                "pending_groups": sorted(pending_groups),
-                                "target_group": target_group,
-                            }
-                        )
-                        self._insert_resource_task(
-                            "load_split_llm",
-                            meta={
-                                "target_model": split_model,
-                                "candidate_groups": [target_group],
-                            },
-                        )
-                        inserted_resource_task = True
+                        if not non_wedged_missing_groups and wedged_groups:
+                            self.log_decision(
+                                "RESOURCE_DECISION",
+                                f"Split capacity short for {split_model}, but only wedged split ports remain; suppressing load_split_llm",
+                                {
+                                    "split_needed": split_needed,
+                                    "required_max_tier": required_max_tier,
+                                    "desired_group_count": desired_group_count,
+                                    "ready_groups": sorted(ready_groups),
+                                    "pending_groups": sorted(pending_groups),
+                                    "wedged_groups": sorted(wedged_groups),
+                                },
+                            )
+                        else:
+                            target_group = non_wedged_missing_groups[0]
+                            self.log_decision(
+                                "RESOURCE_DECISION",
+                                f"Need more split tier capacity for model {split_model} - inserting load_split_llm",
+                                {
+                                    "split_needed": split_needed,
+                                    "required_max_tier": required_max_tier,
+                                    "preferred_split_models": preferred_split_models,
+                                    "desired_group_count": desired_group_count,
+                                    "ready_groups": sorted(ready_groups),
+                                    "pending_groups": sorted(pending_groups),
+                                    "wedged_groups": sorted(wedged_groups),
+                                    "target_group": target_group,
+                                }
+                            )
+                            self._insert_resource_task(
+                                "load_split_llm",
+                                meta={
+                                    "target_model": split_model,
+                                    "candidate_groups": [target_group],
+                                },
+                            )
+                            inserted_resource_task = True
         elif required_max_tier < 2 and split_loaded and not self._has_pending_meta_command("unload_split_llm"):
             split_groups_loaded = sorted({
                 str(s.get("runtime_group_id", "")).strip()
