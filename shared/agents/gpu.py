@@ -25,6 +25,8 @@ import time
 import signal
 import logging
 import subprocess
+import threading
+import socket
 import requests
 from pathlib import Path
 from datetime import datetime
@@ -44,8 +46,12 @@ logging.basicConfig(
 # =============================================================================
 VALID_TASK_CLASSES = ['cpu', 'script', 'llm', 'meta']
 DEFAULT_LLM_MIN_TIER = 1
-SPLIT_META_TIMEOUT_SECONDS = 300
+# Split loads can spend significant time waiting on the global load lock and then
+# warming a large model on the shared split runtime.
+SPLIT_META_TIMEOUT_SECONDS = 900
 SPLIT_LAUNCHER_HEARTBEAT_MAX_AGE_SECONDS = 45
+GLOBAL_MODEL_LOAD_OWNER_STALE_SECONDS = 45
+GLOBAL_MODEL_LOAD_OWNER_HEARTBEAT_INTERVAL = 2
 
 # Timing
 EXTERNAL_HEARTBEAT_INTERVAL = 30  # seconds - filesystem heartbeat to brain
@@ -204,6 +210,16 @@ class GPUAgent:
             f"GPU agent initialized: {self.name} (GPU {self.gpu_id}), "
             f"port {self.port}, model {self.model}"
         )
+
+    def _effective_keep_alive(self) -> str:
+        """Return an Ollama-compatible keep_alive duration."""
+        raw = str(self.worker_keep_alive or "").strip()
+        if not raw:
+            return "30m"
+        if raw == "-1":
+            # Newer Ollama rejects "-1"; use a long finite duration instead.
+            return "24h"
+        return raw
 
     # =========================================================================
     # Config
@@ -513,7 +529,7 @@ class GPUAgent:
                     "model": target_model,
                     "prompt": "Hello",
                     "stream": False,
-                    "keep_alive": self.worker_keep_alive,
+                    "keep_alive": self._effective_keep_alive(),
                     "options": {
                         "num_gpu": 999,
                         "num_ctx": self.worker_num_ctx,
@@ -557,37 +573,155 @@ class GPUAgent:
     def _run_with_global_model_load_lock(self, phase: str, fn, max_wait_seconds: int = 900):
         lock = FileLock(str(self.model_load_lock_path), timeout=1)
         deadline = time.time() + max_wait_seconds
+        lease_acquired = False
         while time.time() < deadline:
             try:
                 lock.acquire(timeout=1)
-                break
+                if self._try_acquire_global_model_load_owner(phase=phase):
+                    lease_acquired = True
+                    break
+                self._touch_meta_task(phase=f"{phase}_waiting_global_lock")
             except Timeout:
                 self._touch_meta_task(phase=f"{phase}_waiting_global_lock")
-                time.sleep(1)
+            finally:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+            time.sleep(1)
         else:
             raise RuntimeError(f"global model load lock timeout after {max_wait_seconds}s")
 
+        stop_owner_heartbeat = threading.Event()
+        owner_heartbeat_thread = threading.Thread(
+            target=self._global_model_load_owner_heartbeat_loop,
+            args=(stop_owner_heartbeat, phase),
+            daemon=True,
+        )
+        owner_heartbeat_thread.start()
+
         try:
-            owner = {
-                "worker": self.name,
-                "pid": os.getpid(),
-                "phase": phase,
-                "acquired_at": datetime.now().isoformat(),
-            }
-            with open(self.model_load_owner_path, "w", encoding="utf-8") as f:
-                json.dump(owner, f, indent=2)
             self._touch_meta_task(phase=f"{phase}_global_lock_acquired", force=True)
             return fn()
         finally:
+            stop_owner_heartbeat.set()
             try:
-                if self.model_load_owner_path.exists():
+                owner_heartbeat_thread.join(timeout=2)
+            except Exception:
+                pass
+            try:
+                if lease_acquired:
+                    self._release_global_model_load_owner()
+            except Exception:
+                pass
+
+    def _global_model_load_owner_payload(self, phase: str, acquired_at: Optional[str] = None) -> Dict[str, Any]:
+        now_iso = datetime.now().isoformat()
+        return {
+            "worker": self.name,
+            "pid": os.getpid(),
+            "phase": phase,
+            "acquired_at": acquired_at or now_iso,
+            "heartbeat_at": now_iso,
+        }
+
+    def _write_global_model_load_owner(self, payload: Dict[str, Any]):
+        tmp_path = self.model_load_owner_path.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp_path, self.model_load_owner_path)
+
+    def _read_global_model_load_owner(self) -> Optional[Dict[str, Any]]:
+        try:
+            if not self.model_load_owner_path.exists():
+                return None
+            with open(self.model_load_owner_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            return raw if isinstance(raw, dict) else None
+        except Exception:
+            return None
+
+    def _global_owner_is_stale(self, owner: Optional[Dict[str, Any]]) -> bool:
+        if not owner:
+            return True
+        pid = owner.get("pid")
+        try:
+            pid_int = int(pid)
+        except Exception:
+            pid_int = None
+        if pid_int and pid_int != os.getpid():
+            try:
+                os.kill(pid_int, 0)
+                pid_alive = True
+            except Exception:
+                pid_alive = False
+            if not pid_alive:
+                return True
+        heartbeat_raw = owner.get("heartbeat_at") or owner.get("acquired_at")
+        try:
+            heartbeat_dt = datetime.fromisoformat(str(heartbeat_raw))
+            age = (datetime.now() - heartbeat_dt).total_seconds()
+            return age > GLOBAL_MODEL_LOAD_OWNER_STALE_SECONDS
+        except Exception:
+            return True
+
+    def _try_acquire_global_model_load_owner(self, phase: str) -> bool:
+        owner_payload = self._global_model_load_owner_payload(phase=phase)
+        try:
+            fd = os.open(
+                str(self.model_load_owner_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(owner_payload, f, indent=2)
+            except Exception:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+                raise
+            return True
+        except FileExistsError:
+            owner = self._read_global_model_load_owner()
+            if self._global_owner_is_stale(owner):
+                try:
                     self.model_load_owner_path.unlink()
-            except Exception:
-                pass
+                except Exception:
+                    return False
+                return False
+            return False
+
+    def _global_model_load_owner_heartbeat_loop(self, stop_event: threading.Event, phase: str):
+        while not stop_event.wait(GLOBAL_MODEL_LOAD_OWNER_HEARTBEAT_INTERVAL):
             try:
-                lock.release()
+                owner = self._read_global_model_load_owner()
+                if not owner:
+                    continue
+                if str(owner.get("worker", "")).strip() != self.name:
+                    continue
+                if int(owner.get("pid", -1)) != os.getpid():
+                    continue
+                owner["phase"] = phase
+                owner["heartbeat_at"] = datetime.now().isoformat()
+                self._write_global_model_load_owner(owner)
             except Exception:
-                pass
+                continue
+
+    def _release_global_model_load_owner(self):
+        try:
+            owner = self._read_global_model_load_owner()
+            if owner:
+                if (
+                    str(owner.get("worker", "")).strip() == self.name
+                    and int(owner.get("pid", -1)) == os.getpid()
+                ):
+                    self.model_load_owner_path.unlink(missing_ok=True)
+                    return
+            # If owner file is already gone or rotated, do nothing.
+        except Exception:
+            pass
 
     def _wait_for_model_ready(self, model_id: str, max_wait_seconds: int = 90) -> bool:
         """
@@ -1067,6 +1201,21 @@ class GPUAgent:
             env["CUDA_VISIBLE_DEVICES"] = ",".join(member_gpu_ids)
             env["OLLAMA_HOST"] = f"127.0.0.1:{port}"
 
+            # Avoid hijacking a stale runtime on the split port; that can make
+            # readiness checks pass against the wrong process and wedge warmup.
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            try:
+                if sock.connect_ex(("127.0.0.1", port)) == 0:
+                    self.last_split_runtime_error = f"split port {port} already in use before launch"
+                    self.logger.error(self.last_split_runtime_error)
+                    return False
+            finally:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
             proc = subprocess.Popen(
                 ["ollama", "serve"],
                 env=env,
@@ -1079,6 +1228,13 @@ class GPUAgent:
             ready = False
             while time.time() < deadline:
                 self._touch_meta_task(phase="starting_split_runtime")
+                if proc.poll() is not None:
+                    self.last_split_runtime_error = (
+                        f"split runtime exited during startup on port {port} rc={proc.returncode}"
+                    )
+                    self.logger.error(self.last_split_runtime_error)
+                    self.split_runtime_process = None
+                    return False
                 try:
                     r = requests.get(f"http://127.0.0.1:{port}/api/tags", timeout=1.5)
                     if r.status_code == 200:
@@ -1103,6 +1259,10 @@ class GPUAgent:
                 last_warmup_error = ""
                 while time.time() < warmup_deadline:
                     self._touch_meta_task(phase="warming_split_runtime")
+                    if proc.poll() is not None:
+                        raise RuntimeError(
+                            f"split runtime exited during warmup on port {port} rc={proc.returncode}"
+                        )
                     try:
                         r = requests.post(
                             f"http://127.0.0.1:{port}/api/generate",
@@ -1110,13 +1270,16 @@ class GPUAgent:
                                 "model": model_id,
                                 "prompt": "Hello",
                                 "stream": False,
-                                "keep_alive": self.worker_keep_alive,
+                                "keep_alive": self._effective_keep_alive(),
                                 "options": {
                                     "num_gpu": 999,
                                     "num_ctx": self.worker_num_ctx,
                                 }
                             },
-                            timeout=25
+                            # Split first-load warmup on GTX 1060 pairs can exceed 25s
+                            # even when healthy; premature client timeouts can retrigger
+                            # generate calls and wedge the runtime in practice.
+                            timeout=180
                         )
                         if r.status_code < 400:
                             return True
@@ -1256,7 +1419,8 @@ class GPUAgent:
                                 "model_id": model_id,
                                 "launcher": launcher,
                             }
-                        continue
+                        else:
+                            continue
 
                     if status == "ready":
                         # Both members mirror ready state; launcher is authoritative owner.
