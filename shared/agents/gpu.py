@@ -1151,6 +1151,36 @@ class GPUAgent:
         else:
             return DEFAULT_CPU_VRAM_COST
 
+    def _task_required_llm_model(self, task: Dict[str, Any]) -> str:
+        for key in ("llm_model", "worker_model", "target_model"):
+            value = str(task.get(key, "") or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _llm_task_runtime_compatible(self, task: Dict[str, Any]) -> tuple[bool, str]:
+        if str(task.get("task_class", "")).strip() != "llm":
+            return True, ""
+        if not self.model_loaded:
+            return False, "model_not_loaded"
+
+        required_model = self._task_required_llm_model(task)
+        if required_model and str(self.loaded_model or "").strip() != required_model:
+            return False, f"model_mismatch:{required_model}!={self.loaded_model or 'none'}"
+
+        required_placement = str(task.get("llm_placement", "")).strip()
+        if required_placement:
+            if required_placement != str(self.runtime_placement or "").strip():
+                return False, f"placement_mismatch:{required_placement}!={self.runtime_placement or 'none'}"
+
+        # Fail closed: split runtimes may only serve explicitly split tasks. This
+        # prevents single-GPU jobs (e.g. 7b) from being routed onto split ports
+        # and evicting split-loaded models.
+        if self.runtime_placement == "split_gpu" and required_placement != "split_gpu":
+            return False, "split_runtime_requires_split_task"
+
+        return True, ""
+
     # =========================================================================
     # Task Claiming
     # =========================================================================
@@ -1198,6 +1228,31 @@ class GPUAgent:
         self.split_runtime_owner = False
         self.split_runtime_invariant_failures = 0
         self.state = "cold"
+
+    def _mark_split_reservation_runtime_invalid(self, group_id: str, reason: str):
+        group_id = str(group_id or "").strip()
+        if not group_id:
+            return
+        res_path = self._split_reservation_path(group_id)
+        lock = FileLock(str(res_path) + ".lock", timeout=1)
+        try:
+            with lock:
+                reservation = self._read_json_file(res_path)
+                if not reservation:
+                    return
+                status = str(reservation.get("status", "")).strip()
+                if status in {"unloaded", "failed", "expired"}:
+                    return
+                reservation = self._set_reservation_status(
+                    reservation,
+                    "failed",
+                    reason=f"runtime_invalid_{reason}",
+                )
+                reservation["error"] = f"split runtime invalid: {reason}"
+                with open(res_path, "w", encoding="utf-8") as f:
+                    json.dump(reservation, f, indent=2)
+        except Exception:
+            return
 
     def _read_json_file(self, path: Path) -> Optional[Dict[str, Any]]:
         try:
@@ -1647,14 +1702,16 @@ class GPUAgent:
 
         if reason:
             self.split_runtime_invariant_failures += 1
+            immediate_clear = reason in {"port_model_missing", "owner_meta_mismatch"}
             if self.split_runtime_invariant_failures == 1:
                 self.logger.warning(
                     f"SPLIT_INVARIANT_WARN group={group_id} model={model_id} port={port} reason={reason}"
                 )
-            elif self.split_runtime_invariant_failures >= 3:
+            if immediate_clear or self.split_runtime_invariant_failures >= 3:
                 self.logger.error(
                     f"SPLIT_INVARIANT_CLEAR group={group_id} model={model_id} port={port} reason={reason}"
                 )
+                self._mark_split_reservation_runtime_invalid(group_id, reason)
                 if self.split_runtime_owner:
                     self._stop_split_runtime()
                 self._clear_split_runtime_loaded()
@@ -2043,6 +2100,12 @@ class GPUAgent:
                                 f"Skipping llm task {task['task_id'][:8]}: split runtime follower"
                             )
                             continue
+                        llm_ok, llm_reason = self._llm_task_runtime_compatible(task)
+                        if not llm_ok:
+                            self.logger.debug(
+                                f"Skipping llm task {task['task_id'][:8]}: runtime incompatible ({llm_reason})"
+                            )
+                            continue
 
                     env_ok, env_reason = self._check_task_env_requirements(task)
                     if not env_ok:
@@ -2118,6 +2181,27 @@ class GPUAgent:
 
     def _spawn_worker(self, task: Dict):
         """Spawn a worker subprocess to execute a task."""
+        if str(task.get("task_class", "")).strip() == "llm":
+            llm_ok, llm_reason = self._llm_task_runtime_compatible(task)
+            if not llm_ok:
+                self.logger.error(
+                    f"Refusing to spawn llm worker for task {task.get('task_id', '')[:8]}: "
+                    f"incompatible runtime ({llm_reason})"
+                )
+                self.outbox.append(WorkerResult(
+                    task_id=task["task_id"],
+                    task=task,
+                    result={
+                        "success": False,
+                        "error": f"runtime_incompatible: {llm_reason}",
+                        "worker": self.name,
+                        "max_vram_used_mb": 0,
+                    },
+                    peak_vram_mb=0,
+                ))
+                self._remove_task_heartbeat(task["task_id"])
+                return
+
         worker_id = f"{self.name}-w{len(self.active_workers)}-{task['task_id'][:8]}"
         vram_cost = self._get_task_vram_cost(task)
 
