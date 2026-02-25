@@ -2230,6 +2230,12 @@ class GPUAgent:
             env["WORKER_MODEL"] = str(self.model)
         if self.runtime_ollama_url:
             env["WORKER_OLLAMA_URL"] = self.runtime_ollama_url
+        if self.runtime_placement:
+            env["WORKER_RUNTIME_PLACEMENT"] = str(self.runtime_placement)
+        if self.runtime_group_id:
+            env["WORKER_RUNTIME_GROUP_ID"] = str(self.runtime_group_id)
+        if self.loaded_model:
+            env["WORKER_RUNTIME_MODEL"] = str(self.loaded_model)
 
         proc = subprocess.Popen(
             worker_cmd,
