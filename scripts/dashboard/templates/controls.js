@@ -82,6 +82,7 @@ function setQuickInputsFromConfig(planName, cfg) {
   if (wrap) wrap.style.display = showQuick ? '' : 'none';
   if (!showQuick) return;
   const obj = (cfg && typeof cfg === 'object') ? cfg : {};
+  document.getElementById('quickRepoPath').value = String(obj.REPO_PATH || '');
   document.getElementById('quickRepoUrl').value = String(obj.REPO_URL || '');
   document.getElementById('quickClaim').value = String(obj.CLAIMED_BEHAVIOR || '');
   const depth = String(obj.ANALYSIS_DEPTH || 'standard').toLowerCase();
@@ -420,9 +421,11 @@ async function startPlan() {
   const starterFile = document.getElementById('starterFile').value;
   const highPriority = document.getElementById('highPriority').checked;
   const quickRepoUrl = document.getElementById('quickRepoUrl').value;
+  const quickRepoPath = document.getElementById('quickRepoPath').value;
   const quickDepth = document.getElementById('quickDepth').value;
   const quickClaim = document.getElementById('quickClaim').value;
   const cfg = { ...getCurrentConfig(), ...readFormConfig() };
+  if (quickRepoPath && quickRepoPath.trim()) cfg.REPO_PATH = quickRepoPath.trim();
   if (quickRepoUrl && quickRepoUrl.trim()) cfg.REPO_URL = quickRepoUrl.trim();
   if (planName === 'github_analyzer') {
     cfg.ANALYSIS_DEPTH = (quickDepth === 'deep') ? 'deep' : 'standard';
@@ -437,6 +440,7 @@ async function startPlan() {
     plan_scope: planScope,
     starter_file: starterFile,
     config_json: configText,
+    repo_path: quickRepoPath,
     repo_url: quickRepoUrl,
     claimed_behavior: quickClaim
   }));

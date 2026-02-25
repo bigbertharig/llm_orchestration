@@ -39,6 +39,7 @@ from .workers import load_brain_state
 # Template directory relative to this file
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 BATCH_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
+GITHUB_URL_PARSE_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)/?$")
 
 # Template cache (loaded once at startup)
 _template_cache: dict[str, str] = {}
@@ -143,6 +144,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return True, ""
         detail = str(out.get("stderr", "")).strip() or stdout.strip() or "git not found on gpu host"
         return False, detail
+
+    def _gpu_find_existing_repo_checkout(self, repo_url: str) -> tuple[str, str]:
+        """Return (repo_path, normalized_url) for an existing local checkout on GPU host if found."""
+        normalized = normalize_github_url(repo_url)
+        m = GITHUB_URL_PARSE_RE.match(normalized)
+        if not m:
+            return "", normalized
+        owner, repo = m.group(1), m.group(2)
+        repo_base = f"{owner}-{repo}"
+        candidates = [
+            f"/mnt/shared/plans/arms/{repo_base}",
+            f"/mnt/shared/plans/arms/exploratory/{repo_base}",
+            f"/media/bryan/shared/plans/arms/{repo_base}",
+            f"/media/bryan/shared/plans/arms/exploratory/{repo_base}",
+        ]
+        script_lines = ["set -e"]
+        for path in candidates:
+            qpath = shlex.quote(path)
+            script_lines.append(f"if [ -d {qpath}/.git ]; then printf '%s\\n' {qpath}; exit 0; fi")
+        script_lines.append("exit 1")
+        out = self._gpu_ssh("\n".join(script_lines), timeout_s=20)
+        if out.get("ok"):
+            line = str(out.get("stdout", "") or "").strip().splitlines()
+            if line and line[0].strip():
+                return line[0].strip(), normalized
+        return "", normalized
 
     def _control_options(self) -> dict[str, Any]:
         brain = load_brain_state(self.shared_path)
@@ -329,6 +356,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         config_json: str,
         plan_scope: str = "shoulders",
         starter_file: str = "",
+        repo_path: str = "",
         repo_url: str = "",
         claimed_behavior: str = "",
         inline_query_text: str = "",
@@ -366,6 +394,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception as e:
             return {"ok": False, "message": f"invalid config values: {e}"}
 
+        repo_path_clean = sanitize_text(repo_path, max_len=800, single_line=True) if str(repo_path).strip() else ""
         try:
             repo_url_clean = normalize_github_url(repo_url) if str(repo_url).strip() else ""
         except Exception as e:
@@ -373,10 +402,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         claimed_clean = sanitize_text(claimed_behavior, max_len=8000, single_line=True) if str(claimed_behavior).strip() else ""
         inline_clean = sanitize_text(inline_query_text, max_len=16000, single_line=False) if str(inline_query_text).strip() else ""
 
+        auto_repo_path = ""
+        if plan_name == "github_analyzer" and not repo_path_clean and repo_url_clean:
+            try:
+                auto_repo_path, repo_url_clean = self._gpu_find_existing_repo_checkout(repo_url_clean)
+            except Exception:
+                auto_repo_path = ""
+
+        if repo_path_clean:
+            cfg_obj["REPO_PATH"] = repo_path_clean
         if repo_url_clean:
             cfg_obj["REPO_URL"] = repo_url_clean
-            if plan_name == "github_analyzer":
+            if plan_name == "github_analyzer" and not repo_path_clean and not auto_repo_path:
                 cfg_obj["REPO_PATH"] = ""
+        if auto_repo_path:
+            cfg_obj["REPO_PATH"] = auto_repo_path
         if claimed_clean:
             cfg_obj["CLAIMED_BEHAVIOR"] = claimed_clean
         if inline_clean:
@@ -444,6 +484,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if out.get("ok")
             else f"Failed to submit {scope}/{plan_name} ({display_starter})"
         )
+        if out.get("ok") and plan_name == "github_analyzer":
+            resolved_repo = str(cfg_obj.get("REPO_PATH", "") or "").strip()
+            if resolved_repo:
+                out["message"] += f" [local repo: {resolved_repo}]"
         return out
 
     def _resume_plan(self, batch_id: str) -> dict[str, Any]:
@@ -565,6 +609,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     str(payload.get("config_json", "")).strip(),
                     str(payload.get("plan_scope", "shoulders")).strip(),
                     str(payload.get("starter_file", "")).strip(),
+                    str(payload.get("repo_path", "")).strip(),
                     str(payload.get("repo_url", "")).strip(),
                     str(payload.get("claimed_behavior", "")).strip(),
                     str(payload.get("inline_query_text", "")).strip(),
