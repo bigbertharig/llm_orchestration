@@ -173,11 +173,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _discover_local_repo_choices(self) -> list[dict[str, str]]:
         """Discover git checkouts under arms/shoulders for dropdown selection."""
-        roots: list[tuple[str, Path]] = [
-            ("shared", self.shared_path / "plans"),
-            ("mnt", Path("/mnt/shared/plans")),
-            ("media", Path("/media/bryan/shared/plans")),
-        ]
+        plans_root = self.shared_path / "plans"
         seen: set[str] = set()
         out: list[dict[str, str]] = []
 
@@ -187,11 +183,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return "/mnt/shared/" + text[len("/media/bryan/shared/"):]
             return text
 
-        candidate_dirs: list[tuple[str, Path]] = []
-        for _tag, plans_root in roots:
-            candidate_dirs.append(("shoulders", plans_root / "shoulders"))
-            candidate_dirs.append(("arms", plans_root / "arms"))
-            candidate_dirs.append(("arms/exploratory", plans_root / "arms" / "exploratory"))
+        candidate_dirs: list[tuple[str, Path]] = [
+            ("shoulders", plans_root / "shoulders"),
+            ("arms", plans_root / "arms"),
+            ("arms/exploratory", plans_root / "arms" / "exploratory"),
+        ]
 
         for scope_label, base in candidate_dirs:
             try:
