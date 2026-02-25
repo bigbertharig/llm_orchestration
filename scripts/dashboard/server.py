@@ -317,19 +317,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _cleanup_stale(self) -> dict[str, Any]:
         heartbeats = self._cleanup_stale_processing_heartbeats()
         artifacts = self._cleanup_stale_task_artifacts()
+        brain = load_brain_state(self.shared_path)
+        active_batches = set()
+        if isinstance(brain.get("active_batches"), dict):
+            active_batches = {str(k) for k in brain.get("active_batches", {}).keys()}
+        remote_runtime = self._cleanup_stale_remote_runtime_artifacts(
+            allow_aggressive=(len(active_batches) == 0)
+        )
         errors = []
         if isinstance(heartbeats, dict):
             errors.extend(list(heartbeats.get("errors") or []))
         if isinstance(artifacts, dict):
             errors.extend(list(artifacts.get("errors") or []))
+        if isinstance(remote_runtime, dict):
+            errors.extend(list(remote_runtime.get("errors") or []))
         ok = not errors
-        if isinstance(heartbeats, dict) and isinstance(artifacts, dict):
+        if isinstance(heartbeats, dict) and isinstance(artifacts, dict) and isinstance(remote_runtime, dict):
             msg = (
                 "Cleanup stale complete: "
                 f"heartbeats_removed={int(heartbeats.get('removed', 0))}, "
                 f"heartbeat_kept={int(heartbeats.get('kept', 0))}, "
                 f"task_locks_removed={int(artifacts.get('task_locks_removed', 0))}, "
-                f"failed_meta_removed={int(artifacts.get('failed_meta_removed', 0))}"
+                f"failed_meta_removed={int(artifacts.get('failed_meta_removed', 0))}, "
+                f"split_ports_killed={int(remote_runtime.get('split_port_ollama_killed', 0))}, "
+                f"orphan_ollama_killed={int(remote_runtime.get('orphan_ollama_killed', 0))}"
             )
         else:
             msg = "Cleanup stale complete"
@@ -339,6 +350,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "cleanup": {
                 "heartbeats": heartbeats,
                 "artifacts": artifacts,
+                "remote_runtime": remote_runtime,
             },
             "stderr": "" if ok else f"cleanup_errors={errors}",
         }
@@ -436,6 +448,82 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "failed_meta_removed": failed_meta_removed,
             "errors": errors,
         }
+
+    def _cleanup_stale_remote_runtime_artifacts(self, allow_aggressive: bool = False) -> dict[str, Any]:
+        """
+        Reclaim stale remote runtime artifacts when no batches are active.
+
+        Conservative behavior (allow_aggressive=False):
+        - no remote process cleanup, only report skipped
+
+        Aggressive behavior (allow_aggressive=True):
+        - kill listeners on split ports 11440/11441
+        - kill orphan `ollama serve` processes (PPID 1) excluding system /usr/local/bin/ollama serve
+        - clear split reservation/global load lock signal files on shared drive
+        """
+        if not allow_aggressive:
+            return {
+                "skipped": True,
+                "reason": "active_batches_present",
+                "split_port_ollama_killed": 0,
+                "orphan_ollama_killed": 0,
+                "split_signal_files_removed": 0,
+                "errors": [],
+            }
+
+        script = r"""
+set -e
+split_killed=0
+orphan_killed=0
+signals_removed=0
+
+for p in 11440 11441; do
+  pid="$(ss -ltnp 2>/dev/null | grep ":${p}\b" | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n1 || true)"
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null || true
+    split_killed=$((split_killed + 1))
+  fi
+done
+
+# Reap orphan ollama serve processes left behind by crashed/stopped GPU agents.
+# Keep the system brain ollama service (/usr/local/bin/ollama serve).
+for pid in $(ps -eo pid=,ppid=,args= | awk '$2==1 && $0 ~ /ollama serve/ && $0 !~ /\/usr\/local\/bin\/ollama serve/ {print $1}'); do
+  [ -n "$pid" ] || continue
+  kill "$pid" 2>/dev/null || true
+  orphan_killed=$((orphan_killed + 1))
+done
+
+for f in /mnt/shared/signals/model_load.global.json /mnt/shared/signals/model_load.global.json.lock; do
+  if [ -e "$f" ]; then rm -f "$f" && signals_removed=$((signals_removed + 1)); fi
+done
+for f in /mnt/shared/signals/split_llm/pair_*.json /mnt/shared/signals/split_llm/pair_*.runtime_owner.json /mnt/shared/signals/split_llm/*.lock; do
+  [ -e "$f" ] || continue
+  rm -f "$f" && signals_removed=$((signals_removed + 1))
+done
+
+printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"split_signal_files_removed":%s}\n' \
+  "$split_killed" "$orphan_killed" "$signals_removed"
+"""
+        out = self._gpu_ssh(script, timeout_s=60)
+        errors: list[str] = []
+        parsed: dict[str, Any] = {
+            "split_port_ollama_killed": 0,
+            "orphan_ollama_killed": 0,
+            "split_signal_files_removed": 0,
+        }
+        if not out.get("ok"):
+            errors.append(str(out.get("stderr") or out.get("error") or "remote cleanup failed").strip())
+        else:
+            stdout = str(out.get("stdout") or "").strip().splitlines()
+            if stdout:
+                try:
+                    candidate = json.loads(stdout[-1])
+                    if isinstance(candidate, dict):
+                        parsed.update(candidate)
+                except Exception as exc:
+                    errors.append(f"parse_remote_cleanup_output: {exc}")
+        parsed["errors"] = errors
+        return parsed
 
     def _return_default(self) -> dict[str, Any]:
         # Pass commands via stdin so pkill can't match its own shell's cmdline.
