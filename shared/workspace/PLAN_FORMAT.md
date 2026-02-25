@@ -32,6 +32,7 @@ Important parser behavior:
 - Brain substitutes only built-in variables (for example `{BATCH_ID}`, `{BATCH_PATH}`, `{PLAN_PATH}`) plus submission config keys.
 - Text like `(default: ...)` in `## Inputs` is documentation only unless the planner hardcodes the default in commands/scripts.
 - If a command references `{MISSING_VAR}`, it will remain literal and can break the run.
+- `split_gpu` LLM tasks must be single-model tasks. If a workflow uses multiple models (for example extractor/verifier/adjudicator), split it into separate tasks and pass artifacts between them.
 
 ---
 
@@ -146,6 +147,15 @@ Define tasks with explicit dependencies. The brain parses this section directly.
 ## Notes
 
 Any additional guidance, constraints, or edge cases.
+
+### Split LLM Task Rule (Important)
+
+- Tasks with `- **llm_placement**: split_gpu` must not embed mixed explicit `--*-model` arguments in the command.
+- The task's explicit model flags should all match `- **llm_model**`.
+- If you need a mixed-model pipeline, decompose it into multiple tasks:
+  - Example: `7B extractor` task writes intermediate JSON
+  - `14B split` task consumes the JSON and performs verification/adjudication
+- Brain should fail fast on plan parse if a split task declares conflicting explicit model args.
 ```
 
 ---

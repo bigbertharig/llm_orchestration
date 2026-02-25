@@ -18,6 +18,45 @@ from brain_constants import PRIORITY_TIER_TO_VALUE, VALID_TASK_CLASSES, VALID_VR
 
 
 class BrainPlanMixin:
+    def _extract_explicit_model_flags_from_command(self, command: str) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        try:
+            tokens = shlex.split(command or "")
+        except Exception:
+            tokens = str(command or "").split()
+        i = 0
+        while i < len(tokens):
+            tok = str(tokens[i]).strip()
+            if tok.startswith("--") and tok.endswith("-model") and i + 1 < len(tokens):
+                key = tok[2:]
+                val = str(tokens[i + 1]).strip()
+                if val and not (val.startswith("{") and val.endswith("}")):
+                    out[key] = val
+                i += 2
+                continue
+            i += 1
+        return out
+
+    def _validate_split_llm_task_definition(self, task: Dict[str, Any]) -> Optional[str]:
+        if task.get("task_class") != "llm":
+            return None
+        if str(task.get("llm_placement") or "").strip() != "split_gpu":
+            return None
+        primary = str(task.get("llm_model") or "").strip()
+        if not primary:
+            return None
+        explicit_models = self._extract_explicit_model_flags_from_command(task.get("command", ""))
+        if not explicit_models:
+            return None
+        mismatched = {k: v for k, v in explicit_models.items() if str(v).strip() and str(v).strip() != primary}
+        if not mismatched:
+            return None
+        return (
+            "split_gpu tasks must be single-model; mixed explicit model args found: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(mismatched.items()))
+            + f" (llm_model={primary})"
+        )
+
     def _normalize_batch_priority(self, raw_priority: Any) -> tuple[str, int]:
         """Resolve batch priority tier to normalized label + numeric value."""
         label = str(raw_priority or "normal").strip().lower()
@@ -417,6 +456,10 @@ Required JSON format:
 
                 if task.get("vram_estimate_mb") and task.get("vram_policy") in [None, "default"]:
                     task["vram_policy"] = "fixed"
+                split_def_error = self._validate_split_llm_task_definition(task)
+                if split_def_error:
+                    task["definition_error"] = split_def_error
+                    task["error_type"] = "definition"
                 tasks.append(task)
 
         return tasks
