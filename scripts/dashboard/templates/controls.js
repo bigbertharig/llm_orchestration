@@ -9,6 +9,7 @@ let armPlans = [];
 let shoulderArmBindings = {};
 let outputFiles = [];
 let batchLabels = {};
+let localRepoChoices = [];
 const GLOBAL_HIDDEN_KEYS = new Set(['PRIORITY', 'PREEMPTIBLE']);
 const PLAN_HIDDEN_KEYS = {
   github_analyzer: [
@@ -82,11 +83,46 @@ function setQuickInputsFromConfig(planName, cfg) {
   if (wrap) wrap.style.display = showQuick ? '' : 'none';
   if (!showQuick) return;
   const obj = (cfg && typeof cfg === 'object') ? cfg : {};
-  document.getElementById('quickRepoPath').value = String(obj.REPO_PATH || '');
+  const repoPathEl = document.getElementById('quickRepoPath');
+  const repoPathValue = String(obj.REPO_PATH || '');
+  if (repoPathEl) {
+    if (repoPathValue && ![...repoPathEl.options].some(o => o.value === repoPathValue)) {
+      const o = document.createElement('option');
+      o.value = repoPathValue;
+      o.textContent = `(custom) ${repoPathValue}`;
+      repoPathEl.appendChild(o);
+    }
+    repoPathEl.value = repoPathValue;
+  }
   document.getElementById('quickRepoUrl').value = String(obj.REPO_URL || '');
   document.getElementById('quickClaim').value = String(obj.CLAIMED_BEHAVIOR || '');
   const depth = String(obj.ANALYSIS_DEPTH || 'standard').toLowerCase();
   document.getElementById('quickDepth').value = depth === 'deep' ? 'deep' : 'standard';
+}
+
+function populateQuickRepoPathOptions() {
+  const el = document.getElementById('quickRepoPath');
+  if (!el) return;
+  const current = String(el.value || '');
+  el.innerHTML = '';
+  const autoOpt = document.createElement('option');
+  autoOpt.value = '';
+  autoOpt.textContent = '(auto / none)';
+  el.appendChild(autoOpt);
+  (localRepoChoices || []).forEach(row => {
+    const path = String((row && row.path) || '');
+    if (!path) return;
+    const label = String((row && row.label) || path);
+    const o = document.createElement('option');
+    o.value = path;
+    o.textContent = label;
+    el.appendChild(o);
+  });
+  if (current && [...el.options].some(o => o.value === current)) {
+    el.value = current;
+  } else {
+    el.value = '';
+  }
 }
 
 function getCurrentConfig() {
@@ -277,11 +313,13 @@ async function refreshOptions() {
   planInputs = data.plan_inputs || {};
   planInputFiles = data.plan_input_files || {};
   planScopes = data.plan_scopes || {};
+  localRepoChoices = data.local_repo_choices || [];
   shoulderPlans = data.shoulder_plans || [];
   armPlans = data.arm_plans || [];
   shoulderArmBindings = data.shoulder_arm_bindings || {};
   batchLabels = data.batch_labels || {};
   renderActiveBatches(data.active_batches_meta || []);
+  populateQuickRepoPathOptions();
 
   const ids = [];
   const seen = new Set();

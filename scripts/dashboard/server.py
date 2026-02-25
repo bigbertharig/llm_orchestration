@@ -171,6 +171,62 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return line[0].strip(), normalized
         return "", normalized
 
+    def _discover_local_repo_choices(self) -> list[dict[str, str]]:
+        """Discover git checkouts under arms/shoulders for dropdown selection."""
+        roots: list[tuple[str, Path]] = [
+            ("shared", self.shared_path / "plans"),
+            ("mnt", Path("/mnt/shared/plans")),
+            ("media", Path("/media/bryan/shared/plans")),
+        ]
+        seen: set[str] = set()
+        out: list[dict[str, str]] = []
+
+        def _to_mnt_path(p: Path) -> str:
+            text = str(p)
+            if text.startswith("/media/bryan/shared/"):
+                return "/mnt/shared/" + text[len("/media/bryan/shared/"):]
+            return text
+
+        candidate_dirs: list[tuple[str, Path]] = []
+        for _tag, plans_root in roots:
+            candidate_dirs.append(("shoulders", plans_root / "shoulders"))
+            candidate_dirs.append(("arms", plans_root / "arms"))
+            candidate_dirs.append(("arms/exploratory", plans_root / "arms" / "exploratory"))
+
+        for scope_label, base in candidate_dirs:
+            try:
+                if not base.exists() or not base.is_dir():
+                    continue
+            except Exception:
+                continue
+            try:
+                children = sorted(base.iterdir())
+            except Exception:
+                continue
+            for child in children:
+                try:
+                    if not child.is_dir():
+                        continue
+                    if not (child / ".git").is_dir():
+                        continue
+                except Exception:
+                    continue
+                mnt_path = _to_mnt_path(child)
+                if mnt_path in seen:
+                    continue
+                seen.add(mnt_path)
+                out.append(
+                    {
+                        "path": mnt_path,
+                        "label": f"{scope_label}: {child.name} ({mnt_path})",
+                        "scope": scope_label,
+                        "name": child.name,
+                    }
+                )
+
+        out.sort(key=lambda r: (str(r.get("scope", "")), str(r.get("name", ""))))
+        return out
+
     def _control_options(self) -> dict[str, Any]:
         brain = load_brain_state(self.shared_path)
         active = brain.get("active_batches", {}) if isinstance(brain.get("active_batches"), dict) else {}
@@ -231,6 +287,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "plan_default_starter": plan_default_starter,
             "plan_inputs": plan_inputs,
             "batch_labels": batch_labels,
+            "local_repo_choices": self._discover_local_repo_choices(),
         }
 
     def _kill_plan(self, batch_id: str) -> dict[str, Any]:
