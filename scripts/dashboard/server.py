@@ -315,19 +315,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return out
 
     def _cleanup_stale(self) -> dict[str, Any]:
-        cleaned = self._cleanup_stale_processing_heartbeats()
-        errors = cleaned.get("errors") if isinstance(cleaned, dict) else []
+        heartbeats = self._cleanup_stale_processing_heartbeats()
+        artifacts = self._cleanup_stale_task_artifacts()
+        errors = []
+        if isinstance(heartbeats, dict):
+            errors.extend(list(heartbeats.get("errors") or []))
+        if isinstance(artifacts, dict):
+            errors.extend(list(artifacts.get("errors") or []))
         ok = not errors
-        msg = (
-            f"Cleanup stale complete: removed={int(cleaned.get('removed', 0))}, kept={int(cleaned.get('kept', 0))}"
-            if isinstance(cleaned, dict)
-            else "Cleanup stale complete"
-        )
+        if isinstance(heartbeats, dict) and isinstance(artifacts, dict):
+            msg = (
+                "Cleanup stale complete: "
+                f"heartbeats_removed={int(heartbeats.get('removed', 0))}, "
+                f"heartbeat_kept={int(heartbeats.get('kept', 0))}, "
+                f"task_locks_removed={int(artifacts.get('task_locks_removed', 0))}, "
+                f"failed_meta_removed={int(artifacts.get('failed_meta_removed', 0))}"
+            )
+        else:
+            msg = "Cleanup stale complete"
         return {
             "ok": ok,
             "message": msg if ok else f"{msg} (with errors)",
-            "cleanup": cleaned,
-            "stderr": "" if ok else f"heartbeat_cleanup_errors={errors}",
+            "cleanup": {
+                "heartbeats": heartbeats,
+                "artifacts": artifacts,
+            },
+            "stderr": "" if ok else f"cleanup_errors={errors}",
         }
 
     def _cleanup_stale_processing_heartbeats(self) -> dict[str, Any]:
@@ -363,6 +376,66 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 kept += 1
 
         return {"removed": removed, "kept": kept, "errors": errors}
+
+    def _cleanup_stale_task_artifacts(self) -> dict[str, Any]:
+        tasks_dir = self.shared_path / "tasks"
+        errors: list[str] = []
+        task_locks_removed = 0
+        failed_meta_removed = 0
+
+        brain = load_brain_state(self.shared_path)
+        active_batches = set()
+        if isinstance(brain.get("active_batches"), dict):
+            active_batches = {str(k) for k in brain.get("active_batches", {}).keys()}
+
+        # Remove orphan/stale task lock files. These are filesystem lock artifacts only.
+        for lane in ("queue", "processing", "failed"):
+            lane_dir = tasks_dir / lane
+            if not lane_dir.exists():
+                continue
+            for lock_path in sorted(lane_dir.glob("*.json.lock")):
+                task_path = lock_path.with_name(lock_path.name[:-5])  # strip ".lock"
+                # Keep a lock if a task file currently exists in processing (possible active writer).
+                if lane == "processing" and task_path.exists():
+                    continue
+                try:
+                    lock_path.unlink()
+                    task_locks_removed += 1
+                except Exception as exc:
+                    errors.append(f"{lock_path.name}: {exc}")
+
+        # Remove stale blocked-cloud meta load failures from inactive batches; these are terminal artifacts
+        # that skew dashboard failed counts after cleanup/reset.
+        failed_dir = tasks_dir / "failed"
+        if failed_dir.exists():
+            for task_path in sorted(failed_dir.glob("*.json")):
+                try:
+                    task = load_json(task_path)
+                except Exception as exc:
+                    errors.append(f"{task_path.name}: {exc}")
+                    continue
+                if not isinstance(task, dict):
+                    continue
+                if str(task.get("status", "")).strip() != "blocked_cloud":
+                    continue
+                if str(task.get("task_class", "")).strip() != "meta":
+                    continue
+                if str(task.get("command", "")).strip() not in {"load_llm", "load_split_llm"}:
+                    continue
+                batch_id = str(task.get("batch_id", "")).strip()
+                if batch_id and batch_id in active_batches:
+                    continue
+                try:
+                    task_path.unlink()
+                    failed_meta_removed += 1
+                except Exception as exc:
+                    errors.append(f"{task_path.name}: {exc}")
+
+        return {
+            "task_locks_removed": task_locks_removed,
+            "failed_meta_removed": failed_meta_removed,
+            "errors": errors,
+        }
 
     def _return_default(self) -> dict[str, Any]:
         # Pass commands via stdin so pkill can't match its own shell's cmdline.
