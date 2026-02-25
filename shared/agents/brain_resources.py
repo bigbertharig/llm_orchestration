@@ -14,6 +14,85 @@ from filelock import FileLock
 
 
 class BrainResourceMixin:
+    def _iter_task_files_json(self, *paths: Path):
+        for path in paths:
+            for task_file in path.glob("*.json"):
+                if str(task_file).endswith(".lock"):
+                    continue
+                try:
+                    with open(task_file) as f:
+                        task = json.load(f)
+                    if isinstance(task, dict):
+                        yield task
+                except Exception:
+                    continue
+
+    def _task_llm_tier(self, task: Dict[str, Any]) -> int:
+        model_id = str(task.get("llm_model") or task.get("target_model") or "").strip()
+        if model_id:
+            try:
+                return int(self.model_tier_by_id.get(model_id, self.default_llm_min_tier))
+            except Exception:
+                return int(self.default_llm_min_tier)
+        try:
+            return int(task.get("llm_tier", 0) or 0)
+        except Exception:
+            return 0
+
+    def _collect_llm_demand_window_snapshot(self) -> Dict[str, Any]:
+        """Aggregate LLM demand across queue, processing, and private tasks.
+
+        Purposefully conservative: private tasks count as future demand so the brain
+        does not unload models during brief release gaps.
+        """
+        counts = {
+            "queue_llm": 0,
+            "processing_llm": 0,
+            "private_llm": 0,
+            "total_llm": 0,
+            "split_llm": 0,
+            "min_tier": 0,
+            "max_tier": 0,
+            "tiers": {},
+        }
+
+        def _accumulate(task: Dict[str, Any], source: str):
+            if str(task.get("task_class", "")).strip() != "llm":
+                return
+            if source == "queue":
+                counts["queue_llm"] += 1
+            elif source == "processing":
+                counts["processing_llm"] += 1
+            elif source == "private":
+                counts["private_llm"] += 1
+            counts["total_llm"] += 1
+            if str(task.get("llm_placement", "")).strip() == "split_gpu":
+                counts["split_llm"] += 1
+            tier = self._task_llm_tier(task)
+            if tier > 0:
+                counts["min_tier"] = tier if counts["min_tier"] <= 0 else min(counts["min_tier"], tier)
+                counts["max_tier"] = max(counts["max_tier"], tier)
+                counts["tiers"][str(tier)] = int(counts["tiers"].get(str(tier), 0)) + 1
+
+        for task in self._iter_task_files_json(self.queue_path):
+            _accumulate(task, "queue")
+        for task in self._iter_task_files_json(self.processing_path):
+            _accumulate(task, "processing")
+        for task in self._iter_task_files_json(self.private_tasks_path):
+            _accumulate(task, "private")
+
+        return counts
+
+    def _update_llm_demand_timers(self, demand: Dict[str, Any]) -> Dict[str, float]:
+        now = datetime.now()
+        if int(demand.get("total_llm", 0) or 0) > 0:
+            self.last_any_llm_demand_at = now
+        if int(demand.get("split_llm", 0) or 0) > 0 or int(demand.get("max_tier", 0) or 0) >= 2:
+            self.last_split_llm_demand_at = now
+        any_idle_s = max(0.0, (now - self.last_any_llm_demand_at).total_seconds())
+        split_idle_s = max(0.0, (now - self.last_split_llm_demand_at).total_seconds())
+        return {"any_llm_idle_s": any_idle_s, "split_llm_idle_s": split_idle_s}
+
     def _meta_task_signature(self, task: Dict[str, Any]) -> str:
         key = {
             "command": task.get("command"),
@@ -236,6 +315,54 @@ class BrainResourceMixin:
                 except Exception:
                     continue
         return False
+
+    def _single_hot_gpu_rows(self, gpu_states: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for gpu_name, state in gpu_states.items():
+            if not state.get("model_loaded", False):
+                continue
+            if str(state.get("runtime_placement", "")) != "single_gpu":
+                continue
+            try:
+                tier = int(state.get("loaded_tier", 0) or 0)
+            except Exception:
+                tier = 0
+            rows.append({
+                "gpu": gpu_name,
+                "tier": tier,
+                "model": str(state.get("loaded_model", "")).strip(),
+            })
+        rows.sort(key=lambda r: (r["tier"], r["gpu"]))
+        return rows
+
+    def _targeted_single_unload_candidate(
+        self,
+        gpu_states: Dict[str, Dict[str, Any]],
+        unhealthy_gpus: List[str],
+        demand: Dict[str, Any],
+    ) -> Optional[str]:
+        """Pick a safe single-GPU unload target based on demand hierarchy.
+
+        If any LLM demand exists, only unload a single-GPU worker whose tier is below
+        *all* current LLM demand tiers. This preserves higher-tier runtimes so they can
+        continue serving lower-tier work.
+        """
+        candidates = [
+            row for row in self._single_hot_gpu_rows(gpu_states)
+            if row["gpu"] not in unhealthy_gpus
+        ]
+        if not candidates:
+            return None
+        total_llm = int(demand.get("total_llm", 0) or 0)
+        if total_llm <= 0:
+            return candidates[0]["gpu"]
+        min_demand_tier = int(demand.get("min_tier", 0) or 0)
+        if min_demand_tier <= 0:
+            return None
+        for row in candidates:
+            if int(row["tier"]) < min_demand_tier:
+                return row["gpu"]
+        return None
 
     def _pending_split_group_ids(self, model_id: str, candidate_group_ids: List[str]) -> set[str]:
         pending: set[str] = set()
@@ -515,6 +642,11 @@ class BrainResourceMixin:
             if not task_in_queue and not task_in_processing:
                 del self.load_llm_requests[task_id]
 
+        demand_window = self._collect_llm_demand_window_snapshot()
+        demand_idle = self._update_llm_demand_timers(demand_window)
+        any_llm_idle_s = float(demand_idle.get("any_llm_idle_s", 0.0))
+        split_llm_idle_s = float(demand_idle.get("split_llm_idle_s", 0.0))
+
         inserted_resource_task = False
 
         # Tier/placement-aware split loading: if queue needs split runtime and none is ready,
@@ -641,17 +773,44 @@ class BrainResourceMixin:
                 and str(s.get("runtime_group_id", "")).strip()
             })
             if split_groups_loaded:
-                target_group = split_groups_loaded[0]
-                self.log_decision(
-                    "RESOURCE_DECISION",
-                    f"No tier-2 llm demand - inserting unload_split_llm for {target_group}",
-                    {"loaded_split_groups": split_groups_loaded}
-                )
-                self._insert_resource_task(
-                    "unload_split_llm",
-                    meta={"group_id": target_group},
-                )
-                inserted_resource_task = True
+                if int(demand_window.get("total_llm", 0) or 0) > 0:
+                    self.log_decision(
+                        "RESOURCE_DECISION",
+                        "Keeping split runtime(s) hot: LLM demand still present (queue/processing/private)",
+                        {
+                            "loaded_split_groups": split_groups_loaded,
+                            "demand_window": demand_window,
+                            "split_idle_s": round(split_llm_idle_s, 1),
+                        }
+                    )
+                elif split_llm_idle_s < float(self.split_unload_idle_seconds):
+                    self.log_decision(
+                        "RESOURCE_DECISION",
+                        "Deferring unload_split_llm: no LLM demand window too short",
+                        {
+                            "loaded_split_groups": split_groups_loaded,
+                            "split_idle_s": round(split_llm_idle_s, 1),
+                            "required_idle_s": self.split_unload_idle_seconds,
+                            "demand_window": demand_window,
+                        }
+                    )
+                else:
+                    target_group = split_groups_loaded[0]
+                    self.log_decision(
+                        "RESOURCE_DECISION",
+                        f"No LLM demand for {int(split_llm_idle_s)}s - inserting unload_split_llm for {target_group}",
+                        {
+                            "loaded_split_groups": split_groups_loaded,
+                            "split_idle_s": round(split_llm_idle_s, 1),
+                            "required_idle_s": self.split_unload_idle_seconds,
+                            "demand_window": demand_window,
+                        }
+                    )
+                    self._insert_resource_task(
+                        "unload_split_llm",
+                        meta={"group_id": target_group},
+                    )
+                    inserted_resource_task = True
 
         # Check if there's already a meta task in queue OR processing
         has_pending_resource = queue_stats.get("meta", 0) > 0 or inserted_resource_task
@@ -700,22 +859,47 @@ class BrainResourceMixin:
 
                 # If script backlog is dominant and >1 GPUs are hot, free one GPU.
                 elif script_to_llm >= 3.0 and hot > 1:
-                    self.log_decision("RESOURCE_DECISION",
-                        f"Mixed queue favors script ({script_tasks} script vs {llm_tasks} llm) - inserting unload_llm task",
-                        {"script_tasks": script_tasks, "llm_tasks": llm_tasks, "hot_gpus": gpus_with_model})
-                    self._insert_resource_task("unload_llm")
+                    target_gpu = self._targeted_single_unload_candidate(gpu_states, unhealthy_gpus, demand_window)
+                    if target_gpu:
+                        self.log_decision("RESOURCE_DECISION",
+                            f"Mixed queue favors script ({script_tasks} script vs {llm_tasks} llm) - inserting targeted unload_llm",
+                            {"script_tasks": script_tasks, "llm_tasks": llm_tasks, "hot_gpus": gpus_with_model, "target_gpu": target_gpu, "demand_window": demand_window})
+                        self._insert_resource_task("unload_llm", meta={"candidate_workers": [target_gpu]})
+                    else:
+                        self.log_decision("RESOURCE_DECISION",
+                            "Suppressing unload_llm: hot LLM runtimes still useful for current/future LLM demand",
+                            {"script_tasks": script_tasks, "llm_tasks": llm_tasks, "hot_gpus": gpus_with_model, "demand_window": demand_window})
 
             # Safety clamp: if hot workers exceed configured cap, cool one down.
             elif len(gpus_with_model) > self.max_hot_workers:
-                self.log_decision("RESOURCE_DECISION",
-                    f"Hot workers exceed cap ({len(gpus_with_model)}/{self.max_hot_workers}) - inserting unload_llm task",
-                    {"hot_gpus": gpus_with_model, "max_hot_workers": self.max_hot_workers})
-                self._insert_resource_task("unload_llm")
+                target_gpu = self._targeted_single_unload_candidate(gpu_states, unhealthy_gpus, demand_window)
+                if target_gpu and (
+                    int(demand_window.get("total_llm", 0) or 0) == 0
+                    or int(demand_window.get("min_tier", 0) or 0) > int(gpu_states.get(target_gpu, {}).get("loaded_tier", 0) or 0)
+                ):
+                    self.log_decision("RESOURCE_DECISION",
+                        f"Hot workers exceed cap ({len(gpus_with_model)}/{self.max_hot_workers}) - inserting targeted unload_llm",
+                        {"hot_gpus": gpus_with_model, "max_hot_workers": self.max_hot_workers, "target_gpu": target_gpu, "demand_window": demand_window})
+                    self._insert_resource_task("unload_llm", meta={"candidate_workers": [target_gpu]})
+                else:
+                    self.log_decision("RESOURCE_DECISION",
+                        "Suppressing unload_llm cap clamp: loaded runtimes still match demand hierarchy",
+                        {"hot_gpus": gpus_with_model, "max_hot_workers": self.max_hot_workers, "demand_window": demand_window})
 
             # Need to unload LLM? Only script tasks but GPUs are hot
             elif queue_stats["llm"] == 0 and queue_stats["script"] > 0 and len(gpus_with_model) > 0:
-                self.log_decision("RESOURCE_DECISION",
-                    f"Only script tasks waiting ({queue_stats['script']}) but GPUs hot - inserting unload_llm task",
-                    {"script_tasks": queue_stats["script"], "hot_gpus": gpus_with_model})
-                self._insert_resource_task("unload_llm")
-
+                if int(demand_window.get("total_llm", 0) or 0) > 0:
+                    self.log_decision("RESOURCE_DECISION",
+                        "Keeping GPUs hot despite script-only public queue: private/processing LLM demand still exists",
+                        {"script_tasks": queue_stats["script"], "hot_gpus": gpus_with_model, "demand_window": demand_window})
+                elif any_llm_idle_s < float(self.single_unload_idle_seconds):
+                    self.log_decision("RESOURCE_DECISION",
+                        "Deferring unload_llm: LLM demand gap too short",
+                        {"script_tasks": queue_stats["script"], "hot_gpus": gpus_with_model, "llm_idle_s": round(any_llm_idle_s, 1), "required_idle_s": self.single_unload_idle_seconds})
+                else:
+                    target_gpu = self._targeted_single_unload_candidate(gpu_states, unhealthy_gpus, demand_window)
+                    if target_gpu:
+                        self.log_decision("RESOURCE_DECISION",
+                            f"Only script tasks waiting ({queue_stats['script']}) and no LLM demand for {int(any_llm_idle_s)}s - inserting targeted unload_llm task",
+                            {"script_tasks": queue_stats["script"], "hot_gpus": gpus_with_model, "target_gpu": target_gpu, "llm_idle_s": round(any_llm_idle_s, 1), "demand_window": demand_window})
+                        self._insert_resource_task("unload_llm", meta={"candidate_workers": [target_gpu]})

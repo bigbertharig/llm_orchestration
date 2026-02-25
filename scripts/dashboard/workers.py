@@ -13,6 +13,36 @@ from .utils import (
 )
 
 
+def _split_pairing_holds(shared_path: Path) -> dict[str, list[str]]:
+    """Build synthetic dashboard hold labels for split-load partner GPUs."""
+    holds: dict[str, list[str]] = {}
+    split_dir = shared_path / "signals" / "split_llm"
+    if not split_dir.exists():
+        return holds
+    for res_file in sorted(split_dir.glob("pair_*.json")):
+        res = load_json(res_file)
+        if not isinstance(res, dict):
+            continue
+        if str(res.get("status") or "") != "loading":
+            continue
+        members = [str(x) for x in (res.get("members") or []) if x]
+        joined = res.get("joined") if isinstance(res.get("joined"), dict) else {}
+        launcher = str(res.get("launcher") or "")
+        group_id = str(res.get("group_id") or res_file.stem)
+        if len(members) != 2:
+            continue
+        for worker in members:
+            if worker == launcher:
+                continue
+            if worker not in joined:
+                continue
+            partner = members[0] if members[1] == worker else members[1]
+            partner_short = str(partner).replace("gpu-", "")
+            label = f"Pairing {partner_short}"
+            holds.setdefault(worker, []).append(label)
+    return holds
+
+
 def classify_thermal_cause(reasons: Any) -> str:
     """Classify thermal event cause as cpu, gpu, mixed, or none."""
     parts: list[str] = []
@@ -41,6 +71,7 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
             by_worker.setdefault(worker, []).append(t.get("name") or t.get("task_id") or "(task)")
 
     rows: list[dict[str, Any]] = []
+    pairing_holds = _split_pairing_holds(shared_path)
 
     # GPU workers
     for hb_file in sorted((shared_path / "gpus").glob("gpu_*/heartbeat.json")):
@@ -54,6 +85,9 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
                 n = at.get("task_name") or at.get("task_id")
                 if n and n not in held:
                     held.append(n)
+        for label in pairing_holds.get(str(name), []):
+            if label not in held:
+                held.append(label)
         last_thermal_event = hb.get("last_thermal_event") if isinstance(hb.get("last_thermal_event"), dict) else None
         thermal_reasons = hb.get("thermal_reasons") if isinstance(hb.get("thermal_reasons"), list) else []
         thermal_cause = "none"

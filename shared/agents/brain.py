@@ -159,6 +159,15 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
             self.config.get("timeouts", {}).get("resource_task_cooldown_seconds", 45)
         )
         self.last_resource_task_at: Dict[str, datetime] = {}
+        # Demand-window hysteresis to prevent unload/load thrash during brief queue gaps.
+        self.single_unload_idle_seconds = int(
+            self.config.get("timeouts", {}).get("single_unload_idle_seconds", 90)
+        )
+        self.split_unload_idle_seconds = int(
+            self.config.get("timeouts", {}).get("split_unload_idle_seconds", 120)
+        )
+        self.last_any_llm_demand_at: datetime = datetime.now()
+        self.last_split_llm_demand_at: datetime = datetime.now()
         # Infrastructure escalation tracking for missing GPU agents
         self.gpu_missing_escalations: Dict[str, Dict[str, Any]] = {}
         # Heartbeat/missing thresholds (4 missed 30s heartbeats = 120s)

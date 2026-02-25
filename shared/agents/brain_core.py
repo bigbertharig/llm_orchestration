@@ -171,6 +171,12 @@ class BrainCoreMixin:
                     saved_resource_times = state.get("last_resource_task_at", {})
                     for command, ts in saved_resource_times.items():
                         self.last_resource_task_at[command] = datetime.fromisoformat(ts)
+                    raw_any_llm = str(state.get("last_any_llm_demand_at", "") or "").strip()
+                    raw_split_llm = str(state.get("last_split_llm_demand_at", "") or "").strip()
+                    if raw_any_llm:
+                        self.last_any_llm_demand_at = datetime.fromisoformat(raw_any_llm)
+                    if raw_split_llm:
+                        self.last_split_llm_demand_at = datetime.fromisoformat(raw_split_llm)
                     self.incidents = state.get("incidents", {})
                     self.gpu_missing_escalations = state.get("gpu_missing_escalations", {})
                     self.logger.info(
@@ -201,6 +207,8 @@ class BrainCoreMixin:
                 command: ts.isoformat()
                 for command, ts in self.last_resource_task_at.items()
             },
+            "last_any_llm_demand_at": self.last_any_llm_demand_at.isoformat(),
+            "last_split_llm_demand_at": self.last_split_llm_demand_at.isoformat(),
             "incidents": self.incidents,
             "gpu_missing_escalations": self.gpu_missing_escalations
         }

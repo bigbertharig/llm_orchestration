@@ -53,6 +53,20 @@ SPLIT_LAUNCHER_HEARTBEAT_MAX_AGE_SECONDS = 45
 GLOBAL_MODEL_LOAD_OWNER_STALE_SECONDS = 45
 GLOBAL_MODEL_LOAD_OWNER_HEARTBEAT_INTERVAL = 2
 
+# Runtime state machine states
+RUNTIME_STATE_COLD = "cold"
+RUNTIME_STATE_LOADING_SINGLE = "loading_single"
+RUNTIME_STATE_READY_SINGLE = "ready_single"
+RUNTIME_STATE_LOADING_SPLIT = "loading_split"
+RUNTIME_STATE_READY_SPLIT = "ready_split"
+RUNTIME_STATE_UNLOADING = "unloading"
+RUNTIME_STATE_WEDGED = "wedged"
+RUNTIME_STATE_ERROR_RECOVERABLE = "error_recoverable"
+
+RUNTIME_STATES_READY = {RUNTIME_STATE_READY_SINGLE, RUNTIME_STATE_READY_SPLIT}
+RUNTIME_STATES_LOADING = {RUNTIME_STATE_LOADING_SINGLE, RUNTIME_STATE_LOADING_SPLIT}
+RUNTIME_STATES_TRANSITIONING = {RUNTIME_STATE_LOADING_SINGLE, RUNTIME_STATE_LOADING_SPLIT, RUNTIME_STATE_UNLOADING}
+
 # Timing
 EXTERNAL_HEARTBEAT_INTERVAL = 30  # seconds - filesystem heartbeat to brain
 ACTIVE_WORK_HEARTBEAT_INTERVAL = 5  # seconds - faster claims while work is active
@@ -529,20 +543,49 @@ class GPUAgent:
 
         def _do_load():
             # Initial pull/load request (can block while weights are loaded)
-            response = requests.post(
-                self.api_url,
-                json={
-                    "model": target_model,
-                    "prompt": "Hello",
-                    "stream": False,
-                    "keep_alive": self._effective_keep_alive(),
-                    "options": {
-                        "num_gpu": 999,
-                        "num_ctx": self.worker_num_ctx,
-                    }
-                },
-                timeout=600
-            )
+            req_result: Dict[str, Any] = {"done": False, "response": None, "error": None}
+
+            def _load_request():
+                try:
+                    req_result["response"] = requests.post(
+                        self.api_url,
+                        json={
+                            "model": target_model,
+                            "prompt": "Hello",
+                            "stream": False,
+                            "keep_alive": self._effective_keep_alive(),
+                            "options": {
+                                "num_gpu": 999,
+                                "num_ctx": self.worker_num_ctx,
+                            }
+                        },
+                        timeout=600
+                    )
+                except Exception as exc:
+                    req_result["error"] = exc
+                finally:
+                    req_result["done"] = True
+
+            req_thread = threading.Thread(target=_load_request, daemon=True)
+            req_thread.start()
+            req_started = time.time()
+            last_wait_log_at = req_started
+            while not req_result["done"]:
+                self._touch_meta_task(phase="load_llm")
+                now_wait = time.time()
+                if (now_wait - last_wait_log_at) >= 20:
+                    self.logger.info(
+                        f"SINGLE_RUNTIME_LOAD_WAIT worker={self.name} model={target_model} "
+                        f"elapsed_s={int(now_wait - req_started)}"
+                    )
+                    last_wait_log_at = now_wait
+                time.sleep(1)
+
+            if req_result["error"] is not None:
+                raise req_result["error"]
+            response = req_result["response"]
+            if response is None:
+                raise RuntimeError("single model load request finished without response")
             response.raise_for_status()
 
             # Readiness gate: only mark hot once generation is reliably responsive.
@@ -1464,23 +1507,59 @@ class GPUAgent:
                         )
                     try:
                         attempts += 1
-                        r = requests.post(
-                            f"http://127.0.0.1:{port}/api/generate",
-                            json={
-                                "model": model_id,
-                                "prompt": "Hello",
-                                "stream": False,
-                                "keep_alive": self._effective_keep_alive(),
-                                "options": {
-                                    "num_gpu": 999,
-                                    "num_ctx": self.worker_num_ctx,
-                                }
-                            },
-                            # Split first-load warmup on GTX 1060 pairs can exceed 25s
-                            # even when healthy; premature client timeouts can retrigger
-                            # generate calls and wedge the runtime in practice.
-                            timeout=180
-                        )
+                        req_result: Dict[str, Any] = {"done": False, "response": None, "error": None}
+
+                        def _warmup_request():
+                            try:
+                                req_result["response"] = requests.post(
+                                    f"http://127.0.0.1:{port}/api/generate",
+                                    json={
+                                        "model": model_id,
+                                        "prompt": "Hello",
+                                        "stream": False,
+                                        "keep_alive": self._effective_keep_alive(),
+                                        "options": {
+                                            "num_gpu": 999,
+                                            "num_ctx": self.worker_num_ctx,
+                                        }
+                                    },
+                                    # Split first-load warmup on GTX 1060 pairs can exceed 25s
+                                    # even when healthy; premature client timeouts can retrigger
+                                    # generate calls and wedge the runtime in practice.
+                                    timeout=180
+                                )
+                            except Exception as exc:
+                                req_result["error"] = exc
+                            finally:
+                                req_result["done"] = True
+
+                        req_thread = threading.Thread(target=_warmup_request, daemon=True)
+                        req_thread.start()
+                        req_started = time.time()
+                        last_wait_log_at = req_started
+                        while not req_result["done"]:
+                            self._touch_meta_task(phase="warming_split_runtime")
+                            self._touch_split_runtime_owner_meta()
+                            if proc.poll() is not None:
+                                raise RuntimeError(
+                                    f"split runtime exited during warmup on port {port} rc={proc.returncode}"
+                                )
+                            now_wait = time.time()
+                            if (now_wait - last_wait_log_at) >= 20:
+                                # Periodic progress log so long first loads do not look dead.
+                                self.logger.info(
+                                    f"SPLIT_RUNTIME_WARMUP_WAIT group={group.get('id')} port={port} "
+                                    f"model={model_id} attempt={attempts} "
+                                    f"elapsed_s={int(now_wait - req_started)}"
+                                )
+                                last_wait_log_at = now_wait
+                            time.sleep(1)
+
+                        if req_result["error"] is not None:
+                            raise req_result["error"]
+                        r = req_result["response"]
+                        if r is None:
+                            raise RuntimeError("split warmup request finished without response")
                         if r.status_code < 400:
                             self.logger.info(
                                 f"SPLIT_RUNTIME_WARMUP_OK group={group.get('id')} port={port} "
@@ -1625,7 +1704,8 @@ class GPUAgent:
             except Exception:
                 pass
 
-    def _kill_local_listener_on_port(self, port: int):
+    def _kill_local_listener_on_port(self, port: int) -> int:
+        killed = 0
         try:
             result = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True, timeout=3)
             pids = set()
@@ -1637,11 +1717,81 @@ class GPUAgent:
             for pid in sorted(pids):
                 try:
                     os.kill(pid, signal.SIGKILL)
+                    killed += 1
                     self.logger.warning(f"SPLIT_ORPHAN_RECLAIM_KILL port={port} pid={pid}")
                 except Exception as exc:
                     self.logger.warning(f"SPLIT_ORPHAN_RECLAIM_KILL_FAIL port={port} pid={pid}: {exc}")
         except Exception as exc:
             self.logger.warning(f"SPLIT_ORPHAN_RECLAIM_SCAN_FAIL port={port}: {exc}")
+        return killed
+
+    def _kill_orphan_ollama_runners(self) -> int:
+        """Kill orphan ollama runner processes (PPID 1) that can strand VRAM."""
+        killed = 0
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid,ppid,args"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            for line in result.stdout.splitlines():
+                raw = line.strip()
+                if not raw:
+                    continue
+                parts = raw.split(None, 2)
+                if len(parts) < 3:
+                    continue
+                try:
+                    pid = int(parts[0])
+                    ppid = int(parts[1])
+                except Exception:
+                    continue
+                cmd = parts[2]
+                if ppid != 1:
+                    continue
+                if "ollama runner" not in cmd:
+                    continue
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    killed += 1
+                    self.logger.warning(f"SPLIT_PAIR_PREP_KILL_ORPHAN_RUNNER pid={pid}")
+                except Exception as exc:
+                    self.logger.warning(f"SPLIT_PAIR_PREP_KILL_ORPHAN_RUNNER_FAIL pid={pid}: {exc}")
+        except Exception as exc:
+            self.logger.warning(f"SPLIT_PAIR_PREP_SCAN_FAIL: {exc}")
+        return killed
+
+    def _prepare_local_for_split_pairing(self, group_id: str, port: Any) -> Dict[str, Any]:
+        """Best-effort local cleanup before participating in a split load."""
+        result: Dict[str, Any] = {
+            "prepared_at": datetime.now().isoformat(),
+            "orphan_runners_killed": 0,
+            "split_port_reclaimed": False,
+            "worker": self.name,
+        }
+        result["orphan_runners_killed"] = self._kill_orphan_ollama_runners()
+
+        # Only reclaim the shared split port if it is unexpectedly occupied before
+        # the launcher starts the runtime.
+        try:
+            port_int = int(port)
+        except Exception:
+            port_int = 0
+        if port_int > 0 and self._split_runtime_has_any_listener(port_int):
+            self.logger.warning(
+                f"SPLIT_PAIR_PREP_RECLAIM_PORT group={group_id or '-'} port={port_int}"
+            )
+            self._kill_local_listener_on_port(port_int)
+            result["split_port_reclaimed"] = True
+
+        self.logger.info(
+            "SPLIT_PAIR_PREP_DONE "
+            f"group={group_id or '-'} port={port_int or '-'} "
+            f"orphan_runners_killed={result['orphan_runners_killed']} "
+            f"split_port_reclaimed={result['split_port_reclaimed']}"
+        )
+        return result
 
     def _reclaim_orphan_split_ports_on_startup(self):
         seen_ports = set()
@@ -1726,6 +1876,7 @@ class GPUAgent:
                 continue
             lock = FileLock(str(res_file) + ".lock", timeout=1)
             start_runtime = None
+            local_pair_prep = None
             try:
                 with lock:
                     if not res_file.exists():
@@ -1748,8 +1899,20 @@ class GPUAgent:
                     }
                     launcher = str(reservation.get("launcher", "")).strip()
                     joined = reservation.get("joined", {}) if isinstance(reservation.get("joined"), dict) else {}
+                    prepared = reservation.get("prepared", {}) if isinstance(reservation.get("prepared"), dict) else {}
                     all_joined = all(bool(joined.get(m)) for m in members)
+                    all_prepared = all(bool(prepared.get(m)) for m in members if m in joined)
                     port = group.get("port")
+
+                    if (
+                        status in {"waiting_partner", "joining", "loading"}
+                        and bool(joined.get(self.name))
+                        and not bool(prepared.get(self.name))
+                    ):
+                        local_pair_prep = {
+                            "group_id": str(group.get("id") or ""),
+                            "port": port,
+                        }
 
                     # If the split runtime is already loaded on the shared port, finalize
                     # to ready instead of re-launching and risking a false "port in use" failure.
@@ -1772,7 +1935,7 @@ class GPUAgent:
                             json.dump(reservation, f, indent=2)
                         status = "ready"
 
-                    if status in {"waiting_partner", "joining", "loading"} and all_joined:
+                    if status in {"waiting_partner", "joining", "loading"} and all_joined and all_prepared:
                         launcher_needs_election = False
                         if launcher not in members:
                             launcher_needs_election = True
@@ -1809,6 +1972,12 @@ class GPUAgent:
                             }
                         else:
                             continue
+                    elif status in {"waiting_partner", "joining", "loading"} and all_joined and not all_prepared:
+                        if self.name == launcher and self.active_meta_task:
+                            self._touch_meta_task(phase="waiting_split_pair_prep")
+                        # Let members with pending local prep run it outside the reservation lock.
+                        if not local_pair_prep:
+                            continue
 
                     if status == "ready":
                         # Both members mirror ready state; launcher is authoritative owner.
@@ -1825,6 +1994,33 @@ class GPUAgent:
             except Timeout:
                 continue
             except Exception:
+                continue
+
+            if local_pair_prep:
+                prep_result = self._prepare_local_for_split_pairing(
+                    group_id=str(local_pair_prep.get("group_id") or ""),
+                    port=local_pair_prep.get("port"),
+                )
+                try:
+                    with lock:
+                        if not res_file.exists():
+                            continue
+                        with open(res_file, "r", encoding="utf-8") as f:
+                            reservation = json.load(f)
+                        members = [str(m).strip() for m in reservation.get("members", []) if str(m).strip()]
+                        if self.name not in members:
+                            continue
+                        joined = reservation.get("joined", {}) if isinstance(reservation.get("joined"), dict) else {}
+                        if not joined.get(self.name):
+                            continue
+                        prepared = reservation.get("prepared", {}) if isinstance(reservation.get("prepared"), dict) else {}
+                        prepared[self.name] = prep_result
+                        reservation["prepared"] = prepared
+                        reservation["updated_at"] = datetime.now().isoformat()
+                        with open(res_file, "w", encoding="utf-8") as f:
+                            json.dump(reservation, f, indent=2)
+                except Exception:
+                    pass
                 continue
 
             if not start_runtime:
@@ -1876,8 +2072,17 @@ class GPUAgent:
                     return False
             return True
         if command == "unload_llm":
-            # Only hot workers should claim unload commands.
-            return self.model_loaded
+            # Only single-GPU hot workers should claim generic unload_llm commands.
+            # Split runtimes use unload_split_llm so the shared split listener can be
+            # reclaimed correctly across both members.
+            if not self.model_loaded or self.runtime_placement == "split_gpu":
+                return False
+            candidates = task.get("candidate_workers", [])
+            if isinstance(candidates, list) and candidates:
+                allowed = {str(name).strip() for name in candidates if str(name).strip()}
+                if allowed and self.name not in allowed:
+                    return False
+            return True
         if command == "load_split_llm":
             target_model = str(task.get("target_model", "")).strip()
             target_tier = int(self.model_tier_by_id.get(target_model, DEFAULT_LLM_MIN_TIER))
@@ -2818,12 +3023,19 @@ class GPUAgent:
         elif command == "unload_split_llm":
             group_id = str(task.get("group_id", "")).strip() or str(self.runtime_group_id or "")
             reservation_path = self._split_reservation_path(group_id) if group_id else None
+            split_port = None
+            target_model = ""
             if reservation_path and reservation_path.exists():
                 try:
                     lock = FileLock(str(reservation_path) + ".lock", timeout=5)
                     with lock:
                         with open(reservation_path, "r", encoding="utf-8") as f:
                             reservation = json.load(f)
+                        try:
+                            split_port = int(reservation.get("port"))
+                        except Exception:
+                            split_port = None
+                        target_model = str(reservation.get("target_model", "")).strip()
                         reservation = self._set_reservation_status(
                             reservation,
                             "unloaded",
@@ -2833,17 +3045,51 @@ class GPUAgent:
                             json.dump(reservation, f, indent=2)
                 except Exception:
                     pass
+            elif self.runtime_placement == "split_gpu" and self.runtime_port:
+                try:
+                    split_port = int(self.runtime_port)
+                except Exception:
+                    split_port = None
+                target_model = str(self.loaded_model or "").strip()
+
             if self.split_runtime_owner:
                 self._stop_split_runtime()
+            # Fail closed: any member processing unload should reclaim the shared split
+            # listener if it is still up. This prevents "unloaded" reservations with
+            # orphan split runtimes still holding VRAM.
+            reclaimed_listeners = 0
+            orphan_runners_killed = 0
+            if split_port:
+                if self._split_runtime_has_any_listener(split_port):
+                    reclaimed_listeners += self._kill_local_listener_on_port(int(split_port))
+                # Give the listener a brief moment to exit and drop children.
+                wait_deadline = time.time() + 3
+                while time.time() < wait_deadline and self._split_runtime_has_any_listener(split_port):
+                    time.sleep(0.2)
+                # If a listener or runner residue remains, do one orphan-runner sweep.
+                orphan_runners_killed = self._kill_orphan_ollama_runners()
             if self.runtime_placement == "split_gpu":
                 self._clear_split_runtime_loaded()
+            split_listener_still_up = bool(split_port and self._split_runtime_has_any_listener(split_port))
+            split_model_still_loaded = bool(
+                split_port and target_model and self._split_runtime_has_model_loaded(split_port, target_model)
+            )
+            unload_ok = not split_listener_still_up and not split_model_still_loaded
             result = {
-                "success": True,
-                "output": f"Split runtime unloaded for group {group_id or '-'}",
+                "success": unload_ok,
+                "output": (
+                    f"Split runtime unloaded for group {group_id or '-'}"
+                    if unload_ok else
+                    f"Split unload incomplete for group {group_id or '-'}: "
+                    f"listener_up={split_listener_still_up} model_still_loaded={split_model_still_loaded}"
+                ),
                 "model_loaded": self.model_loaded,
                 "loaded_model": self.loaded_model,
                 "runtime_group_id": self.runtime_group_id,
                 "worker": self.name,
+                "split_port": split_port,
+                "reclaimed_listeners": reclaimed_listeners,
+                "orphan_runners_killed": orphan_runners_killed,
                 "max_vram_used_mb": 0,
             }
         else:

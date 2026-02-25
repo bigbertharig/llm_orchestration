@@ -345,6 +345,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _cleanup_stale(self) -> dict[str, Any]:
         heartbeats = self._cleanup_stale_processing_heartbeats()
         artifacts = self._cleanup_stale_task_artifacts()
+        system_meta = self._cleanup_system_meta_artifacts()
         brain = load_brain_state(self.shared_path)
         active_batches = set()
         if isinstance(brain.get("active_batches"), dict):
@@ -357,6 +358,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             errors.extend(list(heartbeats.get("errors") or []))
         if isinstance(artifacts, dict):
             errors.extend(list(artifacts.get("errors") or []))
+        if isinstance(system_meta, dict):
+            errors.extend(list(system_meta.get("errors") or []))
         if isinstance(remote_runtime, dict):
             errors.extend(list(remote_runtime.get("errors") or []))
         ok = not errors
@@ -367,8 +370,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 f"heartbeat_kept={int(heartbeats.get('kept', 0))}, "
                 f"task_locks_removed={int(artifacts.get('task_locks_removed', 0))}, "
                 f"failed_meta_removed={int(artifacts.get('failed_meta_removed', 0))}, "
+                f"system_meta_removed={int(system_meta.get('tasks_removed', 0))}, "
+                f"brain_load_requests_cleared={int(system_meta.get('brain_load_llm_requests_cleared', 0))}, "
                 f"split_ports_killed={int(remote_runtime.get('split_port_ollama_killed', 0))}, "
-                f"orphan_ollama_killed={int(remote_runtime.get('orphan_ollama_killed', 0))}"
+                f"orphan_ollama_killed={int(remote_runtime.get('orphan_ollama_killed', 0))}, "
+                f"orphan_runners_killed={int(remote_runtime.get('orphan_ollama_runner_killed', 0))}"
             )
         else:
             msg = "Cleanup stale complete"
@@ -378,6 +384,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "cleanup": {
                 "heartbeats": heartbeats,
                 "artifacts": artifacts,
+                "system_meta": system_meta,
                 "remote_runtime": remote_runtime,
             },
             "stderr": "" if ok else f"cleanup_errors={errors}",
@@ -477,6 +484,65 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "errors": errors,
         }
 
+    def _cleanup_system_meta_artifacts(self) -> dict[str, Any]:
+        """Remove leftover system meta tasks and clear brain load_llm request trackers."""
+        tasks_dir = self.shared_path / "tasks"
+        errors: list[str] = []
+        tasks_removed = 0
+        heartbeats_removed = 0
+        brain_load_llm_requests_cleared = 0
+        meta_commands = {"load_llm", "unload_llm", "load_split_llm", "unload_split_llm"}
+
+        for lane in ("queue", "processing", "failed"):
+            lane_dir = tasks_dir / lane
+            if not lane_dir.exists():
+                continue
+            for task_path in sorted(lane_dir.glob("*.json")):
+                try:
+                    task = load_json(task_path)
+                except Exception as exc:
+                    errors.append(f"{task_path.name}: {exc}")
+                    continue
+                if not isinstance(task, dict):
+                    continue
+                if str(task.get("task_class", "")).strip() != "meta":
+                    continue
+                if str(task.get("batch_id", "")).strip() != "system":
+                    continue
+                if str(task.get("command", "")).strip() not in meta_commands:
+                    continue
+                try:
+                    task_path.unlink(missing_ok=True)
+                    tasks_removed += 1
+                    hb_path = tasks_dir / "processing" / f"{task_path.stem}.heartbeat.json"
+                    if hb_path.exists():
+                        hb_path.unlink(missing_ok=True)
+                        heartbeats_removed += 1
+                except Exception as exc:
+                    errors.append(f"{task_path.name}: {exc}")
+
+        state_path = self.shared_path / "brain" / "state.json"
+        if state_path.exists():
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+                if isinstance(state, dict):
+                    reqs = state.get("load_llm_requests")
+                    if isinstance(reqs, dict) and reqs:
+                        brain_load_llm_requests_cleared = len(reqs)
+                    state["load_llm_requests"] = {}
+                    with open(state_path, "w", encoding="utf-8") as f:
+                        json.dump(state, f, indent=2)
+            except Exception as exc:
+                errors.append(f"brain/state.json: {exc}")
+
+        return {
+            "tasks_removed": tasks_removed,
+            "heartbeat_files_removed": heartbeats_removed,
+            "brain_load_llm_requests_cleared": brain_load_llm_requests_cleared,
+            "errors": errors,
+        }
+
     def _cleanup_stale_remote_runtime_artifacts(self, allow_aggressive: bool = False) -> dict[str, Any]:
         """
         Reclaim stale remote runtime artifacts when no batches are active.
@@ -486,7 +552,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         Aggressive behavior (allow_aggressive=True):
         - kill listeners on split ports 11440/11441
-        - kill orphan `ollama serve` processes (PPID 1) excluding system /usr/local/bin/ollama serve
+        - kill orphan `ollama serve` / `ollama runner` processes (PPID 1),
+          excluding system /usr/local/bin/ollama serve
         - clear split reservation/global load lock signal files on shared drive
         """
         if not allow_aggressive:
@@ -495,6 +562,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "reason": "active_batches_present",
                 "split_port_ollama_killed": 0,
                 "orphan_ollama_killed": 0,
+                "orphan_ollama_runner_killed": 0,
                 "split_signal_files_removed": 0,
                 "errors": [],
             }
@@ -503,6 +571,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 set -e
 split_killed=0
 orphan_killed=0
+orphan_runner_killed=0
 signals_removed=0
 
 for p in 11440 11441; do
@@ -511,6 +580,13 @@ for p in 11440 11441; do
     kill "$pid" 2>/dev/null || true
     split_killed=$((split_killed + 1))
   fi
+done
+
+# Reap orphan ollama runner processes left behind by crashed/stopped runtimes.
+for pid in $(ps -eo pid=,ppid=,args= | awk '$2==1 && $0 ~ /ollama runner/ {print $1}'); do
+  [ -n "$pid" ] || continue
+  kill "$pid" 2>/dev/null || true
+  orphan_runner_killed=$((orphan_runner_killed + 1))
 done
 
 # Reap orphan ollama serve processes left behind by crashed/stopped GPU agents.
@@ -529,14 +605,15 @@ for f in /mnt/shared/signals/split_llm/pair_*.json /mnt/shared/signals/split_llm
   rm -f "$f" && signals_removed=$((signals_removed + 1))
 done
 
-printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"split_signal_files_removed":%s}\n' \
-  "$split_killed" "$orphan_killed" "$signals_removed"
+printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_runner_killed":%s,"split_signal_files_removed":%s}\n' \
+  "$split_killed" "$orphan_killed" "$orphan_runner_killed" "$signals_removed"
 """
         out = self._gpu_ssh(script, timeout_s=60)
         errors: list[str] = []
         parsed: dict[str, Any] = {
             "split_port_ollama_killed": 0,
             "orphan_ollama_killed": 0,
+            "orphan_ollama_runner_killed": 0,
             "split_signal_files_removed": 0,
         }
         if not out.get("ok"):
@@ -554,6 +631,8 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"split_signal_f
         return parsed
 
     def _return_default(self) -> dict[str, Any]:
+        local_cleanup = self._cleanup_system_meta_artifacts()
+        pre_cleanup = self._cleanup_stale_remote_runtime_artifacts(allow_aggressive=True)
         # Pass commands via stdin so pkill can't match its own shell's cmdline.
         script = (
             "pkill -f /mnt/shared/agents/brain.py || true\n"
@@ -583,6 +662,7 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"split_signal_f
                 "stderr": proc.stderr[-4000:],
                 "cmd": "ssh gpu bash -s (stdin: kill agents, restart startup.py)",
                 "message": "Returned system to default startup state",
+                "cleanup": {"system_meta": local_cleanup, "remote_runtime": pre_cleanup},
             }
         except subprocess.TimeoutExpired:
             return {
@@ -590,6 +670,7 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"split_signal_f
                 "message": "Returned system to default startup state",
                 "error": "timeout after 240s",
                 "cmd": "ssh gpu bash -s",
+                "cleanup": {"system_meta": local_cleanup, "remote_runtime": pre_cleanup},
             }
 
     def _start_plan(
