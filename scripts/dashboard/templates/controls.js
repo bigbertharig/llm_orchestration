@@ -20,10 +20,19 @@ const PLAN_HIDDEN_KEYS = {
     'RUN_MODE',
     'HOT_WORKERS',
     'WORKER_MODEL',
+    'DOC_WORKER_MODEL',
+    'REVIEW_WORKER_MODEL',
+    'REVIEW_EXTRACTOR_MODEL',
+    'REVIEW_VERIFIER_MODEL',
+    'REVIEW_ADJUDICATOR_MODEL',
+    'REVIEW_EXTRACTOR_FALLBACK_MODEL',
+    'REVIEW_VERIFIER_FALLBACK_MODEL',
+    'REVIEW_ADJUDICATOR_FALLBACK_MODEL',
     'WORKER_SHARDS',
     'WORKER_CONTEXT_TOKENS',
     'WORKER_CONTEXT_UTILIZATION',
     'BRAIN_MODEL',
+    'MAX_REPORT_ATTEMPTS',
     'PRIORITY',
     'PREEMPTIBLE'
   ]
@@ -163,6 +172,10 @@ function loadJsonToForm() {
 }
 
 function renderConfigForm(planName, overrideCfg) {
+  if (planName === 'github_analyzer') {
+    document.getElementById('planConfigForm').innerHTML = '';
+    return;
+  }
   const cfg = (overrideCfg && typeof overrideCfg === 'object') ? overrideCfg : (planDefaults[planName] || getCurrentConfig());
   const starterFile = document.getElementById('starterFile').value;
   const perStarter = planInputs[planName] || {};
@@ -382,6 +395,10 @@ function applyPlanDefault(planName) {
 }
 
 function renderPlanInputHelp(planName, starterFile) {
+  if (planName === 'github_analyzer') {
+    document.getElementById('planInputs').innerHTML = '<div class="k">Quick inputs only: REPO_PATH / REPO_URL, ANALYSIS_DEPTH, CLAIMED_BEHAVIOR</div>';
+    return;
+  }
   const perStarter = planInputs[planName] || {};
   const inputList = perStarter[starterFile] || [];
   const help = {};

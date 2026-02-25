@@ -244,6 +244,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             p: {starter: plan_input_help(self.shared_path, p, starter, plan_scope=plan_scopes.get(p, "shoulders")) for starter in plan_starters[p]}
             for p in plans
         }
+        plan_defaults = {p: self._dashboard_visible_plan_defaults(p, cfg) for p, cfg in plan_defaults.items()}
+        plan_inputs = {
+            p: {starter: self._dashboard_visible_plan_inputs(p, rows) for starter, rows in starters.items()}
+            for p, starters in plan_inputs.items()
+        }
         active_meta = []
         batch_labels: dict[str, str] = {}
         for batch_id, meta in active.items():
@@ -285,6 +290,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "batch_labels": batch_labels,
             "local_repo_choices": self._discover_local_repo_choices(),
         }
+
+    def _dashboard_visible_plan_defaults(self, plan_name: str, cfg: Any) -> dict[str, Any]:
+        if not isinstance(cfg, dict):
+            return {}
+        if plan_name != "github_analyzer":
+            return dict(cfg)
+        keep = {"REPO_PATH", "REPO_URL", "CLAIMED_BEHAVIOR", "ANALYSIS_DEPTH"}
+        return {k: v for k, v in cfg.items() if k in keep}
+
+    def _dashboard_visible_plan_inputs(self, plan_name: str, rows: Any) -> list[dict[str, Any]]:
+        if not isinstance(rows, list):
+            return []
+        if plan_name != "github_analyzer":
+            return [r for r in rows if isinstance(r, dict)]
+        keep = {"REPO_PATH", "REPO_URL", "CLAIMED_BEHAVIOR", "ANALYSIS_DEPTH"}
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("key", "")).strip()
+            if key in keep:
+                out.append(dict(row))
+        return out
 
     def _kill_plan(self, batch_id: str) -> dict[str, Any]:
         if not batch_id:
