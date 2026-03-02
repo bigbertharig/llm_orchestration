@@ -190,6 +190,28 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
             self.config.get("retry_policy", {}).get("max_brain_fix_attempts", 3)
         )
 
+        # Split wedge reclaim tracking: group_id -> {count, last_reclaim_at, reclaims_this_hour}
+        self.split_wedge_counts: Dict[str, int] = {}
+        self.split_wedge_last_reclaim_at: Dict[str, datetime] = {}
+        self.split_wedge_reclaims_this_hour: Dict[str, List[datetime]] = {}
+
+        # =============================================================================
+        # Auto-Return to Default Policy
+        # When system is idle, automatically normalize to default state
+        # Phase tracker: None -> "normalizing" -> "default_ready"
+        # =============================================================================
+        self.auto_default_enabled = bool(self.config.get("auto_default_enabled", True))
+        self.auto_default_idle_seconds = int(self.config.get("auto_default_idle_seconds", 90))
+        self.auto_default_last_busy_at: datetime = datetime.now()
+        # Phase tracker: None (idle detection), "normalizing" (unloads pending), "default_ready" (complete)
+        self.auto_default_phase: Optional[str] = None
+        # Timestamp when auto-default sequence started (preserved until convergence or abort)
+        self.auto_default_started_at: Optional[datetime] = None
+
+        # Default target (gpu and model to load when idle)
+        self.auto_default_gpu = str(self.config.get("auto_default_gpu", "gpu-2")).strip()
+        self.auto_default_model = str(self.config.get("auto_default_model", "qwen2.5:7b")).strip()
+
         # Verify core/ security before starting
         self._verify_core_security()
 

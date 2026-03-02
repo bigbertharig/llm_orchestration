@@ -18,6 +18,18 @@ from .utils import (
 from .workers import load_brain_heartbeat, load_brain_state, load_gpu_telemetry, load_worker_rows
 
 _TASK_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+TASK_ERROR_LIMIT = 4000
+
+
+def _clip_text(text: str, limit: int = TASK_ERROR_LIMIT) -> str:
+    if not isinstance(text, str):
+        return ""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    head = max(1, int(limit * 0.45))
+    tail = max(1, int(limit * 0.45))
+    omitted = len(text) - head - tail
+    return text[:head] + f" ...[truncated {omitted} chars]... " + text[-tail:]
 
 
 def task_sort_key(task: dict[str, Any]) -> str:
@@ -34,13 +46,21 @@ def task_sort_key(task: dict[str, Any]) -> str:
 def to_task_view(task: dict[str, Any]) -> dict[str, Any]:
     """Convert task to view format for display."""
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
-    error_text = (
-        result.get("output")
-        or task.get("error")
-        or task.get("blocked_reason")
-        or ""
-    )
-    error_text = " ".join(str(error_text).split())
+    candidates = [
+        result.get("error"),
+        result.get("output"),
+        result.get("stderr"),
+        task.get("error"),
+        task.get("analysis_error"),
+        task.get("stderr"),
+        task.get("blocked_reason"),
+    ]
+    error_text = next((str(x) for x in candidates if isinstance(x, str) and x.strip()), "")
+    # Preserve traceback readability when present; otherwise collapse whitespace.
+    if "Traceback (most recent call last)" in error_text or "\n" in error_text:
+        error_text = _clip_text(str(error_text).strip())
+    else:
+        error_text = _clip_text(" ".join(str(error_text).split()))
     return {
         "task_id": task.get("task_id"),
         "name": task.get("name"),
@@ -57,7 +77,7 @@ def to_task_view(task: dict[str, Any]) -> dict[str, Any]:
         "created_at": task.get("created_at"),
         "started_at": task.get("started_at"),
         "completed_at": task.get("completed_at"),
-        "error": error_text[:220],
+        "error": error_text,
     }
 
 

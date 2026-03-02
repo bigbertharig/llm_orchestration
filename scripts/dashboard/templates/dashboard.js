@@ -62,6 +62,7 @@ let lastRefreshOkAt = null;
 const stickyAlertStoreKey = 'orchStickyAlertsV1';
 const alertSeenStoreKey = 'orchAlertSeenV1';
 const dismissedStickyAlertStoreKey = 'orchDismissedStickyAlertsV1';
+const dismissedAlertStoreKey = 'orchDismissedAlertsV1';
 const trackedBatchesStoreKey = 'orchTrackedBatchesV1';
 
 function isTrackableBatchId(batchId) {
@@ -111,6 +112,15 @@ function removeTrackedBatch(batchId) {
   saveTrackedBatches(tracked);
 }
 
+function setTrackedBatchChecked(batchId, checked) {
+  if (!isTrackableBatchId(batchId)) return;
+  const tracked = loadTrackedBatches();
+  const id = String(batchId).trim();
+  if (checked) tracked.add(id);
+  else tracked.delete(id);
+  saveTrackedBatches(tracked);
+}
+
 function loadStickyAlerts() {
   try {
     const raw = localStorage.getItem(stickyAlertStoreKey);
@@ -156,6 +166,22 @@ function loadDismissedStickyAlerts() {
 function saveDismissedStickyAlerts(map) {
   try {
     localStorage.setItem(dismissedStickyAlertStoreKey, JSON.stringify(map || {}));
+  } catch (_) {}
+}
+
+function loadDismissedAlerts() {
+  try {
+    const raw = localStorage.getItem(dismissedAlertStoreKey);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveDismissedAlerts(map) {
+  try {
+    localStorage.setItem(dismissedAlertStoreKey, JSON.stringify(map || {}));
   } catch (_) {}
 }
 
@@ -252,6 +278,7 @@ function renderAlerts(alerts) {
   const stickyMap = loadStickyAlerts();
   const seenMap = loadAlertSeenMap();
   const dismissedStickyMap = loadDismissedStickyAlerts();
+  const dismissedAlertMap = loadDismissedAlerts();
   const liveAlerts = Array.isArray(alerts) ? alerts : [];
   const nowIso = new Date().toISOString();
   const nowMs = Date.now();
@@ -260,6 +287,10 @@ function renderAlerts(alerts) {
   Object.keys(dismissedStickyMap).forEach((k) => {
     const ts = new Date(String((dismissedStickyMap[k] || {}).dismissed_at || '')).getTime();
     if (!Number.isFinite(ts) || (nowMs - ts) > dismissedTtlMs) delete dismissedStickyMap[k];
+  });
+  Object.keys(dismissedAlertMap).forEach((k) => {
+    const ts = new Date(String((dismissedAlertMap[k] || {}).dismissed_at || '')).getTime();
+    if (!Number.isFinite(ts) || (nowMs - ts) > dismissedTtlMs) delete dismissedAlertMap[k];
   });
 
   // Promote server-declared sticky alerts into local persistent storage.
@@ -278,6 +309,7 @@ function renderAlerts(alerts) {
     };
   });
   saveDismissedStickyAlerts(dismissedStickyMap);
+  saveDismissedAlerts(dismissedAlertMap);
   saveStickyAlerts(stickyMap);
 
   const nonStickyLive = liveAlerts.filter(a => !(a && a.sticky && a.sticky_id));
@@ -308,6 +340,7 @@ function renderAlerts(alerts) {
 
   const normalized = merged.map((a) => {
     const key = alertKey(a);
+    if (dismissedAlertMap[key]) return null;
     activeKeys.add(key);
     const prev = seenMap[key] || {};
     const appearedAt = a.appeared_at || a.first_seen_at || prev.first_seen_at || new Date().toISOString();
@@ -316,8 +349,8 @@ function renderAlerts(alerts) {
       first_seen_at: appearedAt,
       last_seen_at: new Date().toISOString(),
     };
-    return { ...a, appeared_at: appearedAt };
-  });
+    return { ...a, appeared_at: appearedAt, _alert_key: key };
+  }).filter(Boolean);
 
   const maxSeenAgeMs = 7 * 24 * 3600 * 1000;
   Object.keys(seenMap).forEach((k) => {
@@ -335,8 +368,8 @@ function renderAlerts(alerts) {
   const rows = normalized.slice(0, 60).map(a => {
     const stickyId = a && a.sticky ? String(a.sticky_id || '') : '';
     const action = stickyId
-      ? `<button class="small-btn" data-clear-sticky="${esc(stickyId)}">Clear</button>`
-      : '-';
+      ? `<button class="small-btn" data-clear-sticky="${esc(stickyId)}" data-dismiss-alert="${esc(a._alert_key || '')}">Clear</button>`
+      : `<button class="small-btn" data-dismiss-alert="${esc(a._alert_key || '')}">Hide</button>`;
     const severity = String((a && a.severity) || 'warn').toLowerCase();
     const sevClass = severity === 'bad' ? 'bad' : (severity === 'ok' ? 'ok' : 'warn');
     return [
@@ -364,6 +397,16 @@ function renderAlerts(alerts) {
       }
     });
   });
+  document.querySelectorAll('#alerts button[data-dismiss-alert]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = String(btn.getAttribute('data-dismiss-alert') || '').trim();
+      if (!key) return;
+      const dismissed = loadDismissedAlerts();
+      dismissed[key] = { dismissed_at: new Date().toISOString() };
+      saveDismissedAlerts(dismissed);
+      renderAlerts((latestStatus && latestStatus.alerts) || []);
+    });
+  });
   bindCopyables('#alerts');
 }
 
@@ -380,6 +423,7 @@ function renderTaskLane(targetId, items) {
   const showCompletedAt = activeLane === 'complete';
   const showTimeTaken = activeLane === 'complete';
   const showQueuedAt = activeLane === 'queue';
+  const showFailedAt = activeLane === 'failed';
 
   let filtered = items.filter(t => {
     const cls = taskType(t);
@@ -406,6 +450,7 @@ function renderTaskLane(targetId, items) {
     return end.getTime() - start.getTime();
   };
   const getQueuedAt = (t) => t.stale_requeued_at || t.requeued_at || t.last_attempt_at || t.created_at || '';
+  const getFailedAt = (t) => t.completed_at || t.last_attempt_at || t.started_at || t.created_at || '';
   filtered.sort((a, b) => {
     const aval = (key) => String(a[key] || '').toLowerCase();
     const bval = (key) => String(b[key] || '').toLowerCase();
@@ -429,6 +474,8 @@ function renderTaskLane(targetId, items) {
     if (sort === 'timetaken_desc') return getTimeTakenMs(b) - getTimeTakenMs(a);
     if (sort === 'completed_asc') return aval('completed_at').localeCompare(bval('completed_at'));
     if (sort === 'completed_desc') return bval('completed_at').localeCompare(aval('completed_at'));
+    if (sort === 'failedtime_asc') return String(getFailedAt(a)).localeCompare(String(getFailedAt(b)));
+    if (sort === 'failedtime_desc') return String(getFailedAt(b)).localeCompare(String(getFailedAt(a)));
     if (sort === 'try_desc') return (Number(b.attempts || 0) - Number(a.attempts || 0));
     if (sort === 'try_asc') return (Number(a.attempts || 0) - Number(b.attempts || 0));
     if (sort === 'error_asc') return aval('error').localeCompare(bval('error'));
@@ -477,6 +524,12 @@ function renderTaskLane(targetId, items) {
     t.last_attempt_at ||
     t.created_at ||
     '';
+  const failedAtValue = (t) =>
+    t.completed_at ||
+    t.last_attempt_at ||
+    t.started_at ||
+    t.created_at ||
+    '';
 
   const rows = filtered.map(t => [
     classBadge(t.task_class, t.executor, t),
@@ -488,8 +541,9 @@ function renderTaskLane(targetId, items) {
     ...(showRuntime ? [ `<span class="mono">${runtimeText(t.started_at)}</span>` ] : []),
     ...(showTimeTaken ? [ `<span class="mono">${timeTakenText(t.started_at, t.completed_at)}</span>` ] : []),
     ...(showCompletedAt ? [ `<span class="mono">${completedAtText(t.completed_at || t.started_at)}</span>` ] : []),
+    ...(showFailedAt ? [ `<span class="mono">${completedAtText(failedAtValue(t))}</span>` ] : []),
     fmt(t.attempts),
-    truncCell(t.error, 96, true)
+    truncCell(t.error, 220, true)
   ]);
   const sortArrow = (ascKey, descKey) => sort === ascKey ? ' ↑' : (sort === descKey ? ' ↓' : '');
   const controls = `
@@ -524,6 +578,7 @@ function renderTaskLane(targetId, items) {
     ...(showRuntime ? [`<th data-sort="started">Runtime${sortArrow('started_asc', 'started_desc')}</th>`] : []),
     ...(showTimeTaken ? [`<th data-sort="timetaken">Time Taken${sortArrow('timetaken_asc', 'timetaken_desc')}</th>`] : []),
     ...(showCompletedAt ? [`<th data-sort="completed">Completed At${sortArrow('completed_asc', 'completed_desc')}</th>`] : []),
+    ...(showFailedAt ? [`<th data-sort="failedtime">Failed At${sortArrow('failedtime_asc', 'failedtime_desc')}</th>`] : []),
     `<th data-sort="try">Try${sortArrow('try_asc', 'try_desc')}</th>`,
     `<th data-sort="error">Error${sortArrow('error_asc', 'error_desc')}</th>`
   ].join('');
@@ -552,6 +607,7 @@ function renderTaskLane(targetId, items) {
         started: ['started_asc', 'started_desc'],
         timetaken: ['timetaken_asc', 'timetaken_desc'],
         completed: ['completed_asc', 'completed_desc'],
+        failedtime: ['failedtime_asc', 'failedtime_desc'],
         try: ['try_asc', 'try_desc'],
         error: ['error_asc', 'error_desc'],
       };
@@ -611,7 +667,9 @@ function renderBatches(activeBatches) {
   const rows = filtered.map(b => ({
     id: b.id,
     stage: b.stage,
+    checked: tracked.has(String(b.id || '').trim()),
     cells: [
+      `<input type="checkbox" data-batch-check="${esc(b.id)}" ${tracked.has(String(b.id || '').trim()) ? 'checked' : ''} />`,
       `<span class="mono">${b.id}</span>`,
       fmt(b.plan),
       fmt(b.priority),
@@ -626,19 +684,25 @@ function renderBatches(activeBatches) {
       `<button class="small-btn" data-dismiss-batch="${esc(b.id)}" title="Dismiss batch">×</button>`
     ]
   }));
-  visibleBatchIds = new Set(filtered.map(b => b.id));
+  const checkedVisible = filtered
+    .map(b => String(b.id || '').trim())
+    .filter(id => tracked.has(id));
+  visibleBatchIds = checkedVisible.length ? new Set(checkedVisible) : new Set();
   const sortArrow = (ascKey, descKey) => sort === ascKey ? ' ↑' : (sort === descKey ? ' ↓' : '');
   const trackedCount = tracked.size;
   const controls = `
     <div class="filter-bar">
-      <span class="k">showing ${filtered.length} of ${activeBatches.length} tracked batches</span>
+      <span class="k">showing ${filtered.length} of ${activeBatches.length} active batches</span>
       <label class="filter-field k">Batch <input id="batchFilterBatch" value="${batchState.batch}" placeholder="contains" /></label>
-      ${trackedCount > 0 ? '<button class="small-btn" id="clearTrackedBatches">Clear tracked</button>' : ''}
-      <span class="k">Expand one or more chain cards below to focus task lanes on those batches.</span>
+      <button class="small-btn" id="selectVisibleBatches">Select visible</button>
+      <button class="small-btn" id="unselectVisibleBatches">Unselect visible</button>
+      ${trackedCount > 0 ? '<button class="small-btn" id="clearTrackedBatches">Clear selection</button>' : ''}
+      <span class="k">Check batches to show their chains and task lanes. Expand chain cards to narrow further.</span>
       <span class="k">Click headers to sort</span>
     </div>
   `;
   const headers = [
+    `<th>Show</th>`,
     `<th data-sort="batch">Batch${sortArrow('batch_asc', 'batch_desc')}</th>`,
     `<th data-sort="plan">Plan${sortArrow('plan_asc', 'plan_desc')}</th>`,
     `<th>Priority</th>`,
@@ -653,7 +717,7 @@ function renderBatches(activeBatches) {
     `<th></th>`,
   ].join('');
   const batchTable = rows.length
-    ? `<table><thead><tr>${headers}</tr></thead><tbody>${rows.map(r => `<tr>${r.cells.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`
+    ? `<table><thead><tr>${headers}</tr></thead><tbody>${rows.map(r => `<tr data-batch-row="${esc(r.id)}">${r.cells.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`
     : '<div class="k">(none)</div>';
   document.getElementById('batches').innerHTML = controls + batchTable;
   const bind = (id, key) => {
@@ -699,6 +763,18 @@ function renderBatches(activeBatches) {
   });
   bind('batchFilterBatch', 'batch');
   // Remove-tracked batch buttons
+  document.querySelectorAll('#batches input[data-batch-check]').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const batchId = inp.getAttribute('data-batch-check');
+      setTrackedBatchChecked(batchId, !!inp.checked);
+      renderBatches(activeBatches);
+      if (latestStatus) {
+        renderBatchChains(latestStatus, visibleBatchIds);
+        syncLaneVisibleBatchIds(latestStatus);
+        renderLaneTabs(latestStatus.counts, latestStatus.lanes);
+      }
+    });
+  });
   document.querySelectorAll('#batches button[data-dismiss-batch]').forEach(btn => {
     btn.addEventListener('click', () => {
       const batchId = btn.getAttribute('data-dismiss-batch');
@@ -724,6 +800,34 @@ function renderBatches(activeBatches) {
       }
     });
   }
+  const selectVisibleBtn = document.getElementById('selectVisibleBatches');
+  if (selectVisibleBtn) {
+    selectVisibleBtn.addEventListener('click', () => {
+      const tr = loadTrackedBatches();
+      filtered.forEach((b) => { if (isTrackableBatchId(b.id)) tr.add(String(b.id).trim()); });
+      saveTrackedBatches(tr);
+      renderBatches(activeBatches);
+      if (latestStatus) {
+        renderBatchChains(latestStatus, visibleBatchIds);
+        syncLaneVisibleBatchIds(latestStatus);
+        renderLaneTabs(latestStatus.counts, latestStatus.lanes);
+      }
+    });
+  }
+  const unselectVisibleBtn = document.getElementById('unselectVisibleBatches');
+  if (unselectVisibleBtn) {
+    unselectVisibleBtn.addEventListener('click', () => {
+      const tr = loadTrackedBatches();
+      filtered.forEach((b) => tr.delete(String(b.id || '').trim()));
+      saveTrackedBatches(tr);
+      renderBatches(activeBatches);
+      if (latestStatus) {
+        renderBatchChains(latestStatus, visibleBatchIds);
+        syncLaneVisibleBatchIds(latestStatus);
+        renderLaneTabs(latestStatus.counts, latestStatus.lanes);
+      }
+    });
+  }
   // Lane scope follows expanded chain cards for focused analysis.
 }
 
@@ -732,10 +836,9 @@ function syncLaneVisibleBatchIds(data) {
     laneVisibleBatchIds = null;
     return;
   }
-  // If no active/visible batches are present, do not hard-filter lanes;
-  // keep task lanes visible so processing rows do not "disappear".
+  // If no batches are checked, hide lane rows/chains (explicit user selection mode).
   if (visibleBatchIds.size === 0) {
-    laneVisibleBatchIds = null;
+    laneVisibleBatchIds = new Set();
     return;
   }
   const chains = data.batch_chains || {};

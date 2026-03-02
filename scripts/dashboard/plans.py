@@ -9,6 +9,20 @@ from typing import Any
 from .utils import file_mtime_iso, load_json
 
 PLAN_SCOPES = ("shoulders", "arms")
+STDIO_SNIPPET_LIMIT = 16000
+STDIO_TIMEOUT_LIMIT = 8000
+
+
+def _clip_stdio(text: str, limit: int = STDIO_SNIPPET_LIMIT) -> str:
+    """Preserve both head and tail of long output (useful for tracebacks)."""
+    if not isinstance(text, str):
+        return ""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    head = max(1, int(limit * 0.45))
+    tail = max(1, int(limit * 0.45))
+    omitted = len(text) - head - tail
+    return text[:head] + f"\n\n...[truncated {omitted} chars]...\n\n" + text[-tail:]
 
 
 def run_shell(cmd: str, timeout_s: int = 120) -> dict[str, Any]:
@@ -25,16 +39,16 @@ def run_shell(cmd: str, timeout_s: int = 120) -> dict[str, Any]:
         return {
             "ok": proc.returncode == 0,
             "returncode": proc.returncode,
-            "stdout": proc.stdout[-4000:],
-            "stderr": proc.stderr[-4000:],
+            "stdout": _clip_stdio(proc.stdout),
+            "stderr": _clip_stdio(proc.stderr),
             "cmd": cmd,
         }
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,
             "returncode": -1,
-            "stdout": (e.stdout or "")[-2000:] if isinstance(e.stdout, str) else "",
-            "stderr": (e.stderr or "")[-2000:] if isinstance(e.stderr, str) else "",
+            "stdout": _clip_stdio(e.stdout or "", STDIO_TIMEOUT_LIMIT) if isinstance(e.stdout, str) else "",
+            "stderr": _clip_stdio(e.stderr or "", STDIO_TIMEOUT_LIMIT) if isinstance(e.stderr, str) else "",
             "cmd": cmd,
             "error": f"timeout after {timeout_s}s",
         }

@@ -201,3 +201,139 @@ Files:
 4. Brain split reconcile thresholded reclaim policy
 5. Integration test on `github_analyzer_verify_benchmark` (`county-map`) and one smaller repo
 
+---
+
+## Implementation Status (Feb 25, 2026)
+
+**Status: IMPLEMENTED** - All core changes complete, pending integration testing.
+
+### What Was Implemented
+
+#### 1. Worker Runtime State Machine (`gpu.py`)
+- Added state constants: `RUNTIME_STATE_COLD`, `RUNTIME_STATE_LOADING_SINGLE`, `RUNTIME_STATE_READY_SINGLE`, `RUNTIME_STATE_LOADING_SPLIT`, `RUNTIME_STATE_READY_SPLIT`, `RUNTIME_STATE_UNLOADING`, `RUNTIME_STATE_WEDGED`, `RUNTIME_STATE_ERROR_RECOVERABLE`
+- Added tracking fields: `runtime_state`, `runtime_state_updated_at`, `runtime_transition_task_id`, `runtime_transition_phase`, `runtime_error_code`, `runtime_error_detail`
+- Added helper methods: `_set_runtime_state()`, `_is_runtime_ready()`, `_is_runtime_transitioning()`, `_is_runtime_wedged()`, `_can_accept_load_task()`, `_can_accept_work_task()`, `_mark_wedged()`
+- State transitions integrated into `load_model()`, `unload_model()`, `_set_split_runtime_loaded()`, `_clear_split_runtime_loaded()`, `_start_split_runtime()`
+
+#### 2. Meta-Task Claim Enforcement (`gpu.py`)
+- `_can_claim_meta_task()` now returns `(bool, reason)` tuple with strict state checks
+- Preflight rejection for loads when in ready/transitioning/wedged states
+- Unload tasks can be claimed even when wedged (for recovery)
+
+#### 3. Work Task Claim Enforcement (`gpu.py`)
+- `_can_accept_work_task()` is now enforced in `claim_tasks()` for all llm/script/cpu tasks
+- No work tasks claimed during transitions or when wedged
+
+#### 4. Postcondition Verification (`gpu.py`)
+- `unload_model()` verifies postconditions and marks as wedged on failure
+- `unload_split_llm` handling marks as wedged if listener/model still present after unload
+- Reservation status only set to "unloaded" AFTER postconditions pass (uses transitional "unloading" status first)
+
+#### 5. Heartbeat Updates (`gpu.py`)
+- All new state machine fields included in heartbeat output
+
+#### 6. Brain Thresholded Reclaim Policy (`brain_resources.py`)
+- Added constants: `SPLIT_WEDGE_RECONCILE_THRESHOLD=3`, `SPLIT_WEDGE_RECLAIM_COOLDOWN_S=120`, `SPLIT_WEDGE_MAX_RECLAIMS_PER_HOUR=6`
+- Added tracking in `brain.py`: `split_wedge_counts`, `split_wedge_last_reclaim_at`, `split_wedge_reclaims_this_hour`
+- Added methods: `_increment_split_wedge_count()`, `_clear_split_wedge_count()`, `_can_reclaim_split_group()`, `_record_split_reclaim_attempt()`, `_should_trigger_wedge_reclaim()`
+- `_reconcile_split_group_state()` tracks wedge counts and clears on healthy
+- `_make_resource_decisions()` triggers `unload_split_llm` after threshold instead of indefinite suppression
+
+### Post-Review Fixes (Code Review Findings)
+
+Six issues identified and fixed:
+
+1. **High: Scoped orphan-runner cleanup** - `_kill_orphan_ollama_runners()` now requires a `target_port` parameter and only kills runners associated with that port. Prevents accidentally killing healthy runners for other split groups.
+
+2. **High: Restricted split pair prep port reclamation** - `_prepare_local_for_split_pairing()` now only reclaims the port if `is_launcher=True` OR `status != "loading"`. Prevents a late-joining partner from killing a launcher's already-started runtime.
+
+3. **Medium: Work task state guard enforced** - `_can_accept_work_task()` is now called in the claim loop for all llm/script/cpu tasks, enforcing "no work during transitioning/wedged" invariant.
+
+4. **Medium: Reservation status ordering fixed** - `unload_split_llm` now sets reservation to "unloading" first, performs cleanup, verifies postconditions, then sets "unloaded" (or "failed") based on result. Prevents misleading brain reconciliation.
+
+5. **Medium: Orphan runner kill gated by can_reclaim_port** - `_prepare_local_for_split_pairing()` now only calls `_kill_orphan_ollama_runners()` when `can_reclaim_port` is true. Previously, orphan runners were killed unconditionally before the reclaim check, allowing a non-launcher partner to kill a launcher's healthy runtime via the orphan-runner path.
+
+6. **Low: Dead code cleanup in orphan runner logic** - Removed unreachable `or not port_pids` branch in `_kill_orphan_ollama_runners()` (dead code after early return) and fixed misleading comments about "parent PID lineage" checking that wasn't implemented. Comments now accurately describe the actual logic: killing orphan runners that have the target port open (inherited socket).
+
+### Files Modified
+
+- `/home/bryan/llm_orchestration/shared/agents/gpu.py` (~150 lines added/modified)
+- `/home/bryan/llm_orchestration/shared/agents/brain.py` (~5 lines added)
+- `/home/bryan/llm_orchestration/shared/agents/brain_resources.py` (~80 lines added)
+
+### Next Steps
+
+1. **Integration testing** on `github_analyzer_verify_benchmark` with `county-map` repo
+2. **Monitor** for `RUNTIME_STATE_TRANSITION` and `SPLIT_WEDGE_*` log patterns
+3. **Validate** acceptance criteria 1-6 under repeated verify waves
+4. **Consider refactoring** `gpu.py` (~3500 lines) into smaller modules:
+   - `gpu_state.py` - State machine logic
+   - `gpu_split.py` - Split runtime handling
+   - `gpu_ollama.py` - Ollama management
+   - `gpu.py` - Main agent loop and coordination
+
+## Additional Runtime Robustness Issue (Feb 25, 2026): Thermal Pause Causes Misleading Deferred-Load Retries
+
+### Observed Behavior
+
+During `github_analyzer_verify_benchmark` runs:
+- multiple `worker_review` slices entered retry loops with errors labeled:
+  - `DEFERRED_MODEL_LOAD: worker_timeout ... queued_load_llm=True`
+- at the same time, affected GPUs showed:
+  - `model_loaded: true`
+  - healthy local Ollama
+  - `thermal_pause_active: true`
+
+This indicates some retries are not true "model missing" problems.
+
+### Likely Mechanism
+
+Current thermal pause behavior uses `SIGSTOP` / `SIGCONT` on active worker subprocesses.
+
+If a worker is paused while blocked in an Ollama HTTP request:
+- the worker process stops advancing
+- request timeout clocks continue externally
+- the worker later reports a timeout
+- worker logic may misclassify it as deferred-model-load timeout and queue `load_llm`
+
+Result:
+- misleading error messages
+- unnecessary `load_llm` churn
+- retries consumed on slices that were really thermally stalled
+
+### Plan-Local Mitigation (Already Implemented)
+
+`worker_review.py` timeout classification was improved to distinguish:
+- `thermal_pause_timeout`
+- `inference_timeout`
+
+and to avoid queuing `load_llm` when the model is already present on the worker Ollama runtime.
+
+This improves observability and reduces pointless load-meta traffic, but does **not** fully solve the underlying pause behavior.
+
+### Core-Agent Fixes Needed (Human)
+
+1. **Do not pause active LLM worker subprocesses mid-request with `SIGSTOP`**
+- Prefer claim throttling only:
+  - stop claiming new work during thermal pause
+  - let in-flight workers finish naturally
+- If pausing remains necessary, it must be coordinated with worker/runtime timeouts
+
+2. **Separate thermal stall from model-load timeout in worker retry policy**
+- Timeouts during thermal pause should be tagged/classified distinctly
+- Avoid automatic `load_llm` enqueue for thermal/stall timeouts when model is loaded and healthy
+
+3. **Add a thermal-aware timeout budget**
+- If a worker is thermally paused, extend or suspend request timeout accounting
+- Alternatively, mark the task as `paused_by_thermal` and resume without incrementing retry count
+
+4. **Telemetry / diagnostics**
+- Record per-task thermal pause overlap in task heartbeat/result metadata
+- This enables debugging of "why did this timeout?" without inferring from global heartbeat snapshots
+
+### Why This Matters
+
+This directly affects reliability of long-running LLM phases:
+- otherwise healthy slices can fail after repeated thermal pauses
+- benchmark timing and failure signals become noisy
+- operators see "deferred load" errors that are actually thermal stalls

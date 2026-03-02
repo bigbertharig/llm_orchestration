@@ -175,6 +175,11 @@ JSON only:"""
         task["workers_attempted"] = []
         task["retry_recovered_by_brain"] = True
         task["retry_recovery_reason"] = reason
+        # Clear stale worker assignment fields to avoid misleading queue state
+        task.pop("assigned_to", None)
+        task.pop("worker", None)
+        task.pop("started_at", None)
+        task.pop("last_attempt_at", None)
         task.pop("cloud_escalated", None)
         task.pop("cloud_escalation_id", None)
         task.pop("incident_id", None)
@@ -485,6 +490,10 @@ JSON only:"""
                     continue
 
                 if error_type == "definition":
+                    # Skip already-marked unfixable tasks to avoid log spam
+                    if task.get("unfixable_marked", False):
+                        continue
+
                     # Definition error - try to fix the task
                     fixed = self._try_fix_definition_error(task)
                     if fixed:
@@ -497,7 +506,16 @@ JSON only:"""
                         self.log_decision("TASK_UNFIXABLE",
                             f"Could not fix definition error for '{task.get('name', '')}': {result.get('error', '')}",
                             {"task_id": task["task_id"][:8]})
+                        # Mark as unfixable to prevent re-processing on subsequent loops
+                        task["unfixable_marked"] = True
+                        task["unfixable_at"] = datetime.now().isoformat()
+                        with open(task_file, 'w') as f:
+                            json.dump(task, f, indent=2)
                         # Leave in failed/ for manual intervention
+
+                elif self._try_json_repair_escalation(task, result, task_file):
+                    # JSON repair initiated - don't retry normally
+                    continue
 
                 elif self._try_fix_missing_module(task, result):
                     # Brain fixed a missing dependency. Requeue with clean retry state.
@@ -636,6 +654,26 @@ JSON only:"""
                     task["blocked_reason"] = "awaiting_cloud_review"
                     with open(task_file, 'w') as f:
                         json.dump(task, f, indent=2)
+
+                    # blocked_cloud is terminal for local execution - abort the batch
+                    # This prevents zombie batches with pending private tasks
+                    batch_id = task.get("batch_id", "")
+                    if batch_id:
+                        self.log_decision(
+                            "BLOCKED_CLOUD_BATCH_TERMINAL",
+                            f"Task escalated to cloud; terminating local batch",
+                            {
+                                "task_id": task.get("task_id", "")[:8],
+                                "task_name": task.get("name", ""),
+                                "batch_id": batch_id,
+                                "incident_id": incident.get("incident_id"),
+                            }
+                        )
+                        self._abort_batch(
+                            batch_id,
+                            f"blocked_cloud: {task.get('name', '')} escalated to cloud review",
+                            task
+                        )
                     self._save_brain_state()
 
             except Exception as e:
@@ -786,6 +824,311 @@ JSON only:"""
             return True
 
         return False
+
+    # =========================================================================
+    # JSON Repair Escalation
+    # =========================================================================
+
+    def _is_json_format_failure(self, task: Dict[str, Any], result: Dict[str, Any]) -> tuple[bool, str]:
+        """Detect if this failure is a JSON format/parse error.
+
+        Returns (is_json_failure, failure_class). Failure classes:
+        - non_json_response: LLM returned non-JSON text
+        - malformed_json: JSON was present but malformed
+        - repair_failed: In-worker JSON repair already attempted and failed
+        """
+        text = self._result_text(task, result)
+        error = str(result.get("error", "")).lower()
+
+        # Check for explicit repair failure markers (from worker scripts)
+        if "repair_failed" in text or "json repair failed" in text:
+            return True, "repair_failed"
+
+        # Check for common JSON parse errors
+        json_error_patterns = [
+            ("no json object found", "non_json_response"),
+            ("expecting value", "malformed_json"),
+            ("json decode error", "malformed_json"),
+            ("json.decoder.jsondecodeerror", "malformed_json"),
+            ("invalid json", "malformed_json"),
+            ("failed to parse json", "malformed_json"),
+            ("unterminated string", "malformed_json"),
+            ("expecting property name", "malformed_json"),
+            ("failed to extract structured output", "non_json_response"),
+        ]
+
+        for pattern, failure_class in json_error_patterns:
+            if pattern in text or pattern in error:
+                return True, failure_class
+
+        return False, ""
+
+    def _find_json_repair_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Find failure artifacts that can be used for JSON repair.
+
+        Searches worker_review failure artifacts by slice_id/phase matching.
+        worker_review.py writes to results/worker_review_failures/ with naming:
+        {slice_id}_{phase}_{timestamp}.txt (raw) + .json (metadata sidecar)
+        """
+        artifacts = {
+            "raw_response_path": None,
+            "prompt_path": None,
+            "expected_schema": None,
+            "phase": None,
+            "slice_id": None,
+        }
+
+        batch_path = task.get("batch_path")
+        if not batch_path:
+            return artifacts
+
+        batch_dir = Path(batch_path)
+        task_name = task.get("name", "")
+
+        # Infer phase and slice_id from task name
+        # worker_review tasks are named like: worker_review_slice_001, worker_review_verify_slice_008
+        task_name_lower = task_name.lower()
+        if "extractor" in task_name_lower:
+            artifacts["phase"] = "extractor"
+            artifacts["expected_schema"] = "extraction_schema"
+        elif "verifier" in task_name_lower or "verify" in task_name_lower:
+            artifacts["phase"] = "verifier"
+            artifacts["expected_schema"] = "verification_schema"
+        elif "adjudicator" in task_name_lower:
+            artifacts["phase"] = "adjudicator"
+            artifacts["expected_schema"] = "adjudication_schema"
+        elif "deep" in task_name_lower:
+            artifacts["phase"] = "deep_pass"
+        else:
+            # Default to extractor for generic worker_review tasks
+            artifacts["phase"] = "extractor"
+
+        # Extract slice_id from task name (e.g., "worker_review_slice_001" -> "slice_001")
+        slice_match = re.search(r"(slice_\d+)", task_name_lower)
+        if slice_match:
+            artifacts["slice_id"] = slice_match.group(1)
+
+        # Primary location: results/worker_review_failures/
+        failure_dir = batch_dir / "results" / "worker_review_failures"
+        if not failure_dir.exists():
+            # Fallback to legacy locations
+            for fallback in [
+                batch_dir / "results" / "failures",
+                batch_dir / "results" / "debug",
+            ]:
+                if fallback.exists():
+                    failure_dir = fallback
+                    break
+            else:
+                return artifacts
+
+        # Strategy 1: Match by JSON sidecar metadata (most reliable)
+        best_match = None
+        best_match_time = None
+        for json_file in failure_dir.glob("*.json"):
+            try:
+                meta = json.loads(json_file.read_text(encoding="utf-8"))
+                meta_slice = str(meta.get("slice_id", "")).lower()
+                meta_phase = str(meta.get("phase", "")).lower()
+
+                # Check slice match
+                if artifacts["slice_id"] and meta_slice and artifacts["slice_id"] not in meta_slice:
+                    continue
+
+                # Check phase match (partial - "extractor" in "standard_extractor")
+                if artifacts["phase"] and meta_phase and artifacts["phase"] not in meta_phase:
+                    continue
+
+                # Found a match - check for corresponding .txt file
+                txt_file = json_file.with_suffix(".txt")
+                if txt_file.exists():
+                    # Prefer most recent match
+                    mtime = txt_file.stat().st_mtime
+                    if best_match_time is None or mtime > best_match_time:
+                        best_match = str(txt_file)
+                        best_match_time = mtime
+            except Exception:
+                continue
+
+        if best_match:
+            artifacts["raw_response_path"] = best_match
+            return artifacts
+
+        # Strategy 2: Match by filename pattern (fallback)
+        # Files are named: {slice_id}_{phase}_{timestamp}.txt
+        slice_id = artifacts.get("slice_id", "")
+        phase = artifacts.get("phase", "")
+        candidates = []
+
+        for txt_file in failure_dir.glob("*.txt"):
+            fname = txt_file.name.lower()
+            # Check slice_id in filename
+            if slice_id and slice_id not in fname:
+                continue
+            # Check phase in filename
+            if phase and phase not in fname:
+                continue
+            candidates.append((txt_file, txt_file.stat().st_mtime))
+
+        if candidates:
+            # Use most recent match
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            artifacts["raw_response_path"] = str(candidates[0][0])
+
+        return artifacts
+
+    def _try_json_repair_escalation(
+        self,
+        task: Dict[str, Any],
+        result: Dict[str, Any],
+        task_file: Path,
+    ) -> bool:
+        """Attempt JSON repair for format failures using brain model.
+
+        Instead of spawning a separate repair task that can strand the original,
+        this method attempts inline repair using the brain's LLM and either:
+        - Succeeds: writes repaired output and requeues original task
+        - Fails: falls through to normal retry/escalation
+
+        Returns True if repair succeeded (task requeued).
+        Returns False if not applicable or repair failed.
+        """
+        # Check if this is a JSON format failure
+        is_json_fail, failure_class = self._is_json_format_failure(task, result)
+        if not is_json_fail:
+            return False
+
+        # Don't repair if already attempted
+        if task.get("json_repair_attempted", False):
+            return False
+
+        # Don't repair brain/meta tasks
+        if task.get("task_class") in ("brain", "meta"):
+            return False
+
+        # Find repair artifacts
+        artifacts = self._find_json_repair_artifacts(task)
+
+        # If no raw response artifact, can't repair - fall through to normal retry
+        raw_path = artifacts.get("raw_response_path")
+        if not raw_path or not Path(raw_path).exists():
+            self.log_decision(
+                "JSON_REPAIR_SKIPPED",
+                f"No raw response artifact for '{task.get('name', '')}' - using normal retry",
+                {
+                    "task_id": task.get("task_id", "")[:8],
+                    "failure_class": failure_class,
+                }
+            )
+            return False
+
+        # Read raw response
+        try:
+            with open(raw_path, 'r') as f:
+                raw_text = f.read()
+        except Exception as e:
+            self.log_decision(
+                "JSON_REPAIR_SKIPPED",
+                f"Could not read raw response: {e}",
+                {"task_id": task.get("task_id", "")[:8]}
+            )
+            return False
+
+        if not raw_text.strip():
+            return False
+
+        # Attempt inline repair using brain model
+        phase = artifacts.get("phase", "unknown")
+        repair_prompt = f"""Extract valid JSON from this malformed LLM response.
+
+Task phase: {phase}
+Failure class: {failure_class}
+
+Raw response (may contain extra text, markdown, or malformed JSON):
+---
+{raw_text[:4000]}
+---
+
+Extract ONLY the JSON object/array that was intended. Fix any syntax errors.
+If there is no recoverable JSON structure, respond with exactly: NO_JSON_FOUND
+
+Return only valid JSON (no markdown, no explanation):"""
+
+        try:
+            repaired = self.think(repair_prompt, log_as="json_repair")
+            repaired = repaired.strip()
+
+            # Check for explicit failure
+            if repaired == "NO_JSON_FOUND" or not repaired:
+                self.log_decision(
+                    "JSON_REPAIR_FAILED",
+                    f"Brain could not extract JSON from raw response",
+                    {"task_id": task.get("task_id", "")[:8], "failure_class": failure_class}
+                )
+                task["json_repair_attempted"] = True
+                task["json_repair_result"] = "no_json_found"
+                with open(task_file, 'w') as f:
+                    json.dump(task, f, indent=2)
+                return False
+
+            # Strip markdown if present
+            if repaired.startswith("```"):
+                lines = repaired.split("\n")
+                repaired = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+                repaired = repaired.strip()
+
+            # Validate JSON
+            parsed = json.loads(repaired)
+
+            # Write repaired output to artifact location
+            repaired_path = Path(raw_path).with_suffix(".repaired.json")
+            with open(repaired_path, 'w') as f:
+                json.dump(parsed, f, indent=2)
+
+            # Mark repair success and requeue
+            task["json_repair_attempted"] = True
+            task["json_repair_result"] = "success"
+            task["json_repair_output_path"] = str(repaired_path)
+            task["json_repair_phase"] = phase
+            task["json_repair_for_attempt"] = task.get("attempts", 0)
+            task["fix_applied"] = f"json_repair:{failure_class}"
+
+            self._queue_task_retry(task_file, task, f"json_repair_recovered:{failure_class}")
+
+            self.log_decision(
+                "JSON_REPAIR_RECOVERED",
+                f"Brain repaired JSON for '{task.get('name', '')}', requeued",
+                {
+                    "task_id": task.get("task_id", "")[:8],
+                    "failure_class": failure_class,
+                    "repaired_path": str(repaired_path),
+                }
+            )
+            return True
+
+        except json.JSONDecodeError as e:
+            self.log_decision(
+                "JSON_REPAIR_FAILED",
+                f"Brain repair produced invalid JSON: {e}",
+                {"task_id": task.get("task_id", "")[:8], "failure_class": failure_class}
+            )
+            task["json_repair_attempted"] = True
+            task["json_repair_result"] = f"invalid_json:{str(e)[:100]}"
+            with open(task_file, 'w') as f:
+                json.dump(task, f, indent=2)
+            return False
+
+        except Exception as e:
+            self.log_decision(
+                "JSON_REPAIR_FAILED",
+                f"Brain repair exception: {e}",
+                {"task_id": task.get("task_id", "")[:8], "failure_class": failure_class}
+            )
+            task["json_repair_attempted"] = True
+            task["json_repair_result"] = f"exception:{str(e)[:100]}"
+            with open(task_file, 'w') as f:
+                json.dump(task, f, indent=2)
+            return False
 
     # =========================================================================
     # Resource Monitoring

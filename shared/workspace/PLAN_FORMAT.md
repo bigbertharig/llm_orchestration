@@ -371,7 +371,8 @@ Workers prioritize tasks they're optimized for:
 
 Use this precedence when defining LLM tasks:
 
-1. If a task must run on split runtime, set `llm_placement: split_gpu`.
+1. Prefer expressing requirements with `llm_min_tier` (and optionally `llm_model`) first.
+2. Set `llm_placement` only when placement is truly required by the task (for example split-runtime diagnostics or strict split-only execution during current system constraints).
 2. Set `llm_min_tier` to the lowest acceptable capability.
 3. Optionally set `llm_model` when you have a specific preferred model.
 
@@ -381,7 +382,32 @@ Runtime claim rule:
 
 Planning guidance:
 - Put hardware topology in the model catalog (`models.catalog.json`), not in plan logic.
-- Plans declare requirements (`llm_min_tier` / `llm_placement`), brain maps to available workers/groups.
+- Plans should primarily declare capability requirements (`llm_min_tier` / optional `llm_model`); use `llm_placement` sparingly.
+- Brain maps declared requirements to available workers/groups and handles load/unload strategy.
+
+### CPU Preprocessing Pattern for LLM Plans (Recommended)
+
+For expensive LLM review/verify pipelines, add CPU tasks that prepare artifacts before the LLM `foreach` waves.
+
+Common CPU helper outputs:
+- repo structure summary (entrypoints/routes/imports/extensions)
+- JSON/data shape summaries (avoid raw large data files in prompts)
+- slice complexity scoring + shard recommendations
+- claim-to-evidence candidate links
+- normalized worker outputs / contradiction prefilter candidates
+- batch timeline + idle-gap analysis (post-run)
+
+Recommended placement in task graph:
+1. After `prepare_repo`: repo structure + JSON/data summaries
+2. After `build_scope_manifest`: slice complexity + claim/evidence linking
+3. After worker review phases: result normalization + contradiction prefilter
+4. After benchmark/final report: timeline/idle-gap analyzer
+
+Benefits:
+- reduces LLM token waste
+- improves shard tuning from measured complexity
+- makes bottlenecks visible (queue wait vs compute vs split capacity)
+- improves repeatability across repos without manual tuning
 
 ### LLM Examples
 

@@ -43,6 +43,24 @@ GITHUB_URL_PARSE_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za
 
 # Template cache (loaded once at startup)
 _template_cache: dict[str, str] = {}
+STDIO_SNIPPET_LIMIT = 16000
+STDIO_TIMEOUT_LIMIT = 8000
+
+
+def _clip_stdio(text: str, limit: int = STDIO_SNIPPET_LIMIT) -> str:
+    """Preserve both head and tail of long output (useful for tracebacks)."""
+    if not isinstance(text, str):
+        return ""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    head = max(1, int(limit * 0.45))
+    tail = max(1, int(limit * 0.45))
+    omitted = len(text) - head - tail
+    return (
+        text[:head]
+        + f"\n\n...[truncated {omitted} chars]...\n\n"
+        + text[-tail:]
+    )
 
 
 def _load_template(name: str) -> str:
@@ -122,16 +140,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return {
                 "ok": proc.returncode == 0,
                 "returncode": proc.returncode,
-                "stdout": proc.stdout[-4000:],
-                "stderr": proc.stderr[-4000:],
+                "stdout": _clip_stdio(proc.stdout),
+                "stderr": _clip_stdio(proc.stderr),
                 "cmd": " ".join(cmd),
             }
         except subprocess.TimeoutExpired as e:
             return {
                 "ok": False,
                 "returncode": -1,
-                "stdout": (e.stdout or "")[-2000:] if isinstance(e.stdout, str) else "",
-                "stderr": (e.stderr or "")[-2000:] if isinstance(e.stderr, str) else "",
+                "stdout": _clip_stdio(e.stdout or "", STDIO_TIMEOUT_LIMIT) if isinstance(e.stdout, str) else "",
+                "stderr": _clip_stdio(e.stderr or "", STDIO_TIMEOUT_LIMIT) if isinstance(e.stderr, str) else "",
                 "cmd": " ".join(cmd),
                 "error": f"timeout after {timeout_s}s",
             }
@@ -390,6 +408,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "stderr": "" if ok else f"cleanup_errors={errors}",
         }
 
+    def _clear_ollama(self) -> dict[str, Any]:
+        scripts_dir = Path(__file__).resolve().parent.parent
+        script = scripts_dir / "clear_ollama.py"
+        cmd = f"python3 {shlex.quote(str(script))} --json"
+        out = run_shell(cmd, timeout_s=180)
+        if out.get("ok"):
+            try:
+                parsed = json.loads(str(out.get("stdout") or "").strip().splitlines()[-1])
+                if isinstance(parsed, dict):
+                    out["clear_ollama"] = parsed
+            except Exception:
+                pass
+        out["message"] = "Cleared worker/split Ollama runtimes" if out.get("ok") else "Failed to clear worker/split Ollama runtimes"
+        return out
+
     def _cleanup_stale_processing_heartbeats(self) -> dict[str, Any]:
         processing_dir = self.shared_path / "tasks" / "processing"
         removed = 0
@@ -543,6 +576,223 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "errors": errors,
         }
 
+    def _requeue_processing_tasks_for_reset(self, assigned_to: str | None = None) -> dict[str, Any]:
+        """Return non-brain processing tasks back to queue before reset.
+
+        `Reset to default` kills agents, so worker-owned tasks left in processing/
+        become orphans unless we explicitly requeue them. This makes reset semantics
+        match operator expectations: tasks drop and can be reclaimed after restart.
+        """
+        processing_dir = self.shared_path / "tasks" / "processing"
+        queue_dir = self.shared_path / "tasks" / "queue"
+        queue_dir.mkdir(parents=True, exist_ok=True)
+
+        moved = 0
+        skipped = 0
+        heartbeat_files_removed = 0
+        errors: list[str] = []
+
+        target_worker = str(assigned_to or "").strip()
+
+        for task_path in sorted(processing_dir.glob("*.json")):
+            if str(task_path).endswith(".lock") or str(task_path).endswith(".heartbeat.json"):
+                continue
+            try:
+                task = load_json(task_path)
+            except Exception as exc:
+                errors.append(f"{task_path.name}: {exc}")
+                continue
+            if not isinstance(task, dict):
+                skipped += 1
+                continue
+
+            # Do not move brain-owned tasks; brain manages its own lifecycle.
+            if str(task.get("executor", "")).strip() == "brain" or str(task.get("task_class", "")).strip() == "brain":
+                skipped += 1
+                continue
+
+            if target_worker:
+                if str(task.get("assigned_to", "")).strip() != target_worker:
+                    skipped += 1
+                    continue
+
+            # Clear processing-only ownership fields so any worker can reclaim.
+            task["status"] = "pending"
+            for key in (
+                "assigned_to",
+                "started_at",
+                "worker",
+                "worker_pid",
+                "task_runtime_sec",
+                "peak_vram_mb",
+            ):
+                task.pop(key, None)
+
+            # Keep attempt history but clear stale execution result/output.
+            task.pop("result", None)
+            task.pop("error", None)
+
+            try:
+                out_path = queue_dir / task_path.name
+                with open(out_path, "w", encoding="utf-8") as f:
+                    json.dump(task, f, indent=2)
+                task_path.unlink(missing_ok=True)
+                moved += 1
+            except Exception as exc:
+                errors.append(f"{task_path.name}: {exc}")
+                continue
+
+            hb_path = processing_dir / f"{task_path.stem}.heartbeat.json"
+            if hb_path.exists():
+                try:
+                    hb_path.unlink(missing_ok=True)
+                    heartbeat_files_removed += 1
+                except Exception as exc:
+                    errors.append(f"{hb_path.name}: {exc}")
+
+        return {
+            "moved_to_queue": moved,
+            "skipped": skipped,
+            "heartbeat_files_removed": heartbeat_files_removed,
+            "errors": errors,
+        }
+
+    def _find_gpu_config(self, gpu_name: str) -> dict[str, Any] | None:
+        for gpu in self.config.get("gpus", []) or []:
+            if not isinstance(gpu, dict):
+                continue
+            if str(gpu.get("name", "")).strip() == gpu_name:
+                return gpu
+        return None
+
+    def _split_groups_for_gpu(self, gpu_name: str) -> list[dict[str, Any]]:
+        catalog_path = self.shared_path / "agents" / "models.catalog.json"
+        groups: list[dict[str, Any]] = []
+        try:
+            catalog = load_json(catalog_path)
+        except Exception:
+            return groups
+        if not isinstance(catalog, dict):
+            return groups
+        seen: set[str] = set()
+        for model in catalog.get("models", []) or []:
+            if not isinstance(model, dict):
+                continue
+            for group in model.get("split_groups", []) or []:
+                if not isinstance(group, dict):
+                    continue
+                members = [str(m).strip() for m in group.get("members", []) if str(m).strip()]
+                if gpu_name not in members:
+                    continue
+                group_id = str(group.get("id", "")).strip()
+                if not group_id or group_id in seen:
+                    continue
+                seen.add(group_id)
+                groups.append(
+                    {
+                        "id": group_id,
+                        "port": group.get("port"),
+                        "members": members,
+                    }
+                )
+        return groups
+
+    def _reset_gpu(self, gpu_name: str) -> dict[str, Any]:
+        gpu_name = str(gpu_name or "").strip()
+        if not re.fullmatch(r"gpu-[1-9][0-9]*", gpu_name):
+            return {"ok": False, "message": f"invalid gpu name: {gpu_name}"}
+
+        gpu_cfg = self._find_gpu_config(gpu_name)
+        if not gpu_cfg:
+            return {"ok": False, "message": f"unknown gpu: {gpu_name}"}
+
+        try:
+            worker_port = int(gpu_cfg.get("port"))
+        except Exception:
+            return {"ok": False, "message": f"missing/invalid port for {gpu_name}"}
+
+        split_groups = self._split_groups_for_gpu(gpu_name)
+        split_ports: list[int] = []
+        split_ids: list[str] = []
+        for g in split_groups:
+            split_ids.append(str(g.get("id", "")).strip())
+            try:
+                split_ports.append(int(g.get("port")))
+            except Exception:
+                continue
+        split_ports = sorted(set(split_ports))
+        split_ids = [s for s in split_ids if s]
+
+        requeued_processing = self._requeue_processing_tasks_for_reset(assigned_to=gpu_name)
+
+        remote_lines = [
+            "set +e",
+            f'GPU_NAME="{gpu_name}"',
+            f'WORKER_PORT="{worker_port}"',
+            f'SPLIT_PORTS="{ " ".join(str(p) for p in split_ports) }"',
+            f'SPLIT_IDS="{ " ".join(split_ids) }"',
+            "kill_hard() {",
+            "  pid=\"$1\"",
+            "  [ -n \"$pid\" ] || return 0",
+            "  kill \"$pid\" 2>/dev/null || true",
+            "  sleep 0.2",
+            "  kill -0 \"$pid\" 2>/dev/null || return 0",
+            "  kill -9 \"$pid\" 2>/dev/null || true",
+            "}",
+            "killed_gpu_proc=0",
+            "killed_ports=0",
+            "removed_split_files=0",
+            "removed_split_locks=0",
+            "pkill -9 -f \"/mnt/shared/agents/gpu.py ${GPU_NAME}\" >/dev/null 2>&1 && killed_gpu_proc=1 || true",
+            "for p in $WORKER_PORT $SPLIT_PORTS; do",
+            "  [ -n \"$p\" ] || continue",
+            "  pids=$(ss -ltnp 2>/dev/null | grep \":${p}\\\\b\" | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | sort -u || true)",
+            "  for pid in $pids; do",
+            "    kill_hard \"$pid\"",
+            "    killed_ports=$((killed_ports + 1))",
+            "  done",
+            "done",
+            "# Clean split reservation artifacts for groups involving this GPU so pairing can restart cleanly.",
+            "for gid in $SPLIT_IDS; do",
+            "  [ -n \"$gid\" ] || continue",
+            "  for f in /mnt/shared/signals/split_llm/${gid}.json /mnt/shared/signals/split_llm/${gid}.runtime_owner.json; do",
+            "    [ -e \"$f\" ] || continue",
+            "    rm -f \"$f\" && removed_split_files=$((removed_split_files + 1))",
+            "  done",
+            "  lock=\"/mnt/shared/signals/split_llm/${gid}.json.lock\"",
+            "  if [ -e \"$lock\" ]; then rm -f \"$lock\" && removed_split_locks=$((removed_split_locks + 1)); fi",
+            "done",
+            "nohup /home/bryan/ml-env/bin/python /mnt/shared/agents/gpu.py \"$GPU_NAME\" --config /mnt/shared/agents/config.json >/tmp/${GPU_NAME}.log 2>&1 < /dev/null &",
+            "sleep 2",
+            "pgrep -af \"/mnt/shared/agents/gpu.py ${GPU_NAME}\" || true",
+            "printf '{\"gpu\":\"%s\",\"worker_port\":%s,\"split_ports\":\"%s\",\"killed_gpu_proc\":%s,\"killed_port_listeners\":%s,\"removed_split_files\":%s,\"removed_split_locks\":%s}\\n' \"$GPU_NAME\" \"$WORKER_PORT\" \"$SPLIT_PORTS\" \"$killed_gpu_proc\" \"$killed_ports\" \"$removed_split_files\" \"$removed_split_locks\"",
+        ]
+        out = self._gpu_ssh("\n".join(remote_lines), timeout_s=90)
+        parsed_remote: dict[str, Any] = {}
+        if out.get("ok"):
+            lines = str(out.get("stdout") or "").strip().splitlines()
+            if lines:
+                try:
+                    candidate = json.loads(lines[-1])
+                    if isinstance(candidate, dict):
+                        parsed_remote = candidate
+                except Exception:
+                    pass
+
+        return {
+            "ok": bool(out.get("ok")),
+            "message": f"Reset {gpu_name}",
+            "gpu": gpu_name,
+            "worker_port": worker_port,
+            "split_ports": split_ports,
+            "requeued_processing": requeued_processing,
+            "remote": parsed_remote,
+            "stdout": out.get("stdout", ""),
+            "stderr": out.get("stderr", ""),
+            "cmd": out.get("cmd", ""),
+            "returncode": out.get("returncode"),
+        }
+
     def _cleanup_stale_remote_runtime_artifacts(self, allow_aggressive: bool = False) -> dict[str, Any]:
         """
         Reclaim stale remote runtime artifacts when no batches are active.
@@ -632,7 +882,8 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_
 
     def _return_default(self) -> dict[str, Any]:
         local_cleanup = self._cleanup_system_meta_artifacts()
-        pre_cleanup = self._cleanup_stale_remote_runtime_artifacts(allow_aggressive=True)
+        requeued_processing = self._requeue_processing_tasks_for_reset()
+        ollama_clear = self._clear_ollama()
         # Pass commands via stdin so pkill can't match its own shell's cmdline.
         script = (
             "pkill -f /mnt/shared/agents/brain.py || true\n"
@@ -658,11 +909,15 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_
             return {
                 "ok": proc.returncode == 0,
                 "returncode": proc.returncode,
-                "stdout": proc.stdout[-4000:],
-                "stderr": proc.stderr[-4000:],
+                "stdout": _clip_stdio(proc.stdout),
+                "stderr": _clip_stdio(proc.stderr),
                 "cmd": "ssh gpu bash -s (stdin: kill agents, restart startup.py)",
                 "message": "Returned system to default startup state",
-                "cleanup": {"system_meta": local_cleanup, "remote_runtime": pre_cleanup},
+                "cleanup": {
+                    "system_meta": local_cleanup,
+                    "requeued_processing": requeued_processing,
+                    "ollama_clear": ollama_clear,
+                },
             }
         except subprocess.TimeoutExpired:
             return {
@@ -670,7 +925,11 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_
                 "message": "Returned system to default startup state",
                 "error": "timeout after 240s",
                 "cmd": "ssh gpu bash -s",
-                "cleanup": {"system_meta": local_cleanup, "remote_runtime": pre_cleanup},
+                "cleanup": {
+                    "system_meta": local_cleanup,
+                    "requeued_processing": requeued_processing,
+                    "ollama_clear": ollama_clear,
+                },
             }
 
     def _start_plan(
@@ -761,7 +1020,7 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_
                             "Cannot submit github_analyzer with REPO_URL because git is missing on GPU host. "
                             "Provide REPO_PATH to a local checkout, or install git on gpu host."
                         ),
-                        "stderr": detail[-4000:],
+                        "stderr": _clip_stdio(detail),
                     }
 
         cfg_payload = json.dumps(cfg_obj, separators=(",", ":"))
@@ -788,16 +1047,16 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_
             out = {
                 "ok": proc.returncode == 0,
                 "returncode": proc.returncode,
-                "stdout": proc.stdout[-4000:],
-                "stderr": proc.stderr[-4000:],
+                "stdout": _clip_stdio(proc.stdout),
+                "stderr": _clip_stdio(proc.stderr),
                 "cmd": "ssh gpu bash -s (stdin: write config JSON to temp file, run submit.py)",
             }
         except subprocess.TimeoutExpired as e:
             out = {
                 "ok": False,
                 "returncode": -1,
-                "stdout": (e.stdout or "")[-2000:] if isinstance(e.stdout, str) else "",
-                "stderr": (e.stderr or "")[-2000:] if isinstance(e.stderr, str) else "",
+                "stdout": _clip_stdio(e.stdout or "", STDIO_TIMEOUT_LIMIT) if isinstance(e.stdout, str) else "",
+                "stderr": _clip_stdio(e.stderr or "", STDIO_TIMEOUT_LIMIT) if isinstance(e.stderr, str) else "",
                 "cmd": "ssh gpu bash -s",
                 "error": "timeout after 120s",
             }
@@ -916,8 +1175,14 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_
         if parsed.path == "/api/control/cleanup_stale":
             self._send_json(self._cleanup_stale())
             return
+        if parsed.path == "/api/control/clear_ollama":
+            self._send_json(self._clear_ollama())
+            return
         if parsed.path == "/api/control/return_default":
             self._send_json(self._return_default())
+            return
+        if parsed.path == "/api/control/reset_gpu":
+            self._send_json(self._reset_gpu(str(payload.get("gpu_name", "")).strip()))
             return
         if parsed.path == "/api/control/resume_plan":
             self._send_json(self._resume_plan(str(payload.get("batch_id", "")).strip()))

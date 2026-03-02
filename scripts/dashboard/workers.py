@@ -95,6 +95,23 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
             thermal_cause = classify_thermal_cause(last_thermal_event.get("reasons"))
         elif thermal_reasons:
             thermal_cause = classify_thermal_cause(thermal_reasons)
+        loaded_model = str(hb.get("loaded_model") or "").strip()
+        runtime_placement = str(hb.get("runtime_placement") or "").strip()
+        runtime_group_id = str(hb.get("runtime_group_id") or "").strip()
+        model_loaded = bool(hb.get("model_loaded"))
+        if model_loaded and loaded_model:
+            if runtime_placement == "split_gpu":
+                host_display = f"{loaded_model} [split"
+                if runtime_group_id:
+                    host_display += f" {runtime_group_id}"
+                host_display += "]"
+            else:
+                host_display = loaded_model
+        elif model_loaded:
+            host_display = "[loaded]"
+        else:
+            host_display = "-"
+
         rows.append({
             "name": name,
             "gpu_id": hb.get("gpu_id"),
@@ -105,7 +122,7 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
             "loaded_tier": hb.get("loaded_tier"),
             "runtime_placement": hb.get("runtime_placement"),
             "runtime_group_id": hb.get("runtime_group_id"),
-            "host": hb.get("hostname", "-"),
+            "host": host_display,
             "updated_at": hb.get("last_updated"),
             "age_s": heartbeat_age_seconds(hb.get("last_updated")),
             "gpu_temp_c": hb.get("temperature_c"),

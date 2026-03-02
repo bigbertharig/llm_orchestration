@@ -53,6 +53,7 @@ textarea { width: 100%; min-height: 120px; font-family: "JetBrains Mono", monosp
         <button class="danger" onclick="killPlan()">Kill selected batch</button>
         <button class="danger" onclick="killAllActive()">Kill all active</button>
         <button class="warn" onclick="cleanupStale()">Cleanup stale</button>
+        <button class="warn" onclick="clearOllama()">Clear Ollama</button>
       </div>
       <div class="k">Kills selected/all active batches without shutting down workers.</div>
       <div class="row">
@@ -74,8 +75,16 @@ textarea { width: 100%; min-height: 120px; font-family: "JetBrains Mono", monosp
       <h3>Return To Default</h3>
       <div class="row">
         <button class="warn" onclick="returnDefault()">Reset to brain + 1 hot worker</button>
+        <select id="resetGpuSelect" style="min-width:120px;">
+          <option value="gpu-1">gpu-1</option>
+          <option value="gpu-2">gpu-2</option>
+          <option value="gpu-3">gpu-3</option>
+          <option value="gpu-4">gpu-4</option>
+          <option value="gpu-5">gpu-5</option>
+        </select>
+        <button class="warn" onclick="resetSelectedGpu()">Reset selected GPU</button>
       </div>
-      <div class="k">Stops duplicate/orphan agents and restarts via startup defaults.</div>
+      <div class="k">Full reset restarts startup defaults. Targeted reset requeues that GPU's tasks, clears its runtimes/split artifacts, and restarts only that worker.</div>
     </div>
 
     <div class="card">

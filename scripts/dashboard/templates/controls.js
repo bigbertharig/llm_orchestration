@@ -458,8 +458,20 @@ async function cleanupStale() {
   await refreshOptions();
 }
 
+async function clearOllama() {
+  showResult(await api('/api/control/clear_ollama', {}));
+  await refreshOptions();
+}
+
 async function returnDefault() {
   showResult(await api('/api/control/return_default', {}));
+  await refreshOptions();
+}
+
+async function resetSelectedGpu() {
+  const gpuName = document.getElementById('resetGpuSelect').value;
+  if (!gpuName) return;
+  showResult(await api('/api/control/reset_gpu', { gpu_name: gpuName }));
   await refreshOptions();
 }
 

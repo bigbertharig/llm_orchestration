@@ -259,13 +259,50 @@ def _count_existing_meta_tasks(shared_path: Path, command: str) -> int:
     return count
 
 
+def _get_split_member_gpus(agents_dir: Path) -> set[str]:
+    """Read model catalog and return set of GPU names that are split pair members.
+
+    These GPUs should be kept cold on startup to preserve split capacity.
+    """
+    split_members = set()
+    catalog_path = agents_dir / "models.catalog.json"
+    if not catalog_path.exists():
+        return split_members
+
+    try:
+        with open(catalog_path) as f:
+            catalog = json.load(f)
+        for model in catalog.get("models", []):
+            if not isinstance(model, dict):
+                continue
+            if str(model.get("placement", "")) != "split_gpu":
+                continue
+            for group in model.get("split_groups", []):
+                if not isinstance(group, dict):
+                    continue
+                for member in group.get("members", []):
+                    member_name = str(member).strip()
+                    if member_name:
+                        split_members.add(member_name)
+    except Exception:
+        pass
+
+    return split_members
+
+
 def _enqueue_startup_load_llm(
     shared_path: Path,
     created_by: str,
     count: int,
-    preferred_workers: list[str] | None = None,
+    available_workers: list[dict] | None = None,
+    agents_dir: Path | None = None,
 ):
-    """Insert N startup load_llm meta tasks into the public queue."""
+    """Insert N startup load_llm meta tasks into the public queue.
+
+    Placement-aware: prefers warming non-split GPUs first to preserve split
+    pair capacity. Split member GPUs (gpu-1, gpu-3, gpu-4, gpu-5 in typical config)
+    are warmed last if needed.
+    """
     if count <= 0:
         return
 
@@ -280,7 +317,27 @@ def _enqueue_startup_load_llm(
         )
         return
 
-    preferred_order = [str(w).strip() for w in (preferred_workers or []) if str(w).strip()]
+    # Build placement-aware preferred order:
+    # 1. Non-split GPUs first (e.g., gpu-2)
+    # 2. Split member GPUs last
+    split_members = set()
+    if agents_dir:
+        split_members = _get_split_member_gpus(agents_dir)
+
+    all_workers = []
+    if available_workers:
+        all_workers = [str(w.get("name", "")).strip() for w in available_workers if str(w.get("name", "")).strip()]
+
+    non_split_workers = [w for w in all_workers if w not in split_members]
+    split_workers = [w for w in all_workers if w in split_members]
+    preferred_order = non_split_workers + split_workers
+
+    if preferred_order:
+        print(
+            f"Startup warm policy: non-split first {non_split_workers}, "
+            f"split-member last {split_workers}"
+        )
+
     for idx in range(to_add):
         task = {
             "task_id": str(uuid.uuid4()),
@@ -635,7 +692,8 @@ def main():
             shared_path=Path(config["shared_path"]),
             created_by="startup",
             count=warm_target,
-            preferred_workers=["gpu-2"],
+            available_workers=gpus_to_start,
+            agents_dir=agents_dir,
         )
 
     # --- Running ---
