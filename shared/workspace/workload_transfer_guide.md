@@ -116,6 +116,34 @@ Recommended:
 
 ---
 
+## Repo Isolation Policy (Required)
+
+Do not use orchestration repo branches to carry plan/project code.  
+Treat each plan folder as its own repo.
+
+Rules:
+1. Keep `/home/bryan/llm_orchestration` on `main` for operations.
+2. Keep external project repos under `shared/plans/arms/<project_name>` or `shared/plans/shoulders/<project_name>` as independent git repos.
+3. For external upstream projects (for example `county-map`), keep them as direct clones/forks in their own arm repo.
+4. For rig-built integrations (for example `disaster-map-prep-suite`), create a separate arm repo owned by rig operators; do not keep it as a branch inside orchestration repo.
+5. If code from one project is reused to build another plan, copy/version it in the target plan repo with explicit attribution in that repo README.
+
+Decision matrix:
+1. Upstream project consumed mostly as-is -> `arm` repo tracking upstream/fork.
+2. Rig-specific adaptation of another project -> separate `arm` repo (new origin), not a shoulder.
+3. Reusable generic orchestration pattern -> `shoulder` repo.
+
+Safe setup pattern:
+```bash
+# orchestration runtime stays on main
+git -C /home/bryan/llm_orchestration rev-parse --abbrev-ref HEAD
+
+# initialize local-only plan repo when needed
+git -C /home/bryan/llm_orchestration/shared/plans/arms/<project_name> init -b main
+```
+
+---
+
 ## Plan Format (Required Contract)
 
 Use `workspace/PLAN_FORMAT.md` as source of truth.
