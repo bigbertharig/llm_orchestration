@@ -65,6 +65,28 @@ python scripts/build_disaster_aggregates.py \
 
 Use this when the suite is developed in `feature/disaster-map-prep-suite` and mirrored into rig plans.
 
+### Operator Shortcut (Authoritative)
+
+When operator says: `lets work on disaster map`
+
+Always do this sequence first:
+
+1. Pull latest branch content from `origin/feature/disaster-map-prep-suite`.
+2. Run:
+```bash
+/home/bryan/llm_orchestration/scripts/sync_disaster_map_prep_suite.sh
+```
+3. Confirm files exist under:
+`/media/bryan/shared/plans/arms/disaster-map-prep-suite`
+4. Submit using wrapper:
+```bash
+python3 /home/bryan/llm_orchestration/scripts/submit.py \
+  /media/bryan/shared/plans/arms/disaster-map-prep-suite \
+  --config '{"COUNTY_MAP_DATA_ROOT":"/data/county-map-data","MIN_YEAR":"2000"}'
+```
+
+Do not submit from the source folder directly; always submit from mirrored `shared/plans/arms/disaster-map-prep-suite`.
+
 1. Sync plan files from branch into rig plan location:
 ```bash
 /home/bryan/llm_orchestration/scripts/sync_disaster_map_prep_suite.sh
