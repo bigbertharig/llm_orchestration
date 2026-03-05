@@ -121,12 +121,6 @@ git -C /home/bryan/llm_orchestration rev-parse --abbrev-ref HEAD
 # must print: main
 ```
 
-Private backup sync (recommended after meaningful changes):
-
-```bash
-/home/bryan/llm_orchestration/scripts/sync_private_backup.sh
-```
-
 ### Default (authoritative): Wrapper submit path
 
 ```bash
