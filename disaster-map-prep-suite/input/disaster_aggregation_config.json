@@ -1,0 +1,110 @@
+{
+  "_description": "Config for building reusable disaster aggregates from events + event_areas.",
+  "_schema_version": "1.0.0",
+  "windows": [10, 20],
+  "hazards": {
+    "earthquakes": {
+      "enabled": true,
+      "event_file": "events.parquet",
+      "event_id_col": "loc_id",
+      "year_col": "year",
+      "source_label": "earthquakes_events",
+      "metrics": [
+        { "output": "max_magnitude", "source": "magnitude", "agg": "max" },
+        { "output": "avg_magnitude", "source": "magnitude", "agg": "avg" },
+        { "output": "avg_depth_km", "source": "depth_km", "agg": "avg" },
+        { "output": "deaths", "source": "deaths", "agg": "sum" },
+        { "output": "injuries", "source": "injuries", "agg": "sum" },
+        { "output": "damage_millions", "source": "damage_millions", "agg": "sum" }
+      ]
+    },
+    "volcanoes": {
+      "enabled": true,
+      "event_file": "events.parquet",
+      "event_id_col": "loc_id",
+      "year_col": "year",
+      "source_label": "volcanoes_events",
+      "metrics": [
+        { "output": "max_vei", "source": "VEI", "agg": "max" },
+        { "output": "avg_vei", "source": "VEI", "agg": "avg" },
+        { "output": "avg_duration_days", "source": "duration_days", "agg": "avg" },
+        { "output": "deaths", "source": "deaths", "agg": "sum" },
+        { "output": "injuries", "source": "injuries", "agg": "sum" }
+      ]
+    },
+    "tsunamis": {
+      "enabled": true,
+      "event_file": "events.parquet",
+      "event_id_col": "loc_id",
+      "year_col": "year",
+      "source_label": "tsunamis_events",
+      "metrics": [
+        { "output": "max_water_height_m", "source": "max_water_height_m", "agg": "max" },
+        { "output": "avg_water_height_m", "source": "max_water_height_m", "agg": "avg" },
+        { "output": "deaths", "source": "deaths", "agg": "sum" },
+        { "output": "damage_millions", "source": "damage_millions", "agg": "sum" }
+      ]
+    },
+    "hurricanes": {
+      "enabled": true,
+      "event_file": "storms.parquet",
+      "event_id_col": "loc_id",
+      "year_col": "year",
+      "source_label": "hurricanes_storms",
+      "metrics": [
+        { "output": "max_category", "source": "max_category", "agg": "max" },
+        { "output": "max_wind_kt", "source": "max_wind_kt", "agg": "max" }
+      ]
+    },
+    "tornadoes": {
+      "enabled": true,
+      "event_file": "events.parquet",
+      "event_id_col": "loc_id",
+      "year_col": "year",
+      "source_label": "tornadoes_events",
+      "metrics": [
+        { "output": "max_scale", "source": "magnitude", "agg": "max" },
+        { "output": "avg_scale", "source": "magnitude", "agg": "avg" },
+        { "output": "total_track_miles", "source": "tornado_length_mi", "agg": "sum" },
+        { "output": "deaths", "source": "deaths_direct", "agg": "sum" },
+        { "output": "injuries", "source": "injuries_direct", "agg": "sum" },
+        { "output": "damage_usd", "source": "damage_property", "agg": "sum" }
+      ]
+    },
+    "floods": {
+      "enabled": true,
+      "event_file": "events.parquet",
+      "event_id_col": "loc_id",
+      "year_col": "year",
+      "source_label": "floods_events",
+      "metrics": [
+        { "output": "max_severity", "source": "severity", "agg": "max" },
+        { "output": "avg_severity", "source": "severity", "agg": "avg" },
+        { "output": "total_area_km2", "source": "area_km2", "agg": "sum" },
+        { "output": "avg_duration_days", "source": "duration_days", "agg": "avg" },
+        { "output": "deaths", "source": "deaths", "agg": "sum" },
+        { "output": "damage_usd", "source": "damage_usd", "agg": "sum" }
+      ]
+    },
+    "landslides": {
+      "enabled": true,
+      "event_file": "events.parquet",
+      "event_id_col": "loc_id",
+      "year_col": "year",
+      "source_label": "landslides_events",
+      "metrics": [
+        { "output": "deaths", "source": "deaths", "agg": "sum" },
+        { "output": "injuries", "source": "injuries", "agg": "sum" },
+        { "output": "damage_usd", "source": "damage_usd", "agg": "sum" }
+      ]
+    },
+    "wildfires": {
+      "enabled": false,
+      "event_file": "",
+      "event_id_col": "loc_id",
+      "year_col": "year",
+      "source_label": "wildfires_split_sources",
+      "metrics": []
+    }
+  }
+}

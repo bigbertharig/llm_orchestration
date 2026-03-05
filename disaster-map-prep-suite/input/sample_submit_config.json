@@ -1,0 +1,5 @@
+{
+  "COUNTY_MAP_DATA_ROOT": "/data/county-map-data",
+  "PLAN_PATH": "/repo/disaster-map-prep-suite",
+  "MIN_YEAR": "2000"
+}
