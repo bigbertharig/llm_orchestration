@@ -92,6 +92,41 @@ The shared drive mounts at different paths depending on the host:
 
 The submit script handles path translation automatically. Always use the path appropriate for the host you're running on.
 
+### Branch Safety (Required)
+
+The orchestration repo contains runtime-critical paths like `shared/agents/` and `shared/workspace/`.  
+Git branch checkout replaces the working tree with that branch snapshot. If a branch does not contain those paths, checkout will remove them locally.
+
+Rules:
+1. Keep `/home/bryan/llm_orchestration` on `main` for rig operations.
+2. Do not run `git switch`/`git checkout` to feature branches in that repo.
+3. Use a separate git worktree per feature branch.
+
+Current safe layout:
+- Orchestration runtime repo: `/home/bryan/llm_orchestration` (`main`)
+- Disaster-map feature repo: `/home/bryan/llm_orchestration_disaster_map` (`feature/disaster-map-prep-suite`)
+
+Create/use worktree:
+
+```bash
+git -C /home/bryan/llm_orchestration worktree add \
+  /home/bryan/llm_orchestration_disaster_map \
+  feature/disaster-map-prep-suite
+```
+
+Verify before running orchestration commands:
+
+```bash
+git -C /home/bryan/llm_orchestration rev-parse --abbrev-ref HEAD
+# must print: main
+```
+
+Private backup sync (recommended after meaningful changes):
+
+```bash
+/home/bryan/llm_orchestration/scripts/sync_private_backup.sh
+```
+
 ### Default (authoritative): Wrapper submit path
 
 ```bash
