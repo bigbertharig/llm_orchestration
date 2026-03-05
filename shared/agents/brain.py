@@ -196,6 +196,41 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
         self.split_wedge_reclaims_this_hour: Dict[str, List[datetime]] = {}
 
         # =============================================================================
+        # Thermal Recovery Controller State
+        # Brain-level escalation for sustained CPU/GPU overheat conditions.
+        # Monitors GPU heartbeats for thermal incidents and issues targeted resets.
+        # =============================================================================
+        self.thermal_recovery_config = self.config.get("thermal_recovery", {})
+        # Thresholds from config (with sane defaults)
+        self.thermal_recovery_trigger_seconds = int(
+            self.thermal_recovery_config.get("cpu_overheat_trigger_seconds", 300)
+        )
+        self.thermal_recovery_reset_interval_seconds = int(
+            self.thermal_recovery_config.get("targeted_reset_interval_seconds", 60)
+        )
+        self.thermal_recovery_max_resets = int(
+            self.thermal_recovery_config.get("max_targeted_resets_per_incident", 5)
+        )
+        self.thermal_recovery_full_reset_cooldown = int(
+            self.thermal_recovery_config.get("full_reset_cooldown_seconds", 300)
+        )
+        self.thermal_recovery_enable_full_reset = bool(
+            self.thermal_recovery_config.get("enable_full_reset_escalation", True)
+        )
+        self.thermal_recovery_same_gpu_backoff = int(
+            self.thermal_recovery_config.get("same_gpu_reset_backoff_seconds", 120)
+        )
+        # Active incident tracking (brain-level view across all GPUs)
+        self.thermal_recovery_active_incident_id: Optional[str] = None
+        self.thermal_recovery_incident_started_at: Optional[float] = None
+        self.thermal_recovery_resets_issued: int = 0
+        self.thermal_recovery_last_reset_at: Optional[float] = None
+        self.thermal_recovery_last_reset_gpu: Optional[str] = None
+        self.thermal_recovery_full_reset_at: Optional[float] = None
+        # Per-GPU reset tracking to enforce backoff
+        self.thermal_recovery_gpu_last_reset: Dict[str, float] = {}
+
+        # =============================================================================
         # Auto-Return to Default Policy
         # When system is idle, automatically normalize to default state
         # Phase tracker: None -> "normalizing" -> "default_ready"

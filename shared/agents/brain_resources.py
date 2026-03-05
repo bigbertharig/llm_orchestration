@@ -145,6 +145,11 @@ class BrainResourceMixin:
             "target_model": task.get("target_model"),
             "group_id": task.get("group_id"),
             "candidate_groups": task.get("candidate_groups"),
+            # Include worker targeting fields so targeted unload/load tasks
+            # for different GPUs do not dedupe into each other.
+            "candidate_workers": task.get("candidate_workers"),
+            "target_worker": task.get("target_worker"),
+            "target_gpu": task.get("target_gpu"),
         }
         return json.dumps(key, sort_keys=True)
 
@@ -215,16 +220,21 @@ class BrainResourceMixin:
                 f"Skipping {command} — already exists in queue/processing", {})
             return
 
+        # Brain-level system commands (executed by brain, not workers)
+        BRAIN_SYSTEM_COMMANDS = {"orchestrator_full_reset"}
+
+        is_brain_command = command in BRAIN_SYSTEM_COMMANDS
+
         task = {
             "task_id": str(uuid.uuid4()),
-            "type": "meta",
+            "type": "system" if is_brain_command else "meta",
             "command": command,
             "batch_id": "system",
             "name": command,
             "priority": 10,  # High priority
-            "task_class": "meta",
+            "task_class": "brain" if is_brain_command else "meta",
             "depends_on": [],
-            "executor": "worker",
+            "executor": "brain" if is_brain_command else "worker",
             "status": "pending",
             "created_at": datetime.now().isoformat(),
             "created_by": self.name,
@@ -1097,6 +1107,198 @@ class BrainResourceMixin:
                 {"files": processed},
             )
 
+    def _check_thermal_recovery_escalation(self, gpu_states: Dict[str, Dict[str, Any]]):
+        """Brain-level thermal recovery controller.
+
+        Monitors GPU heartbeats for sustained CPU overheat conditions and issues
+        targeted reset_gpu_runtime tasks to recover. Escalates to full orchestrator
+        reset if targeted resets don't resolve the issue.
+
+        Trigger: any GPU with cpu_temp_c >= warning AND sustained_seconds >= threshold
+        Actions:
+          1. Issue one targeted reset_gpu_runtime every reset_interval seconds
+          2. Target selection: hottest eligible GPU first
+          3. Max targeted resets per incident: configurable (default 5)
+          4. If still overheated after max resets: trigger full orchestrator reset
+        """
+        now = time.time()
+
+        # Find GPUs with active thermal incidents (sustained overheat)
+        incident_gpus = []
+        for gpu_name, state in gpu_states.items():
+            incident_id = state.get("thermal_overheat_incident_id")
+            sustained_seconds = int(state.get("thermal_overheat_sustained_seconds", 0) or 0)
+            cpu_temp = state.get("cpu_temp_c")
+
+            if incident_id and sustained_seconds >= self.thermal_recovery_trigger_seconds:
+                incident_gpus.append({
+                    "gpu": gpu_name,
+                    "incident_id": incident_id,
+                    "sustained_seconds": sustained_seconds,
+                    "cpu_temp_c": cpu_temp,
+                    "gpu_temp_c": state.get("temperature_c"),
+                })
+
+        # No active thermal incidents meeting trigger threshold
+        if not incident_gpus:
+            # Clear brain-level incident if it was active
+            if self.thermal_recovery_active_incident_id:
+                self.log_decision(
+                    "THERMAL_INCIDENT_BRAIN_CLEARED",
+                    f"Thermal incident cleared: {self.thermal_recovery_active_incident_id}",
+                    {
+                        "incident_id": self.thermal_recovery_active_incident_id,
+                        "total_resets_issued": self.thermal_recovery_resets_issued,
+                        "duration_seconds": int(now - (self.thermal_recovery_incident_started_at or now)),
+                    },
+                )
+                self.thermal_recovery_active_incident_id = None
+                self.thermal_recovery_incident_started_at = None
+                self.thermal_recovery_resets_issued = 0
+                self.thermal_recovery_last_reset_at = None
+                self.thermal_recovery_last_reset_gpu = None
+            return
+
+        # Sort by hottest CPU temp first (descending)
+        incident_gpus.sort(key=lambda x: x.get("cpu_temp_c") or 0, reverse=True)
+
+        # Start or continue brain-level incident tracking
+        # Use the first incident_id from hottest GPU as canonical
+        canonical_incident_id = incident_gpus[0]["incident_id"]
+        if self.thermal_recovery_active_incident_id != canonical_incident_id:
+            # New incident started
+            self.thermal_recovery_active_incident_id = canonical_incident_id
+            self.thermal_recovery_incident_started_at = now
+            self.thermal_recovery_resets_issued = 0
+            self.thermal_recovery_last_reset_at = None
+            self.thermal_recovery_last_reset_gpu = None
+            self.log_decision(
+                "THERMAL_INCIDENT_BRAIN_START",
+                f"Brain tracking thermal incident: {canonical_incident_id}",
+                {
+                    "incident_id": canonical_incident_id,
+                    "affected_gpus": [g["gpu"] for g in incident_gpus],
+                    "hottest_cpu_c": incident_gpus[0].get("cpu_temp_c"),
+                    "trigger_threshold_seconds": self.thermal_recovery_trigger_seconds,
+                },
+            )
+
+        # Check if we've exceeded max targeted resets
+        if self.thermal_recovery_resets_issued >= self.thermal_recovery_max_resets:
+            # Escalate to full orchestrator reset if enabled
+            if self.thermal_recovery_enable_full_reset:
+                # Check cooldown
+                if self.thermal_recovery_full_reset_at:
+                    elapsed_since_full = now - self.thermal_recovery_full_reset_at
+                    if elapsed_since_full < self.thermal_recovery_full_reset_cooldown:
+                        remaining = int(self.thermal_recovery_full_reset_cooldown - elapsed_since_full)
+                        self.log_decision(
+                            "THERMAL_FULL_RESET_COOLDOWN",
+                            f"Full reset cooldown active ({remaining}s remaining)",
+                            {
+                                "incident_id": canonical_incident_id,
+                                "cooldown_seconds": remaining,
+                                "resets_issued": self.thermal_recovery_resets_issued,
+                            },
+                        )
+                        return
+
+                # Issue full orchestrator reset
+                self.log_decision(
+                    "THERMAL_FULL_RESET_TRIGGERED",
+                    f"Thermal recovery escalating to full orchestrator reset",
+                    {
+                        "incident_id": canonical_incident_id,
+                        "resets_issued": self.thermal_recovery_resets_issued,
+                        "max_resets": self.thermal_recovery_max_resets,
+                        "affected_gpus": [g["gpu"] for g in incident_gpus],
+                    },
+                )
+                self._insert_resource_task(
+                    "orchestrator_full_reset",
+                    meta={
+                        "reason": "thermal_recovery_escalation",
+                        "incident_id": canonical_incident_id,
+                        "resets_attempted": self.thermal_recovery_resets_issued,
+                    },
+                )
+                self.thermal_recovery_full_reset_at = now
+            else:
+                self.log_decision(
+                    "THERMAL_ESCALATION_DISABLED",
+                    f"Max targeted resets reached but full reset disabled",
+                    {
+                        "incident_id": canonical_incident_id,
+                        "resets_issued": self.thermal_recovery_resets_issued,
+                    },
+                )
+            return
+
+        # Check if we're within reset interval
+        if self.thermal_recovery_last_reset_at:
+            elapsed_since_reset = now - self.thermal_recovery_last_reset_at
+            if elapsed_since_reset < self.thermal_recovery_reset_interval_seconds:
+                # Still within interval, no action
+                return
+
+        # Select target GPU for reset (hottest that's not in backoff)
+        target_gpu = None
+        for gpu_info in incident_gpus:
+            gpu_name = gpu_info["gpu"]
+            last_reset = self.thermal_recovery_gpu_last_reset.get(gpu_name)
+            if last_reset:
+                elapsed = now - last_reset
+                if elapsed < self.thermal_recovery_same_gpu_backoff:
+                    # This GPU is in backoff
+                    continue
+            target_gpu = gpu_name
+            break
+
+        if not target_gpu:
+            # All GPUs in backoff
+            self.log_decision(
+                "THERMAL_RESET_ALL_BACKOFF",
+                f"All overheated GPUs in reset backoff",
+                {
+                    "incident_id": canonical_incident_id,
+                    "gpus": [g["gpu"] for g in incident_gpus],
+                    "backoff_seconds": self.thermal_recovery_same_gpu_backoff,
+                },
+            )
+            return
+
+        # Issue targeted reset_gpu_runtime task
+        self.thermal_recovery_resets_issued += 1
+        self.thermal_recovery_last_reset_at = now
+        self.thermal_recovery_last_reset_gpu = target_gpu
+        self.thermal_recovery_gpu_last_reset[target_gpu] = now
+
+        target_info = next((g for g in incident_gpus if g["gpu"] == target_gpu), {})
+
+        self.log_decision(
+            "THERMAL_TARGETED_RESET_ISSUED",
+            f"Issuing targeted reset for {target_gpu} (reset {self.thermal_recovery_resets_issued}/{self.thermal_recovery_max_resets})",
+            {
+                "incident_id": canonical_incident_id,
+                "target_gpu": target_gpu,
+                "reset_number": self.thermal_recovery_resets_issued,
+                "max_resets": self.thermal_recovery_max_resets,
+                "cpu_temp_c": target_info.get("cpu_temp_c"),
+                "gpu_temp_c": target_info.get("gpu_temp_c"),
+                "sustained_seconds": target_info.get("sustained_seconds"),
+            },
+        )
+
+        self._insert_resource_task(
+            "reset_gpu_runtime",
+            meta={
+                "target_worker": target_gpu,
+                "reason": "thermal_recovery",
+                "incident_id": canonical_incident_id,
+                "reset_number": self.thermal_recovery_resets_issued,
+            },
+        )
+
     def _score_split_pair_for_promotion(
         self,
         group: Dict[str, Any],
@@ -1843,11 +2045,17 @@ class BrainResourceMixin:
         # Process any pending recovery fallback signals first
         self._process_recovery_fallback_signals()
 
+        # Get GPU agent states from heartbeats (moved earlier for thermal recovery)
+        gpu_states = self._get_gpu_states()
+
+        # Check for thermal recovery escalation (brain-level)
+        # This takes priority over other resource decisions
+        self._check_thermal_recovery_escalation(gpu_states)
+
         active_gpus = [g for g in gpu_status if g["util_pct"] > 10 or g["mem_used_mb"] > 1000]
         total_power = sum(g["power_w"] for g in gpu_status)
 
-        # Get GPU agent states from heartbeats
-        gpu_states = self._get_gpu_states()
+        # gpu_states already retrieved above for thermal recovery
         gpus_with_model = [g for g, s in gpu_states.items() if s.get("model_loaded", False)]
         gpus_without_model = [g for g, s in gpu_states.items() if not s.get("model_loaded", False)]
         split_loaded = [
@@ -1955,6 +2163,23 @@ class BrainResourceMixin:
         # enqueue a targeted load_split_llm task before generic hot/cold balancing.
         required_max_tier = int(queue_stats.get("llm_max_tier", 0) or 0)
         split_needed = int(queue_stats.get("llm_split_required", 0) or 0) > 0
+
+        # Split convergence tracking for suppressing generic load_llm
+        # These are set inside the split logic block and used to prevent useless
+        # generic load_llm attempts when split capacity is already being built.
+        split_tier_requested = split_needed or required_max_tier >= 2
+        split_capacity_short = False
+        split_convergence_active = False
+
+        # Use demand_window (queue + processing + private) for suppression decisions.
+        # This catches cases where split-tier work is in processing or private tasks,
+        # not just in the public queue.
+        total_llm_demand = int(demand_window.get("total_llm", 0) or 0)
+        split_llm_demand = int(demand_window.get("split_llm", 0) or 0)
+        demand_is_split_only = (
+            total_llm_demand > 0 and split_llm_demand >= total_llm_demand
+        )
+
         if (split_needed or required_max_tier >= 2):
             split_model_demand = queue_stats.get("llm_split_model_demand", {})
             preferred_split_models: List[str] = []
@@ -2018,6 +2243,12 @@ class BrainResourceMixin:
                         len(viable_groups),
                         max(1, llm_split_required_count),
                     )
+
+                    # Update suppression tracking for generic load_llm
+                    # split_capacity_short: we need more groups than we have ready
+                    # split_convergence_active: we're already building capacity (pending/wedged)
+                    split_capacity_short = bool(viable_groups) and len(ready_groups) < desired_group_count
+                    split_convergence_active = split_capacity_short and bool(pending_groups or wedged_groups)
 
                     unavailable_group_ids = ready_groups | pending_groups
                     missing_groups = [
@@ -2260,6 +2491,14 @@ class BrainResourceMixin:
                     pass
 
         if not has_pending_resource:
+            # Suppress generic load_llm when ALL LLM demand (queue+processing+private)
+            # is split-tier and split capacity is being built. This uses demand_window
+            # to catch split work in processing or private tasks, not just public queue.
+            # Mixed demand (any single-tier LLM work) allows generic load_llm.
+            suppress_generic_single_load = (
+                demand_is_split_only and (split_capacity_short or split_convergence_active)
+            )
+
             # Need to load LLM? LLM tasks waiting but no GPUs are hot
             # Only consider healthy cold GPUs as candidates
             if (
@@ -2267,11 +2506,28 @@ class BrainResourceMixin:
                 and len(gpus_with_model) < self.max_hot_workers
                 and len(healthy_cold_gpus) > 0
             ):
-                self.log_decision("RESOURCE_DECISION",
-                    f"LLM tasks waiting ({queue_stats['llm']}) and hot GPUs below cap "
-                    f"({len(gpus_with_model)}/{self.max_hot_workers}) - inserting load_llm task",
-                    {"llm_tasks": queue_stats["llm"], "cold_gpus": healthy_cold_gpus, "hot_gpus": gpus_with_model})
-                self._insert_resource_task("load_llm")
+                if not suppress_generic_single_load:
+                    self.log_decision("RESOURCE_DECISION",
+                        f"LLM tasks waiting ({queue_stats['llm']}) and hot GPUs below cap "
+                        f"({len(gpus_with_model)}/{self.max_hot_workers}) - inserting load_llm task",
+                        {"llm_tasks": queue_stats["llm"], "cold_gpus": healthy_cold_gpus, "hot_gpus": gpus_with_model})
+                    self._insert_resource_task("load_llm")
+                else:
+                    # Log suppression inside this branch - does NOT block later branches
+                    self.log_decision(
+                        "RESOURCE_DECISION",
+                        "Suppressing generic load_llm: split-only demand with capacity being built",
+                        {
+                            "split_capacity_short": split_capacity_short,
+                            "split_convergence_active": split_convergence_active,
+                            "total_llm_demand": total_llm_demand,
+                            "split_llm_demand": split_llm_demand,
+                            "demand_is_split_only": demand_is_split_only,
+                            "llm_tasks_public_queue": queue_stats["llm"],
+                            "cold_gpus": healthy_cold_gpus,
+                            "hot_gpus": gpus_with_model,
+                        },
+                    )
 
             # Mixed workload: keep at least one hot GPU for llm while balancing script pressure.
             elif queue_stats["llm"] > 0 and queue_stats["script"] > 0:
@@ -2283,6 +2539,7 @@ class BrainResourceMixin:
                 llm_to_script = llm_tasks / max(script_tasks, 1)
 
                 # If llm backlog is dominant and we have healthy cold GPUs, add hot capacity.
+                # Note: Mixed queues are NOT split-only, so suppression does not apply here.
                 if llm_to_script >= 1.5 and cold > 0 and hot < self.max_hot_workers:
                     self.log_decision("RESOURCE_DECISION",
                         f"Mixed queue favors LLM ({llm_tasks} llm vs {script_tasks} script) - inserting load_llm task",

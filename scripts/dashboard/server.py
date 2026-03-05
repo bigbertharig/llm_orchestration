@@ -883,54 +883,31 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_
     def _return_default(self) -> dict[str, Any]:
         local_cleanup = self._cleanup_system_meta_artifacts()
         requeued_processing = self._requeue_processing_tasks_for_reset()
-        ollama_clear = self._clear_ollama()
-        # Pass commands via stdin so pkill can't match its own shell's cmdline.
-        script = (
-            "pkill -f /mnt/shared/agents/brain.py || true\n"
-            "pkill -f /mnt/shared/agents/gpu.py || true\n"
-            "pkill -f /mnt/shared/agents/startup.py || true\n"
-            "sleep 2\n"
-            "nohup /home/bryan/ml-env/bin/python /mnt/shared/agents/startup.py "
-            "--config /mnt/shared/agents/config.json "
-            ">> /mnt/shared/logs/startup-manual.log 2>&1 < /dev/null &\n"
-            "sleep 4\n"
-            "pgrep -af startup.py || true\n"
-            "pgrep -af brain.py || true\n"
-            "pgrep -af gpu.py || true\n"
-        )
-        try:
-            proc = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "gpu", "bash", "-s"],
-                input=script,
-                capture_output=True,
-                text=True,
-                timeout=240,
-            )
-            return {
-                "ok": proc.returncode == 0,
-                "returncode": proc.returncode,
-                "stdout": _clip_stdio(proc.stdout),
-                "stderr": _clip_stdio(proc.stderr),
-                "cmd": "ssh gpu bash -s (stdin: kill agents, restart startup.py)",
-                "message": "Returned system to default startup state",
-                "cleanup": {
-                    "system_meta": local_cleanup,
-                    "requeued_processing": requeued_processing,
-                    "ollama_clear": ollama_clear,
-                },
-            }
-        except subprocess.TimeoutExpired:
-            return {
-                "ok": False,
-                "message": "Returned system to default startup state",
-                "error": "timeout after 240s",
-                "cmd": "ssh gpu bash -s",
-                "cleanup": {
-                    "system_meta": local_cleanup,
-                    "requeued_processing": requeued_processing,
-                    "ollama_clear": ollama_clear,
-                },
-            }
+        scripts_dir = Path(__file__).resolve().parent.parent
+        script = scripts_dir / "return_default.py"
+        cmd = f"python3 {shlex.quote(str(script))} --json"
+        out = run_shell(cmd, timeout_s=360)
+        parsed: dict[str, Any] = {}
+        if out.get("stdout"):
+            try:
+                candidate = json.loads(str(out.get("stdout") or "").strip().splitlines()[-1])
+                if isinstance(candidate, dict):
+                    parsed = candidate
+            except Exception:
+                parsed = {}
+        return {
+            "ok": bool(out.get("ok")) and bool(parsed.get("ok", out.get("ok"))),
+            "returncode": out.get("returncode"),
+            "stdout": _clip_stdio(out.get("stdout")),
+            "stderr": _clip_stdio(out.get("stderr")),
+            "cmd": cmd,
+            "message": str(parsed.get("message") or out.get("message") or "Returned system to default startup state"),
+            "reset": parsed,
+            "cleanup": {
+                "system_meta": local_cleanup,
+                "requeued_processing": requeued_processing,
+            },
+        }
 
     def _start_plan(
         self,

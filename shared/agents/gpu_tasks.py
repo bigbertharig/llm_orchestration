@@ -513,6 +513,85 @@ class GPUTaskMixin:
         # explicitly transitions them to hot.
         return ['meta', 'script']
 
+    def _scan_emergency_meta_tasks(self, allowed_commands: set) -> List[Dict]:
+        """Scan queue for emergency meta-tasks that bypass thermal pause.
+
+        These are high-priority tasks issued by the brain's thermal recovery controller
+        that should run even when the GPU is thermally paused.
+
+        Args:
+            allowed_commands: Set of command strings that are allowed through
+
+        Returns:
+            List of claimed emergency tasks (at most one per command type)
+        """
+        claimed = []
+        seen_commands = set()
+
+        for task_file in sorted(self.queue_path.glob("*.json")):
+            if str(task_file).endswith('.lock'):
+                continue
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+
+                # Only process meta tasks
+                if task.get("task_class") != "meta":
+                    continue
+
+                command = str(task.get("command", ""))
+                if command not in allowed_commands:
+                    continue
+
+                # Dedup: only one per command type per cycle
+                if command in seen_commands:
+                    continue
+
+                # Check target worker matches this GPU
+                # Brain uses target_worker; support target_gpu as fallback for compatibility
+                target_worker = task.get("target_worker") or task.get("target_gpu")
+                if target_worker and target_worker != self.name:
+                    self.logger.debug(
+                        f"THERMAL_EMERGENCY_SKIP: task {task.get('task_id', '')[:8]} "
+                        f"targeted for {target_worker}, not {self.name}"
+                    )
+                    continue
+
+                # Try to claim it
+                lock_file = str(task_file) + ".lock"
+                lock = FileLock(lock_file, timeout=1)
+
+                try:
+                    with lock:
+                        if not task_file.exists():
+                            continue
+
+                        # Re-read inside lock
+                        with open(task_file) as f:
+                            task = json.load(f)
+
+                        # Move to processing
+                        dest = self.processing_path / task_file.name
+                        task_file.rename(dest)
+
+                        self.logger.warning(
+                            f"THERMAL_EMERGENCY_CLAIMED: command={command} "
+                            f"task_id={task.get('task_id', '')[:8]} "
+                            f"incident_id={getattr(self, 'thermal_overheat_incident_id', 'none')}"
+                        )
+
+                        claimed.append(task)
+                        seen_commands.add(command)
+
+                except Exception as e:
+                    self.logger.debug(f"Could not claim emergency task: {e}")
+                    continue
+
+            except Exception:
+                continue
+
+        return claimed
+
     def _can_claim_meta_task(self, task: Dict) -> tuple[bool, str]:
         """Enforce strict runtime state machine rules for meta tasks.
 
@@ -603,6 +682,14 @@ class GPUTaskMixin:
                 return True, ""
             if self.runtime_group_id != target_group and not self._is_runtime_wedged():
                 return False, f"group_mismatch:{self.runtime_group_id}"
+            return True, ""
+
+        if command in ("reset_gpu_runtime", "reset_split_runtime"):
+            # Thermal recovery reset tasks are targeted to specific workers
+            # Brain uses target_worker; support target_gpu as fallback for compatibility
+            target_worker = task.get("target_worker") or task.get("target_gpu")
+            if target_worker and target_worker != self.name:
+                return False, f"target_mismatch:{target_worker}"
             return True, ""
 
         # Unknown meta command: allow claim so it can fail explicitly.
@@ -707,9 +794,27 @@ class GPUTaskMixin:
         """
         Visit the board: claim as many tasks as fit within VRAM budget.
         Returns list of claimed tasks.
+
+        During thermal pause, only emergency meta-tasks are allowed through:
+        - reset_gpu_runtime: Full local reset for this GPU
+        - reset_split_runtime: Reset split runtime (if this GPU is a member)
+        These are issued by the brain's thermal recovery controller.
         """
+        # Emergency meta-tasks allowed during thermal pause
+        THERMAL_EMERGENCY_META_COMMANDS = {"reset_gpu_runtime", "reset_split_runtime"}
+
         if self.thermal_pause_active:
             remaining = max(0, int(self.thermal_pause_until - time.time()))
+
+            # Check for emergency meta-tasks before blocking
+            emergency_tasks = self._scan_emergency_meta_tasks(THERMAL_EMERGENCY_META_COMMANDS)
+            if emergency_tasks:
+                self.logger.warning(
+                    f"THERMAL_EMERGENCY_CLAIM: found {len(emergency_tasks)} emergency meta-task(s) "
+                    f"during thermal pause, allowing through"
+                )
+                return emergency_tasks
+
             self.logger.warning(
                 f"TASKS_THERMAL_PAUSED: skip claiming new work for {remaining}s "
                 f"reasons={self.thermal_pause_reasons}"
@@ -1371,6 +1476,114 @@ class GPUTaskMixin:
                 "orphan_runners_killed": orphan_runners_killed,
                 "max_vram_used_mb": 0,
             }
+        elif command == "reset_gpu_runtime":
+            # Emergency thermal recovery: full local reset
+            # Called by brain's thermal recovery controller during sustained overheat
+            from gpu_constants import RUNTIME_STATE_RESETTING_THERMAL, RUNTIME_STATE_COLD
+            task_id = task.get("task_id")
+            incident_id = task.get("incident_id", "unknown")
+            reason = f"thermal_recovery:incident={incident_id}"
+
+            self.logger.warning(
+                f"THERMAL_RESET_GPU_RUNTIME: executing full local reset "
+                f"incident_id={incident_id} task_id={task_id[:8] if task_id else 'none'}"
+            )
+
+            # Enter thermal reset state (blocks regular work claims)
+            prev_state = self.runtime_state
+            self.runtime_state = RUNTIME_STATE_RESETTING_THERMAL
+            self._write_heartbeat_now()
+
+            self._touch_meta_task(phase="reset_gpu_runtime")
+            self._full_local_reset(reason)
+
+            # Verify we ended up in cold state
+            if self.runtime_state != RUNTIME_STATE_COLD:
+                self.logger.error(
+                    f"THERMAL_RESET_GPU_RUNTIME: expected cold state after reset, "
+                    f"got {self.runtime_state}"
+                )
+                self.runtime_state = RUNTIME_STATE_COLD  # Force cold state
+            self._write_heartbeat_now()
+
+            # Update incident tracking
+            self.thermal_recovery_reset_count = getattr(self, 'thermal_recovery_reset_count', 0) + 1
+            self.thermal_recovery_last_reset_at = time.time()
+
+            result = {
+                "success": True,
+                "output": f"GPU runtime reset complete for thermal recovery incident={incident_id}",
+                "runtime_state": self.runtime_state,
+                "previous_state": prev_state,
+                "model_loaded": self.model_loaded,
+                "thermal_recovery_reset_count": self.thermal_recovery_reset_count,
+                "worker": self.name,
+                "max_vram_used_mb": 0,
+            }
+
+            # Log telemetry event for thermal reset result
+            self.logger.info(
+                f"THERMAL_TARGETED_RESET_RESULT: success={result['success']} "
+                f"incident_id={incident_id} worker={self.name} "
+                f"prev_state={prev_state} final_state={self.runtime_state} "
+                f"reset_count={self.thermal_recovery_reset_count}"
+            )
+        elif command == "reset_split_runtime":
+            # Emergency thermal recovery: reset split runtime for this GPU
+            from gpu_constants import RUNTIME_STATE_RESETTING_THERMAL, RUNTIME_STATE_COLD
+            task_id = task.get("task_id")
+            incident_id = task.get("incident_id", "unknown")
+            group_id = task.get("group_id") or getattr(self, 'runtime_group_id', None)
+            reason = f"thermal_recovery_split:incident={incident_id}"
+
+            self.logger.warning(
+                f"THERMAL_RESET_SPLIT_RUNTIME: resetting split runtime "
+                f"incident_id={incident_id} group_id={group_id} task_id={task_id[:8] if task_id else 'none'}"
+            )
+
+            # Enter thermal reset state (blocks regular work claims)
+            prev_state = self.runtime_state
+            self.runtime_state = RUNTIME_STATE_RESETTING_THERMAL
+            self._write_heartbeat_now()
+
+            self._touch_meta_task(phase="reset_split_runtime")
+
+            # Stop split runtime and reset state
+            self._stop_split_runtime()
+            self._full_local_reset(reason)
+
+            # Verify we ended up in cold state
+            if self.runtime_state != RUNTIME_STATE_COLD:
+                self.logger.error(
+                    f"THERMAL_RESET_SPLIT_RUNTIME: expected cold state after reset, "
+                    f"got {self.runtime_state}"
+                )
+                self.runtime_state = RUNTIME_STATE_COLD  # Force cold state
+            self._write_heartbeat_now()
+
+            # Update incident tracking
+            self.thermal_recovery_reset_count = getattr(self, 'thermal_recovery_reset_count', 0) + 1
+            self.thermal_recovery_last_reset_at = time.time()
+
+            result = {
+                "success": True,
+                "output": f"Split runtime reset complete for thermal recovery incident={incident_id} group={group_id}",
+                "runtime_state": self.runtime_state,
+                "previous_state": prev_state,
+                "model_loaded": self.model_loaded,
+                "runtime_group_id": self.runtime_group_id,
+                "thermal_recovery_reset_count": self.thermal_recovery_reset_count,
+                "worker": self.name,
+                "max_vram_used_mb": 0,
+            }
+
+            # Log telemetry event for thermal reset result
+            self.logger.info(
+                f"THERMAL_TARGETED_RESET_RESULT: success={result['success']} "
+                f"incident_id={incident_id} worker={self.name} group_id={group_id} "
+                f"prev_state={prev_state} final_state={self.runtime_state} "
+                f"reset_count={self.thermal_recovery_reset_count}"
+            )
         else:
             return {
                 "success": False,

@@ -1009,6 +1009,8 @@ function renderBatchChains(data, allowedBatchIds = null) {
     const stageTypes = chain.stage_types || {};
     const collapsedStages = chain.collapsed_order || stages;
     const collapsedTypes = chain.collapsed_types || stageTypes;
+    const collapsedCounts = chain.collapsed_counts || {};
+    const collapsedMap = chain.collapsed_map || {};
     if (!stages.length) return;
     const totalRows = chain.row_count || (chain.rows || []).length;
 
@@ -1024,15 +1026,13 @@ function renderBatchChains(data, allowedBatchIds = null) {
       });
     });
 
-    // Aggregate counts for collapsed stages (sum across all _round_NNNN variants)
+    // Aggregate counts for collapsed stages using server-provided normalization map.
     const collapsedLaneCounts = {};
     collapsedStages.forEach(cs => {
       collapsedLaneCounts[cs] = { queue: 0, processing: 0, private: 0, complete: 0, failed: 0 };
     });
-    const roundSuffixRe = /^(.+?)_round_\d+$/;
     stages.forEach(s => {
-      const match = s.match(roundSuffixRe);
-      const base = match ? match[1] : s;
+      const base = collapsedMap[s] || s;
       if (collapsedLaneCounts[base]) {
         const counts = stageLaneCounts[s] || {};
         collapsedLaneCounts[base].queue += counts.queue || 0;
@@ -1068,12 +1068,14 @@ function renderBatchChains(data, allowedBatchIds = null) {
       return s;
     };
     const formatCollapsedStage = (s) => {
+      const count = Number(collapsedCounts[s] || 0);
+      const label = count > 1 ? `${s}×${count}` : s;
       const status = collapsedStageStatus(s);
-      if (status === 'processing') return `<strong style="color:#4cc9f0">${s}</strong>`;
-      if (status === 'queued') return `<span style="color:#f9c74f">${s}</span>`;
-      if (status === 'complete') return `<span style="color:#4ad66d">${s}</span>`;
-      if (status === 'failed') return `<span style="color:#ff6b6b">${s}</span>`;
-      return s;
+      if (status === 'processing') return `<strong style="color:#4cc9f0">${label}</strong>`;
+      if (status === 'queued') return `<span style="color:#f9c74f">${label}</span>`;
+      if (status === 'complete') return `<span style="color:#4ad66d">${label}</span>`;
+      if (status === 'failed') return `<span style="color:#ff6b6b">${label}</span>`;
+      return label;
     };
     const chainHeader = collapsedStages.map(formatCollapsedStage).join(' <span style="color:#9db4c8">-></span> ');
     if (!chainState[batchId]) {

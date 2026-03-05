@@ -15,6 +15,20 @@ def collapse_stage_name(name: str) -> str:
         build_strategy_round_0002 -> build_strategy
         execute_searches_round_0005 -> execute_searches
     """
+    # Normalize heavy fan-out stage families for readable chain headers.
+    if name.startswith("worker_review_verify_"):
+        return "worker_review_verify"
+    if name.startswith("worker_review_"):
+        return "worker_review"
+    if name.startswith("load_split_llm"):
+        return "load_split_llm"
+    if name.startswith("unload_split_llm"):
+        return "unload_split_llm"
+    if name.startswith("load_llm"):
+        return "load_llm"
+    if name.startswith("unload_llm"):
+        return "unload_llm"
+
     m = ROUND_SUFFIX_RE.match(name)
     if m:
         return m.group(1)
@@ -175,10 +189,14 @@ def build_batch_chain(tasks_by_lane: dict[str, list[dict[str, Any]]], batch_id: 
     # Collapsed order for chain header display (removes _round_NNNN noise)
     collapsed_order = collapse_stage_order(stage_order)
 
-    # Build collapsed stage types from first matching full stage
+    # Build collapsed stage types/counts from first matching full stage
     collapsed_types: dict[str, str] = {}
+    collapsed_counts: dict[str, int] = {}
+    collapsed_map: dict[str, str] = {}
     for s in stage_order:
         base = collapse_stage_name(s)
+        collapsed_map[s] = base
+        collapsed_counts[base] = collapsed_counts.get(base, 0) + 1
         if base not in collapsed_types:
             collapsed_types[base] = stage_types.get(s, "-")
 
@@ -187,6 +205,8 @@ def build_batch_chain(tasks_by_lane: dict[str, list[dict[str, Any]]], batch_id: 
         "stage_types": {s: stage_types.get(s, "-") for s in stage_order},
         "collapsed_order": collapsed_order,
         "collapsed_types": collapsed_types,
+        "collapsed_counts": collapsed_counts,
+        "collapsed_map": collapsed_map,
         "rows": rows,
         "row_count": len(items),
     }

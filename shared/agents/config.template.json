@@ -95,6 +95,16 @@
     "resume_margin_c": 4
   },
 
+  "thermal_recovery": {
+    "_comment": "Brain-level thermal recovery policy for sustained overheat incidents",
+    "cpu_overheat_trigger_seconds": 300,
+    "targeted_reset_interval_seconds": 60,
+    "max_targeted_resets_per_incident": 5,
+    "full_reset_cooldown_seconds": 300,
+    "enable_full_reset_escalation": true,
+    "same_gpu_reset_backoff_seconds": 120
+  },
+
   "cpu_agent": {
     "resource_limits": {
       "cpu_temp_warning_c": 85,

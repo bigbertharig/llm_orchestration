@@ -77,7 +77,7 @@ First run on new hardware? Run `python setup.py` first to generate `config.json`
 1. Verify agents are running (`brain.py` + `gpu.py` workers).
 2. Pick a plan folder under `/mnt/shared/plans/shoulders/<plan>` or `/mnt/shared/plans/arms/<plan>`.
 3. Build a valid JSON config for all required inputs in that plan's `## Inputs`.
-4. Submit with `python3 /mnt/shared/agents/submit.py ... --config '<json>'`.
+4. Submit with `python3 ~/llm_orchestration/scripts/submit.py ... --config '<json>'`.
 5. Capture returned `Task ID` and `batch_id` from logs.
 6. Monitor progress in `brain_decisions.log` and `tasks/{queue,processing,complete,failed}`.
 
@@ -92,7 +92,21 @@ The shared drive mounts at different paths depending on the host:
 
 The submit script handles path translation automatically. Always use the path appropriate for the host you're running on.
 
-### Option 1: From GPU Rig (direct)
+### Default (authoritative): Wrapper submit path
+
+```bash
+python3 ~/llm_orchestration/scripts/submit.py \
+  ~/llm_orchestration/shared/plans/arms/<plan_name> \
+  --config '{"VAR1": "value1", "VAR2": "value2"}'
+```
+
+This wrapper is the default because it runs:
+1. Submit-time worker preflight scan/reset gate (`scan_workers.py --fix`)
+2. Placeholder validation (fails fast on unresolved `{VAR}`)
+3. Path alias translation across `/mnt/shared`, `/media/bryan/shared`, and `~/llm_orchestration/shared`
+4. SSH proxy to rig when needed
+
+### Exception path (manual/direct; use only for debugging)
 
 ```bash
 python3 /mnt/shared/agents/submit.py \
@@ -100,13 +114,7 @@ python3 /mnt/shared/agents/submit.py \
   --config '{"VAR1": "value1", "VAR2": "value2"}'
 ```
 
-### Option 2: From Pi (via SSH)
-
-```bash
-ssh gpu "python3 /mnt/shared/agents/submit.py \
-  /mnt/shared/plans/arms/<plan_name> \
-  --config '{\"VAR1\": \"value1\", \"VAR2\": \"value2\"}'"
-```
+Do not use the manual path for normal runs. It bypasses wrapper safeguards.
 
 ### Option 3: Dashboard (recommended for operators)
 
@@ -115,15 +123,10 @@ Navigate to `http://localhost:8787/controls` and use the "Start Plan" interface.
 ### Example - research_event_discovery:
 
 ```bash
-# From GPU rig:
-python3 /mnt/shared/agents/submit.py \
-  /mnt/shared/plans/arms/research_event_discovery \
+# Default wrapper path:
+python3 ~/llm_orchestration/scripts/submit.py \
+  ~/llm_orchestration/shared/plans/arms/research_event_discovery \
   --config '{"QUERY": "floods in the US in 2025", "MAX_EVENTS": "20"}'
-
-# From Pi via SSH:
-ssh gpu "python3 /mnt/shared/agents/submit.py \
-  /mnt/shared/plans/arms/research_event_discovery \
-  --config '{\"QUERY\": \"floods in the US in 2025\", \"MAX_EVENTS\": \"20\"}'"
 ```
 
 ### Safer Config Submission (Avoid Shell Escaping Errors)
@@ -139,7 +142,7 @@ cat >/tmp/plan_config.json <<'JSON'
 JSON
 
 CONFIG=$(python3 -c 'import json;print(json.dumps(json.load(open("/tmp/plan_config.json")),separators=(",",":")))')
-python3 /mnt/shared/agents/submit.py /mnt/shared/plans/arms/<plan_name> --config "$CONFIG"
+python3 ~/llm_orchestration/scripts/submit.py ~/llm_orchestration/shared/plans/arms/<plan_name> --config "$CONFIG"
 ```
 
 Runnable plans live in `shared/plans/shoulders/` (contracts) or `shared/plans/arms/` (implementations). See [PLAN_FORMAT.md](PLAN_FORMAT.md) for plan authoring.

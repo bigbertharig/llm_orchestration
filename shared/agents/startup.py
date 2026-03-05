@@ -499,6 +499,115 @@ def cleanup(signum=None, frame=None):
 
 
 # =============================================================================
+# Brain Restart Signal Handler
+# =============================================================================
+def _check_restart_workers_signal(shared_path: Path) -> dict | None:
+    """Check if brain has requested a worker restart via signal file.
+
+    Returns the signal data if restart is requested, None otherwise.
+    """
+    signal_file = shared_path / "brain" / "restart_workers.signal"
+    if signal_file.exists():
+        try:
+            with open(signal_file) as f:
+                signal_data = json.load(f)
+            # Remove the signal file to acknowledge receipt
+            signal_file.unlink()
+            return signal_data
+        except Exception as e:
+            print(f"  Warning: Error reading restart signal: {e}")
+            try:
+                signal_file.unlink()
+            except Exception:
+                pass
+    return None
+
+
+def _restart_gpu_workers(
+    config: dict,
+    agents_dir: Path,
+    config_path: str,
+    processes: list,
+    gpus_to_start: list,
+    reason: str = "unknown",
+):
+    """Restart all GPU worker processes.
+
+    Called when brain requests a full reset via restart_workers.signal.
+    """
+    print(f"\n{'=' * 60}")
+    print(f"RESTART: Brain requested worker restart (reason: {reason})")
+    print(f"{'=' * 60}")
+
+    # Step 1: Stop existing GPU worker processes
+    print("  Stopping existing GPU workers...")
+    stopped_count = 0
+    for i, (name, proc) in enumerate(processes):
+        if name == "brain" or proc is None:
+            continue
+        try:
+            proc.terminate()
+            proc.wait(timeout=10)
+            stopped_count += 1
+            print(f"    Stopped {name}")
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            print(f"    Force killed {name}")
+        except Exception as e:
+            print(f"    Error stopping {name}: {e}")
+        processes[i] = (name, None)
+
+    print(f"  Stopped {stopped_count} workers")
+
+    # Step 2: Brief cooldown
+    print("  Waiting 5 seconds for cooldown...")
+    time.sleep(5)
+
+    # Step 3: Clear ready flags for GPU workers
+    for gpu_config in gpus_to_start:
+        gpu_name = gpu_config["name"]
+        flag_file = READY_FLAG_DIR / f"{gpu_name}.ready"
+        if flag_file.exists():
+            flag_file.unlink()
+
+    # Step 4: Restart GPU workers
+    print("  Starting GPU workers...")
+    for gpu_config in gpus_to_start:
+        gpu_name = gpu_config["name"]
+        gpu_port = gpu_config.get("port")
+        print(f"    Starting {gpu_name} (GPU {gpu_config['id']})...")
+
+        if gpu_port:
+            _reclaim_worker_port(gpu_port, gpu_name)
+
+        gpu_cmd = [
+            sys.executable,
+            str(agents_dir / "gpu.py"),
+            gpu_name,
+            "--config",
+            config_path,
+        ]
+
+        gpu_proc = subprocess.Popen(
+            gpu_cmd, stdout=sys.stdout, stderr=sys.stderr
+        )
+
+        # Update processes list
+        for i, (name, _) in enumerate(processes):
+            if name == gpu_name:
+                processes[i] = (gpu_name, gpu_proc)
+                break
+        else:
+            processes.append((gpu_name, gpu_proc))
+
+        if not wait_for_ready_flag(gpu_name, GPU_MAX_WAIT):
+            print(f"    WARNING: {gpu_name} may not be ready")
+
+    print(f"RESTART: Complete - {len(gpus_to_start)} workers restarted")
+    print(f"{'=' * 60}\n")
+
+
+# =============================================================================
 # Main
 # =============================================================================
 def main():
@@ -730,8 +839,24 @@ def main():
     print("\nPress Ctrl+C to stop all agents")
     print("=" * 60 + "\n")
 
-    # Monitor processes
+    # Track shared_path for restart signal checks
+    shared_path = Path(config["shared_path"])
+
+    # Monitor processes and handle restart signals
     while True:
+        # Check for brain-requested worker restart (thermal recovery full reset)
+        restart_signal = _check_restart_workers_signal(shared_path)
+        if restart_signal and gpus_to_start and not args.brain_only:
+            reason = restart_signal.get("reason", "unknown")
+            _restart_gpu_workers(
+                config=config,
+                agents_dir=agents_dir,
+                config_path=args.config,
+                processes=processes,
+                gpus_to_start=gpus_to_start,
+                reason=reason,
+            )
+
         for i, (name, proc) in enumerate(processes):
             if proc is None:
                 continue

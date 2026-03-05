@@ -298,6 +298,30 @@ def _validate_submission_config_paths(config: dict) -> list[dict]:
     return errors
 
 
+def _run_worker_preflight() -> tuple[bool, dict]:
+    script = Path(__file__).resolve().parent / "scan_workers.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--json", "--fix"],
+        capture_output=True,
+        text=True,
+        timeout=420,
+    )
+    summary: dict = {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": (proc.stdout or "").strip(),
+        "stderr": (proc.stderr or "").strip(),
+    }
+    if proc.stdout:
+        try:
+            candidate = json.loads(proc.stdout.strip().splitlines()[-1])
+            if isinstance(candidate, dict):
+                summary = candidate
+        except Exception:
+            pass
+    return proc.returncode == 0, summary
+
+
 def main():
     parser = argparse.ArgumentParser(description="Submit plan to brain")
     parser.add_argument("plan", help="Path to plan folder or plan.md")
@@ -315,6 +339,8 @@ def main():
                         help="Use this batch ID for dry-run variable substitution (lets foreach read existing manifest)")
     parser.add_argument("--local", action="store_true",
                         help="Submit locally (bypass rig SSH proxy).")
+    parser.add_argument("--skip-worker-scan", action="store_true",
+                        help="Skip submit-time worker preflight scan/reset gate.")
     args = parser.parse_args()
 
     plan_arg = Path(args.plan).absolute()
@@ -406,6 +432,14 @@ def main():
         print(f"Estimated runtime task count (including auto-summary): {total_expanded + 1}")
         print("Dry run only: nothing queued.")
         return 0
+
+    if not args.skip_worker_scan:
+        preflight_ok, preflight = _run_worker_preflight()
+        print("Worker preflight:", preflight.get("message", "completed"))
+        if not preflight_ok:
+            print(json.dumps(preflight, indent=2))
+            print("Error: worker preflight did not reach a clean state. Submission aborted.")
+            return 1
 
     if not args.local:
         remote_plan = _to_rig_path(plan_path)

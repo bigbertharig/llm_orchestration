@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -252,10 +253,49 @@ class GPUThermalMixin:
         return gpu_ok and cpu_ok
 
     def _update_thermal_pause_state(self, gpu_stats: Dict):
-        """Manage warning-level thermal pause with exponential backoff and logs."""
+        """Manage warning-level thermal pause with exponential backoff and logs.
+
+        Also tracks thermal incidents for brain-level recovery coordination.
+        An incident starts when CPU temp exceeds warning threshold and is sustained.
+        """
         constrained, reasons = self._is_resource_constrained(gpu_stats)
         now = time.time()
         active_task_ids = [info["task"]["task_id"][:8] for info in self.active_workers.values()]
+
+        # Check for CPU overheat specifically (incident trigger)
+        cpu_temp = self._get_cpu_temp()
+        cpu_warn = self.resource_limits.get("cpu_temp_warning_c", 80)
+        cpu_overheated = cpu_temp is not None and cpu_temp >= cpu_warn
+
+        # Track thermal incident state
+        if cpu_overheated:
+            if self.thermal_overheat_started_at is None:
+                # Start new incident
+                self.thermal_overheat_started_at = now
+                self.thermal_overheat_incident_id = str(uuid.uuid4())[:8]
+                self.thermal_recovery_reset_count = 0
+                self.thermal_overheat_sustained_seconds = 0
+                self.logger.warning(
+                    f"THERMAL_INCIDENT_START: incident_id={self.thermal_overheat_incident_id} "
+                    f"cpu_temp={cpu_temp}C threshold={cpu_warn}C"
+                )
+            else:
+                # Update sustained duration
+                self.thermal_overheat_sustained_seconds = int(now - self.thermal_overheat_started_at)
+        else:
+            if self.thermal_overheat_started_at is not None:
+                # Clear incident
+                incident_id = self.thermal_overheat_incident_id
+                duration = self.thermal_overheat_sustained_seconds
+                reset_count = self.thermal_recovery_reset_count
+                self.logger.info(
+                    f"THERMAL_INCIDENT_CLEARED: incident_id={incident_id} "
+                    f"duration={duration}s resets_issued={reset_count} cpu_temp={cpu_temp}C"
+                )
+                self.thermal_overheat_started_at = None
+                self.thermal_overheat_sustained_seconds = 0
+                self.thermal_overheat_incident_id = None
+                self.thermal_recovery_reset_count = 0
 
         if constrained:
             self.thermal_pause_reasons = reasons.copy()

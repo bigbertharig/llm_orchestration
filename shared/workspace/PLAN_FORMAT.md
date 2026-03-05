@@ -1,170 +1,391 @@
 # Plan Format
 
-Plans are markdown files written by a smart LLM (Claude) to guide the brain in orchestrating work across GPU workers.
+Plans are markdown files that tell the brain how to orchestrate work.
+
+This document defines:
+- the stable plan structure the parser expects
+- the task fields that are valid
+- the execution contract that plans should rely on
+- generic design patterns that are safe to reuse across many plan types
+
+This is a shared format spec, not a plan template for one specific workflow.
 
 ---
 
-## Intelligence Hierarchy
-
-| Role | Model | Responsibility |
-|------|-------|----------------|
-| **Planner** | Claude (external) | Writes plans, prepares scripts, sets up environment |
-| **Brain** | Qwen brain model (local, currently qwen2.5:32b) | Interprets plans, creates tasks, monitors workers, evaluates output |
-| **Workers** | Qwen 7B (local) | Execute assigned tasks, report results |
-
-**Key principle:** Claude does the smart work upfront. The brain interprets and orchestrates. Workers execute.
-
----
-
-## What a Plan Contains
+## Core Purpose
 
 A plan tells the brain:
+1. What the plan is trying to accomplish
+2. What inputs are provided at submission time
+3. What scripts are available
+4. What outputs should be produced
+5. What tasks exist and how they depend on each other
 
-1. **Goal** - What success looks like
-2. **Inputs** - Configuration values provided at submission
-3. **Available Scripts** - What tools exist and how to use them
-4. **Workflow** - The order of operations and dependencies
-5. **Outputs** - What will be produced
+The brain reads the markdown and generates executable tasks.
 
-The brain reads this as an LLM and generates shell tasks. The plan should be precise enough that the brain reliably generates correct commands, but flexible enough that it can make sensible decisions about parallelism, worker assignment, and error handling.
+Plans should be:
+- precise enough that commands are deterministic
+- generic enough that the same format works for many workflows
+- explicit about dependencies and outputs
 
-Important parser behavior:
-- Brain substitutes only built-in variables (for example `{BATCH_ID}`, `{BATCH_PATH}`, `{PLAN_PATH}`) plus submission config keys.
-- Text like `(default: ...)` in `## Inputs` is documentation only unless the planner hardcodes the default in commands/scripts.
-- If a command references `{MISSING_VAR}`, it will remain literal and can break the run.
-- `split_gpu` LLM tasks must be single-model tasks. If a workflow uses multiple models (for example extractor/verifier/adjudicator), split it into separate tasks and pass artifacts between them.
+Important boundary:
+- Generic infrastructure checks that must pass before any plan starts belong in the submit wrapper, not in the plan graph.
+- Only put setup steps in `## Tasks` when they are specific to that plan's workflow.
+
+---
+
+## Hard Contract
+
+### Required Sections
+
+A standard plan should contain:
+1. `# Plan: <Name>`
+2. `## Objective`
+3. `## Inputs`
+4. `## Outputs`
+5. `## Available Scripts`
+6. `## Tasks`
+
+A plan may also contain:
+- `## Notes`
+- `## Goal` for goal-driven execution
+
+### Variable Substitution
+
+The brain substitutes only:
+- built-in variables such as `{BATCH_ID}`, `{BATCH_PATH}`, `{PLAN_PATH}`
+- submission config keys defined by the user at submit time
+
+Important rules:
+- If a command references `{MISSING_VAR}`, it remains literal and can break the run.
+- Text like `(default: ...)` in `## Inputs` is documentation only unless the command or script actually enforces that default.
+- If you want dynamic behavior such as `auto`, the called script must explicitly support it.
+- Wrapper-level preflight behavior is controlled by the submit tool, not by plan variables, unless the submit tool explicitly exposes a switch.
+
+### Task Fields Required In Every Task
+
+Every task must define:
+- `executor`
+- `task_class`
+- `command`
+- `depends_on`
+
+If `task_class` is missing, the task can fail immediately.
+Plans should always specify it explicitly.
+
+### Standard Task Fields
+
+Valid task fields are:
+- `executor`
+- `task_class`
+- `command`
+- `depends_on`
+- `requires`
+- `produces`
+- `foreach`
+- `batch_size`
+- `llm_min_tier`
+- `llm_model`
+- `llm_placement`
+- `vram_policy`
+- `vram_estimate_mb`
+
+Only use fields that apply to the task type.
+
+### Field Validity By Task Type
+
+Fields valid for all task types:
+- `executor`
+- `task_class`
+- `command`
+- `depends_on`
+- `requires`
+- `produces`
+- `foreach`
+- `batch_size`
+
+Fields valid only for `llm` tasks:
+- `llm_min_tier`
+- `llm_model`
+- `llm_placement`
+
+Fields valid only for `script` tasks:
+- `vram_policy`
+- `vram_estimate_mb`
+
+### Executor Values
+
+Valid values:
+- `brain`
+- `worker`
+
+Use:
+- `worker` for parallel or throughput-oriented execution
+- `brain` for orchestration-heavy, centralized, or synthesis steps
+
+### Task Class Values
+
+Valid values:
+- `cpu`
+- `script`
+- `llm`
+- `brain`
+
+Use:
+- `cpu` for normal CPU-only scripting
+- `script` for non-LLM tasks that may need GPU or explicit VRAM tracking
+- `llm` for model-backed tasks
+- `brain` only for tasks that are logically owned by the brain itself
+
+### Foreach Expansion
+
+`foreach` expands one task template into many tasks.
+
+Format:
+- `path:jsonpath`
+
+Example:
+- `{BATCH_PATH}/manifest.json:items`
+
+Rules:
+- `batch_size` groups multiple expanded items into one task
+- If a valid `foreach` source expands to zero items, the brain may treat the template task as a no-op success
+- A task depending on a `foreach` task waits for all expanded tasks
+
+### Dependency Semantics
+
+`depends_on` must be:
+- `none`
+- or a comma-separated list of task ids
+
+A task is not released until all dependencies are complete.
 
 ---
 
 ## Plan Location
 
-```
+```text
 shared/plans/<plan_name>/
-  plan.md           # The plan template (immutable)
-  scripts/          # Scripts the brain can invoke
-  lib/              # Shared libraries for scripts (optional)
+  plan.md
+  scripts/
+  lib/                # optional
 
-  history/          # Execution history (all runs, success and failures)
+  history/
     {batch_id}/
-      # Working data (created during execution)
-      manifest.json
-      logs/
       output/
       results/
-
-      # Auto-generated summary (created at end of run)
-      EXECUTION_SUMMARY.md     # Human-readable lessons learned
-      execution_stats.json     # Machine-readable statistics
-
-    AGGREGATE_LEARNINGS.md   # Optional: Insights across all runs
+      logs/
+      EXECUTION_SUMMARY.md
+      execution_stats.json
 ```
 
-**Note:** The `history/` folder contains complete records of every execution attempt. Success runs show what worked well, failed runs show what broke and why. Each run captures lessons about worker performance, brain interventions, VRAM usage, and system behavior.
+This layout is conventional, not magical. A plan may add more files, but commands should reference them explicitly.
 
 ---
 
-## Plan Structure
-
-Plans have two sections:
-
-1. **Header** - Objective, inputs, outputs, script descriptions
-2. **Tasks** - Concrete task definitions the brain parses directly
+## Standard Plan Structure
 
 ```markdown
 # Plan: <Name>
 
 ## Objective
 
-One or two sentences describing what this plan accomplishes.
+Short description of what the plan does.
 
 ## Inputs
 
-- **VAR_NAME**: Description and format
-- Include optional tuning knobs only when needed by that specific plan. Do not add goal-related or query-related inputs to plans that do not use them.
-- For discovery/query plans, optional query normalization inputs can include:
-  - `QUERY_STOPWORDS`: extra stopwords to suppress low-signal terms (comma/space separated)
-  - `QUERY_KEEPWORDS`: allowlist terms that must not be removed even if present in stopwords
-  - Scripts should still keep a small hardcoded core stopword set so plans work without explicit tuning.
+- **INPUT_A**: Description
+- **INPUT_B**: Description
 
 ## Outputs
 
-- What files/data will be produced
-- Where they will be written
+- {BATCH_PATH}/output/result.json
 
 ## Available Scripts
 
-### scripts/init_script.py
-
-- **Purpose**: What this script does
+### scripts/prepare.py
+- **Purpose**: Prepare input artifacts
 - **GPU**: no
-- **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/init_script.py --batch-id {BATCH_ID} --input {INPUT_VAR}`
-- **Output**: Description of what it produces
+- **Run command**: `python {PLAN_PATH}/scripts/prepare.py --batch-id {BATCH_ID}`
+- **Output**: Writes an input manifest
 
-### scripts/process_script.py
-
-- **Purpose**: What this script does
+### scripts/process.py
+- **Purpose**: Process one or more items
 - **GPU**: yes
-- **VRAM estimate**: infer first run, then set fixed from measured usage
-- **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/process_script.py --batch-id {BATCH_ID}`
-- **Output**: Description
-
-### scripts/aggregate_script.py
-
-- **Purpose**: What this script does
-- **GPU**: no
-- **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/aggregate_script.py --batch-id {BATCH_ID}`
-- **Output**: Description
+- **Run command**: `python {PLAN_PATH}/scripts/process.py --batch-id {BATCH_ID}`
+- **Output**: Writes per-item results
 
 ## Tasks
 
-Define tasks with explicit dependencies. The brain parses this section directly.
-
-### init
-- **executor**: worker
+### prepare
+- **executor**: brain
 - **task_class**: cpu
-- **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/init_script.py --batch-id {BATCH_ID} --input {INPUT_VAR}`
+- **command**: `python {PLAN_PATH}/scripts/prepare.py --batch-id {BATCH_ID}`
 - **depends_on**: none
-- **requires**: {INPUT_VAR}
 - **produces**: {BATCH_PATH}/manifest.json
 
 ### process
 - **executor**: worker
-- **task_class**: script
-- **vram_policy**: infer
-- **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/process_script.py --batch-id {BATCH_ID}`
-- **depends_on**: init
-- **requires**: {BATCH_PATH}/manifest.json
-- **produces**: {BATCH_PATH}/results/{ITEM.id}/processed.json
+- **task_class**: llm
+- **llm_model**: model_id_here
+- **command**: `python {PLAN_PATH}/scripts/process.py --batch-id {BATCH_ID} --item-id {ITEM.id}`
+- **depends_on**: prepare
+- **foreach**: {BATCH_PATH}/manifest.json:items
+- **batch_size**: 1
 
 ### aggregate
 - **executor**: brain
 - **task_class**: cpu
-- **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/aggregate_script.py --batch-id {BATCH_ID}`
+- **command**: `python {PLAN_PATH}/scripts/aggregate.py --batch-id {BATCH_ID}`
 - **depends_on**: process
-- **requires**: {BATCH_PATH}/results/{ITEM.id}/processed.json
+- **requires**: {BATCH_PATH}/results/*.json
 - **produces**: {BATCH_PATH}/output/final.json
-
-## Notes
-
-Any additional guidance, constraints, or edge cases.
-
-### Split LLM Task Rule (Important)
-
-- Tasks with `- **llm_placement**: split_gpu` must not embed mixed explicit `--*-model` arguments in the command.
-- The task's explicit model flags should all match `- **llm_model**`.
-- If you need a mixed-model pipeline, decompose it into multiple tasks:
-  - Example: `7B extractor` task writes intermediate JSON
-  - `14B split` task consumes the JSON and performs verification/adjudication
-- Brain should fail fast on plan parse if a split task declares conflicting explicit model args.
 ```
+
+---
+
+## Task Field Reference
+
+### Task Definition Shape
+
+```markdown
+### task_id
+- **executor**: brain|worker
+- **task_class**: cpu|script|llm|brain
+- **command**: `shell command here`
+- **depends_on**: task_a, task_b
+- **requires**: path_a, path_b
+- **produces**: path_c, path_d
+- **foreach**: {BATCH_PATH}/manifest.json:items
+- **batch_size**: 1
+- **llm_min_tier**: 1
+- **llm_model**: model_id
+- **llm_placement**: single_gpu|split_gpu
+- **vram_policy**: default|infer|fixed
+- **vram_estimate_mb**: 2048
+```
+
+### Field Meanings
+
+| Field | Meaning |
+|---|---|
+| `task_id` | Unique identifier for dependency references |
+| `executor` | Which actor owns the task (`brain` or `worker`) |
+| `task_class` | What kind of resources the task needs |
+| `command` | The shell command to execute |
+| `depends_on` | Prior tasks that must complete first |
+| `requires` | Documentation-only contract for expected inputs |
+| `produces` | Documentation-only contract for expected outputs |
+| `foreach` | Expand this task from a manifest source |
+| `batch_size` | Group multiple `foreach` items into one task |
+| `llm_min_tier` | Minimum model capability tier |
+| `llm_model` | Preferred model id |
+| `llm_placement` | Placement constraint for LLM tasks |
+| `vram_policy` | How VRAM is estimated for script tasks |
+| `vram_estimate_mb` | Explicit VRAM estimate when fixed |
+
+### Documentation-Only Fields
+
+The following fields document intent but do not automatically enforce correctness by themselves:
+- `requires`
+- `produces`
+- default values written in `## Inputs`
+
+Use them anyway. They make plans easier to reason about and easier to audit.
+
+---
+
+## LLM Task Rules
+
+### LLM Placement
+
+Valid values:
+- `single_gpu`
+- `split_gpu`
+
+### Split LLM Rule
+
+Tasks with `llm_placement: split_gpu` should be single-model tasks.
+
+If a workflow needs multiple model roles, decompose it into separate tasks and pass artifacts between them.
+
+Good pattern:
+1. one task produces intermediate JSON
+2. a later split-GPU task consumes that JSON
+
+Avoid mixed-model command lines in one split task.
+
+---
+
+## Recommended Patterns
+
+These are not required by the parser, but they are good general-purpose patterns.
+
+### Standard Submission Preflight
+
+Use the submit wrapper for checks that should apply to every plan before queueing:
+- worker heartbeat vs live-runtime consistency checks
+- reset-to-default recovery if the rig is in a bad state
+- fail-fast validation that shared infrastructure is healthy
+
+This keeps generic infrastructure protection out of individual plan graphs.
+
+### Manifest-Preserving Transforms
+
+When one script transforms a manifest into another:
+- preserve downstream-critical item metadata
+- do not silently drop fields that later tasks rely on
+- if you replace fields, replace them with an equivalent representation
+
+Examples of execution-shaping metadata:
+- line-range segment metadata
+- complexity scores
+- routing hints
+- chunk metadata
+
+### Explicit `auto` Mode
+
+If a script supports heuristic or adaptive behavior:
+- use an explicit symbolic value such as `auto`
+- document it in `## Inputs`
+- pass it intentionally in the executable command path
+
+Two safe patterns:
+1. manual default, with `auto` as an explicit override
+2. explicit `auto` hardcoded in the command path
+
+If `auto` is hardcoded in the actual command, remove or rewrite any stale input knob documentation so the plan prose matches the runtime interface.
+
+### Secondary Manifest Expansion
+
+When one logical phase expands into more scheduler-visible tasks later:
+1. add a manifest-builder task that writes the expanded task manifest
+2. point the downstream `foreach` task at that new manifest
+3. if partial outputs are produced, add an explicit merge task afterward
+
+This pattern is generic and applies to any workload that needs fan-out after an earlier stage.
+
+### Fail-Closed Merge Pattern
+
+If a merge task reconstructs canonical outputs from split tasks:
+- fail closed by default when expected partial outputs are missing or inconsistent
+- do not silently write partial canonical outputs unless the plan explicitly allows that mode
+- keep the merged output schema consistent with the non-split path
+
+### Constrained Item Safety
+
+If a plan introduces per-item constraints that make later generic transforms unsafe:
+- preserve those constraints
+- or mark the item as intentionally non-transformable
+- do not silently ignore the constraint
 
 ---
 
 ## Goal-Driven Plans
 
-Plans can include an optional `## Goal` section for dynamic, result-driven execution. Instead of expanding all foreach tasks upfront, the brain generates tasks incrementally and validates results against a target count.
+Plans may include an optional `## Goal` section for dynamic, result-driven execution.
 
-`## Goal` is a reserved heading for machine-parsed goal metadata. If a plan is not goal-driven, use `## Objective` for narrative intent and omit the `## Goal` section entirely.
+Use this when the plan should stop after reaching a target quality or count, rather than processing a fixed list only once.
 
 ### Goal Section Format
 
@@ -173,780 +394,60 @@ Plans can include an optional `## Goal` section for dynamic, result-driven execu
 - **type**: target_count
 - **target**: {TARGET_COUNT}
 - **tolerance**: 2
+- **tracked_task**: validate_item
+- **discovery_tasks**: discover_items, score_items
 - **max_attempts_multiplier**: 5
-- **tracked_task**: score_person
-- **discovery_tasks**: build_strategy, execute_searches, identify_people
-- **discovery_round_multiplier**: 2
-- **discovery_prefill_divisor**: 4
-- **discovery_pool_multiplier**: 5
-- **discovery_pool_cap**: 100
-- **discovery_refill_divisor**: 4
-- **max_validations_per_cycle**: 3
 ```
 
-| Field | Description |
-|-------|-------------|
-| `type` | `target_count` — brain aims for N successful validations |
-| `target` | How many accepted results needed (supports variable substitution) |
-| `tolerance` | ±N acceptable deviation. Draining starts at `target - tolerance` |
-| `max_attempts_multiplier` | Pool size and circuit breaker. `identify_people` generates `target * multiplier` candidates. Brain stops after that many total attempts |
-| `tracked_task` | Foreach task name whose completion triggers validation |
-| `discovery_tasks` | Optional ordered list of discovery task ids. If omitted, brain infers discovery chain from non-foreach ancestors of foreach tasks |
-| `discovery_round_multiplier` | Optional. Max rounds formula multiplier. Default `2` (`max_rounds = target * multiplier`) |
-| `discovery_prefill_divisor` | Optional. Initial prefill formula divisor. Default `4` (`prefill_rounds = ceil(target / divisor)`) |
-| `discovery_pool_multiplier` | Optional. Candidate buffer target multiplier. Default `1` (`pool_target = target * multiplier`) |
-| `discovery_pool_cap` | Optional. Hard cap for candidate buffer target. `0`/unset means no extra cap |
-| `discovery_refill_divisor` | Optional. Refill watermark divisor. Default `4` (`refill = ceil(pool_target / divisor)`) |
-| `max_validations_per_cycle` | Optional. Brain-side validation throttle per loop. Default `3` |
+### Goal Fields
 
-### Behavior
+| Field | Meaning |
+|---|---|
+| `type` | Goal mode, currently `target_count` |
+| `target` | Desired accepted count |
+| `tolerance` | Acceptable undershoot / overshoot range |
+| `tracked_task` | Task whose completion drives acceptance counting |
+| `discovery_tasks` | Ordered discovery chain, if needed |
+| `max_attempts_multiplier` | Circuit breaker for retries / candidate expansion |
 
-1. Discovery runs in two phases:
-   - `fill_pool`: prioritize discovery rounds to build candidate buffer
-   - `drain_pool`: pause discovery scheduling and focus on scoring/decisions
-2. Buffer/backpressure is automatic:
-   - `discovery_pool_target` defaults to `target * discovery_pool_multiplier`
-   - `discovery_refill_watermark` defaults to `ceil(discovery_pool_target / discovery_refill_divisor)`
-3. Initial discovery prefill still bursts immediately (for example, 5 rounds when target=20 and divisor=4).
-4. Candidate pipelines are spawned from manifest items and validated only when `tracked_task` completes.
-5. Fast pre-filter on each tracked task completion (schema check + confidence threshold).
-6. Brain LLM validates borderline cases only (auto-accept high confidence, auto-reject missing/malformed).
-7. Rejected -> replacement spawned one-for-one from the candidate pool.
-8. Draining starts at `accepted >= target - tolerance` (no new spawns).
-9. Complete when draining and no in-flight candidates remain.
-10. Exhausted only when round cap or circuit breaker prevents further progress.
-
-### Discovery Round Semantics
-
-- Discovery rounds are progress generation, not acceptance decisions.
-- `round=N` means discovery/query iterations have been scheduled/executed.
-- `accepted` / `rejected` only change after tracked candidate scoring tasks complete.
-- The terminal discovery task is the last task in `discovery_tasks` (or inferred chain). If it fails, the round is still treated as terminal for scheduling.
-
-### Failure Semantics (Important)
-
-- Discovery script error semantics are plan/script-owned and must be explicit:
-  - strict mode: non-zero exit on parse/LLM failure to trigger retries
-  - permissive mode: write error artifact, continue round, let goal loop continue
-- Choose one behavior per script and document it in the plan notes.
-
-### Tolerance
-
-With `target=20`, `tolerance=2`:
-- Draining starts at `accepted >= 18`
-- Final count: 18–22 depending on trailing in-flight results
-- The ±2 comes naturally: trailing in-flight may succeed (overshoot) or you may drain at exactly 18 (undershoot)
-
-### Idempotency
-
-Goal state is persisted in the brain's `state.json`. On restart:
-- `spawned_ids` prevents re-spawning candidate pipelines
-- `validated_task_ids` (keyed by UUID) prevents re-validation
-- `in_flight_ids` is reconciled against actual completions on the next cycle
-
-### When to Use Goal-Driven Plans
+### When To Use Goal-Driven Plans
 
 Use goal-driven execution when:
-- The output quality varies and some candidates will be rejected
-- You want a specific number of good results, not just "process everything"
-- Generating 2–5x candidates and filtering is a reasonable strategy
+- output quality varies
+- some candidates will be rejected
+- you want a target number of acceptable results
 
-Standard (non-goal) plans are still better when:
-- Every item must be processed (no quality gate)
-- The total count is known upfront and fixed
-
-### Planner Guidance For Discovery Plans
-
-When writing discovery-heavy goal plans (prospecting/research):
-
-1. Keep discovery tasks separate from scoring tasks and declare discovery chain explicitly with `discovery_tasks` when needed.
-2. Set end conditions around outcomes, not query attempts:
-   - target accepted
-   - max rejected (circuit breaker)
-   - round cap
-3. Ensure `tracked_task` is the true decision gate task (usually the final scoring stage).
-4. Pick strict vs permissive parse behavior deliberately and keep it consistent per plan.
+Do not use it when every item must always be processed exactly once.
 
 ---
 
-## Task Format
+## Anti-Patterns
 
-The brain parses the `## Tasks` section directly. Each task is defined as:
+Avoid these mistakes in any plan:
 
-```markdown
-### task_id
-- **executor**: brain|worker
-- **task_class**: cpu|script|llm|brain
-- **llm_min_tier**: 1  (optional, llm tasks only)
-- **llm_model**: qwen2.5:7b  (optional, llm tasks only)
-- **llm_placement**: single_gpu|split_gpu  (optional, llm tasks only)
-- **command**: `shell command here`
-- **depends_on**: task1, task2
-- **requires**: path1, path2
-- **produces**: path3, path4
-- **foreach**: {BATCH_PATH}/manifest.json:items  (optional)
-- **batch_size**: 4  (optional, foreach only)
-- **vram_policy**: default|infer|fixed  (optional, script tasks)
-- **vram_estimate_mb**: 2400  (optional, script tasks)
-```
+1. Unresolved placeholders in commands
+- If `{MISSING_VAR}` appears in the command, the run can fail immediately.
 
-| Field | Values | Description |
-|-------|--------|-------------|
-| `task_id` | Any unique name | Used for dependency references |
-| `executor` | `brain` or `worker` | Who runs this task (routing control) |
-| `task_class` | `cpu`, `script`, `llm`, or `brain` | **Required.** What resources the task needs (see below) |
-| `llm_min_tier` | Integer >= 1 | **Optional (llm).** Minimum model capability tier required to claim task |
-| `llm_model` | Model ID from catalog | **Optional (llm).** Preferred model; implies minimum tier from catalog |
-| `llm_placement` | `single_gpu` or `split_gpu` | **Optional (llm).** Placement constraint when a task must run on split runtime |
-| `command` | Shell command in backticks | What to execute |
-| `depends_on` | Comma-separated task IDs or `none` | Tasks that must complete first |
-| `requires` | Comma-separated file paths/patterns | **Optional (documentation contract).** Inputs this task expects to read |
-| `produces` | Comma-separated file paths/patterns | **Optional (documentation contract).** Outputs this task is responsible for writing |
-| `foreach` | `path:jsonpath` | **Optional.** Expand to N tasks (see Foreach Expansion below) |
-| `batch_size` | Integer >= 1 | **Optional.** Group foreach items into micro-batch tasks (default `1`) |
-| `vram_policy` | `default`, `infer`, `fixed` | **Optional (script).** How brain sets script VRAM estimate |
-| `vram_estimate_mb` | Integer MB | **Optional (script).** Explicit VRAM estimate used when `fixed` |
+2. Stale input knobs
+- Do not keep an input documented if the command path no longer uses it.
 
-**Important:** `executor`, `task_class`, `command`, and `depends_on` are required in every task. `requires`, `produces`, `foreach`, `batch_size`, `vram_policy`, `vram_estimate_mb`, `llm_min_tier`, `llm_model`, and `llm_placement` are optional. If `task_class` is missing, the task goes to `failed/` immediately. The brain will attempt to auto-fix by inferring the class from command keywords, but plans should always specify it explicitly.
+3. Hidden defaults
+- If behavior depends on a special mode such as `auto`, make that visible in the command path or in the explicit submission config.
 
-### Executor Routing (Brain vs Worker)
+4. Dropping manifest metadata
+- If a later task depends on per-item fields, do not rebuild the manifest and silently discard them.
 
-Use `executor` to control ownership of each task:
+5. Partial canonical merges by default
+- If split tasks feed a merge step, do not silently produce incomplete final artifacts unless the plan explicitly opts into partial behavior.
 
-- `executor: worker`
-  - Default for parallel per-item work and high-throughput stages.
-  - Claimed by GPU/CPU workers based on `task_class`.
-- `executor: brain`
-  - Reserved for orchestration-heavy steps, cross-item reasoning, and final synthesis.
-  - Claimed directly by the brain loop (never by workers).
-
-Recommended split:
-1. Initial setup/validation: `brain`
-2. Per-item processing (`foreach`): `worker`
-3. Mid-run quality gate/reconciliation: `brain`
-4. Final summary/decision: `brain`
-
-Rule of thumb:
-- If task logic is mostly "run this command N times", use `worker`.
-- If task logic is mostly "decide/aggregate/reconcile across many tasks", use `brain`.
-
-### Dataflow Contracts
-
-Use `requires` and `produces` to make task handoffs explicit and reviewable.
-
-- `requires` should list concrete files (or explicit patterns) that must exist before the task can run.
-- `produces` should list the outputs the task guarantees when successful.
-- For `foreach` tasks, use `{ITEM.field}` in paths to bind per-item artifacts.
-- Downstream tasks should `require` outputs from upstream tasks. If an output is never consumed, remove it or document why.
-- Keep contracts tight: list only files that matter for orchestration and validation.
-- Current brain parser treats these as documentation/contracts (it does not gate execution on them yet).
-
-### Task Classes
-
-| Class | Needs | Examples | VRAM Default |
-|-------|-------|----------|--------------|
-| `cpu` | CPU only | File I/O, data transforms, aggregation | 1000 MB (nominal) |
-| `script` | GPU compute (no LLM) | Transcription, embeddings, ffmpeg | **Per-script estimate** |
-| `llm` | GPU + LLM model | Text generation, parsing, summarization | 5000 MB (not stackable) |
-| `brain` | Brain process only | Global planning, cross-item reasoning, final arbitration | N/A |
-| `meta` | Worker management | load_llm, unload_llm | 0 MB |
-
-Workers prioritize tasks they're optimized for:
-- **GPU workers**: Prefer `llm` (if model loaded) or `script`, fall back to `cpu`
-- **CPU workers** (RPi): Only claim `cpu` tasks
-
-**VRAM Management:**
-- **cpu tasks**: Nominal 1GB estimate prevents workers from claiming unlimited CPU tasks (limits to ~4-5 concurrent)
-- **llm tasks**: Fixed 5GB estimate, not stackable - if GPU has LLM loaded, it's dedicated to that
-- **script tasks**: **Planner must estimate per-script** - these vary widely and are the priority for VRAM optimization
-- **meta tasks**: Zero VRAM (model load/unload commands)
-
-**LLM tier hierarchy:**
-- LLM tasks can declare `llm_min_tier`.
-- Workers can claim only when `loaded_tier >= llm_min_tier`.
-- Higher-tier loaded models can run lower-tier tasks.
-- `llm_placement: split_gpu` requires a split runtime group; single workers must not claim those tasks.
-
-### Capability-Based LLM Routing
-
-Use this precedence when defining LLM tasks:
-
-1. Prefer expressing requirements with `llm_min_tier` (and optionally `llm_model`) first.
-2. Set `llm_placement` only when placement is truly required by the task (for example split-runtime diagnostics or strict split-only execution during current system constraints).
-2. Set `llm_min_tier` to the lowest acceptable capability.
-3. Optionally set `llm_model` when you have a specific preferred model.
-
-Runtime claim rule:
-- A worker can claim an LLM task when `loaded_tier >= llm_min_tier`.
-- If `llm_placement: split_gpu`, the worker must be in a ready split group runtime.
-
-Planning guidance:
-- Put hardware topology in the model catalog (`models.catalog.json`), not in plan logic.
-- Plans should primarily declare capability requirements (`llm_min_tier` / optional `llm_model`); use `llm_placement` sparingly.
-- Brain maps declared requirements to available workers/groups and handles load/unload strategy.
-
-### CPU Preprocessing Pattern for LLM Plans (Recommended)
-
-For expensive LLM review/verify pipelines, add CPU tasks that prepare artifacts before the LLM `foreach` waves.
-
-Common CPU helper outputs:
-- repo structure summary (entrypoints/routes/imports/extensions)
-- JSON/data shape summaries (avoid raw large data files in prompts)
-- slice complexity scoring + shard recommendations
-- claim-to-evidence candidate links
-- normalized worker outputs / contradiction prefilter candidates
-- batch timeline + idle-gap analysis (post-run)
-
-Recommended placement in task graph:
-1. After `prepare_repo`: repo structure + JSON/data summaries
-2. After `build_scope_manifest`: slice complexity + claim/evidence linking
-3. After worker review phases: result normalization + contradiction prefilter
-4. After benchmark/final report: timeline/idle-gap analyzer
-
-Benefits:
-- reduces LLM token waste
-- improves shard tuning from measured complexity
-- makes bottlenecks visible (queue wait vs compute vs split capacity)
-- improves repeatability across repos without manual tuning
-
-### LLM Examples
-
-7B doc-review style task:
-
-```markdown
-### worker_doc_claims_shard_0
-- **executor**: worker
-- **task_class**: llm
-- **llm_model**: qwen2.5:7b
-- **llm_min_tier**: 1
-- **command**: `python {PLAN_PATH}/scripts/worker_doc_claims.py ... --model qwen2.5:7b`
-- **depends_on**: warm_workers
-```
-
-14B split code-review style task:
-
-```markdown
-### worker_review
-- **executor**: worker
-- **task_class**: llm
-- **llm_model**: qwen2.5:14b
-- **llm_min_tier**: 2
-- **llm_placement**: split_gpu
-- **foreach**: {BATCH_PATH}/analysis_manifest.json:slices
-- **command**: `python {PLAN_PATH}/scripts/worker_review.py ... --model qwen2.5:14b`
-- **depends_on**: build_scope_manifest
-```
-
-**Note:** There's also a `meta` task class used internally by the brain for model loading/unloading. Plans should not use this class - the brain inserts these tasks automatically based on queue state.
-
-### VRAM Estimation (Script Tasks)
-
-**Priority: Script tasks are the focus for VRAM optimization.**
-
-**Policy options (per task):**
-- `default`: no explicit estimate is attached; workers use their script default
-- `infer`: brain LLM infers one estimate once per task definition, then applies it to all expanded tasks
-- `fixed`: planner provides explicit `vram_estimate_mb`, which brain passes through directly
-
-For `task_class: script`, omitted `vram_policy` defaults to `infer`.
-
-When documenting scripts in the `## Available Scripts` section, include a `VRAM estimate` field for GPU-based scripts. This helps the brain allocate tasks efficiently and enables workers to claim multiple script tasks concurrently if VRAM allows.
-
-**Common Script VRAM Estimates:**
-
-| Tool/Library | VRAM Estimate | Notes |
-|--------------|---------------|-------|
-| Whisper (tiny) | 800 MB | Fast, lower quality |
-| Whisper (base) | 1000 MB | Standard |
-| Whisper (medium) | 1500 MB | Better accuracy |
-| Whisper (large) | 2500 MB | Best quality |
-| Sentence-Transformers | 500 MB | Embedding generation |
-| ffmpeg (NVENC) | 800 MB | GPU-accelerated video encoding |
-| OCR (Tesseract GPU) | 600 MB | Text extraction |
-| Custom CUDA script | Estimate based on model size | Document in script |
-
-**Estimation Guidelines:**
-- Check the model size being loaded (transformers, torch models)
-- Add 20-30% overhead for CUDA operations and buffers
-- Test on GPU rig and document actual usage (see logging below)
-- Be conservative - overestimating is safer than OOM crashes
-
-**VRAM Logging:**
-Workers log VRAM usage before and after script tasks to track actual vs estimated usage. This data helps tune future estimates.
-
-### Estimation Workflow (Recommended)
-
-Use a two-pass approach for script tasks:
-
-1. Start with `vram_policy: infer`.
-2. Run a small pilot batch and collect `max_vram_used_mb` from completed tasks.
-3. Set `vram_policy: fixed` with:
-   - `vram_estimate_mb = ceil(p95(max_vram_used_mb) * 1.2)`
-4. Re-test and adjust if OOM or under-utilization appears.
-
-This keeps plans dynamic at first, then stable and deterministic once measured on your actual hardware.
-
-### Foreach Expansion
-
-Use `foreach` to expand a single task definition into N tasks - one per item in a data source. This enables parallel processing across multiple workers.
-
-**Format:** `path:jsonpath` where path is a JSON file and jsonpath navigates to an array.
-
-```markdown
-### process
-- **foreach**: {BATCH_PATH}/manifest.json:items
-- **batch_size**: 4
-- **command**: `python script.py --id {ITEM.id}`
-- **depends_on**: init
-```
-
-**Item substitution:** Use `{ITEM.field}` to insert values from each item. For simple arrays (not objects), use `{ITEM}`.
-
-**Per-item dependencies:** `depends_on` can also use `{ITEM.field}` to chain matching items across foreach stages.
-Example:
-`add_topics` task can use `depends_on: init, transcribe_whisper_{ITEM.id}` so each topic task is released as soon as its own transcript finishes.
-
-**Dependency behavior:** Tasks depending on a foreach task automatically wait for ALL expanded tasks. If `process` expands to 100 tasks, `aggregate` with `depends_on: process` waits for all 100.
-
-**Zero-item foreach:** If a valid foreach source expands to 0 items, the brain auto-completes the template task as a no-op success and continues dependency release. This prevents deadlocks on empty manifests.
-
-**Batching behavior (`batch_size > 1`):**
-- Brain groups foreach items into micro-batch tasks (e.g., `process_batch_0001_0004`).
-- Each micro-batch runs item commands sequentially in one claimed task.
-- Micro-batch dependencies are the union of dependencies across items in that batch.
-- Use conservative batch sizes for tasks with highly variable per-item runtime.
-
-**Typical pattern:**
-1. `init` (executor: brain) - creates manifest listing items to process
-2. `process` (foreach) - expands to N worker tasks
-3. `aggregate` (executor: brain) - runs after all processing complete
-
-### How the Brain Handles Dependencies
-
-The brain maintains two task lists:
-
-1. **Private list** - All tasks from the plan, waiting for dependencies (`shared/brain/private_tasks/`)
-2. **Public queue** - Tasks ready for workers (`shared/tasks/queue/`)
-
-Workflow:
-1. Brain reads plan, parses all tasks from `## Tasks` section
-2. Tasks with no dependencies are released immediately to public queue
-3. Brain monitors completed tasks
-4. When a task completes, brain checks which private tasks now have all dependencies met
-5. Newly-ready tasks are released to public queue
-6. Workers only see and claim tasks from the public queue
-
-This is a **Gantt-chart style** dependency model - flexible ordering based on actual dependencies, not rigid phases.
+6. Split-GPU mixed-model tasks
+- If a task requires split placement, keep the model contract simple and explicit.
 
 ---
 
-## Environment Setup
-
-**The planner (Claude) is responsible for environment setup.**
-
-When writing the plan, include complete run commands with all required setup. The brain copies these commands - it doesn't figure out environment variables on its own.
-
-**Simple script (no special GPU libs):**
-```markdown
-- **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/process.py --batch-id {BATCH_ID}`
-```
-
-**GPU script needing CUDA libraries:**
-```markdown
-- **Run command**:
-  ```
-  export LD_LIBRARY_PATH="$HOME/ml-env/lib/python3.13/site-packages/nvidia/cublas/lib:$HOME/ml-env/lib/python3.13/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH" && \
-  source ~/ml-env/bin/activate && \
-  python {PLAN_PATH}/scripts/gpu_process.py --batch-id {BATCH_ID}
-  ```
-```
-
-**Note:** Scripts that need GPU access should auto-detect their GPU via `CUDA_VISIBLE_DEVICES`, which is set by the worker process. Plans should not specify GPU IDs - this keeps plans generic and allows workers to be added/removed without changing plans.
-
----
-
-## Variables
-
-The brain substitutes these when generating tasks:
-
-| Variable | Description |
-|----------|-------------|
-| `{PLAN_PATH}` | Absolute path to the plan folder |
-| `{BATCH_ID}` | Timestamp-based execution ID (format: YYYYMMDD_HHMMSS) |
-| `{BATCH_PATH}` | `{PLAN_PATH}/history/{BATCH_ID}` |
-| Custom inputs | Values passed when submitting the plan |
-
-**Note:** Plans should not reference specific GPUs or workers. Tasks are generic - any available worker claims them. This allows the system to scale without changing plans.
-
----
-
-## Run Modes (Fresh vs Resume)
-
-Every operational plan should define how to run in both modes:
-
-1. `fresh`: create new batch state and process from scratch
-2. `resume`: continue from existing batch state without resetting progress
-
-System behavior note:
-- `RUN_MODE=fresh` now triggers plan-scoped cleanup of stale queued/processing/private tasks from older active batches of the same plan before launching the new batch.
-- Cleanup does not touch unrelated plans, so multiple different plans can run in parallel.
-
-Recommended submission inputs:
-
-- `RUN_MODE`: `fresh` or `resume`
-- `RESUME_BATCH_ID`: required when `RUN_MODE=resume`
-
-Submission contract for execute-plan tasks:
-
-```json
-{
-  "type": "execute_plan",
-  "plan_path": "/path/to/plan",
-  "config": {
-    "RUN_MODE": "resume",
-    "RESUME_BATCH_ID": "e49bc95c"
-  }
-}
-```
-
-### Resume Safety Rules
-
-Plans must be explicit about resume behavior:
-
-1. Resume must never overwrite an existing `history/{batch_id}/manifest.json`.
-2. Resume must not regenerate already completed outputs unless explicitly requested.
-3. Resume scripts should be idempotent and skip work already marked complete.
-4. If resume state is missing or corrupted, fail fast with a clear error.
-
-### Implementation Patterns
-
-Use one of these patterns:
-
-1. Single plan with mode-aware scripts:
-- `init` checks `RUN_MODE`; on `resume`, validates existing batch and no-ops.
-
-2. Separate plans:
-- `plan_fresh.md` includes init/create-manifest.
-- `plan_resume.md` starts from existing manifest/state and only schedules continuation tasks.
-
-For critical pipelines, pattern 2 is usually safer and easier to audit.
-
----
-
-## Worker Environment Variables
-
-Workers set environment variables that scripts can use to access worker-specific resources:
-
-| Variable | Example | Description |
-|----------|---------|-------------|
-| `CUDA_VISIBLE_DEVICES` | `2` | GPU index assigned to this worker |
-| `WORKER_OLLAMA_URL` | `http://localhost:11436` | URL to worker's Ollama instance for LLM calls |
-
-**Usage in scripts:**
-```python
-import os
-
-# Auto-detect GPU (for CUDA-based libraries)
-gpu_id = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0"))
-
-# Call worker's LLM for inference
-ollama_url = os.environ.get("WORKER_OLLAMA_URL", "http://localhost:11434")
-response = requests.post(f"{ollama_url}/api/generate", json={...})
-```
-
-**Why this matters:** Each worker runs its own Ollama instance on a dedicated port. Scripts that need LLM inference should use `WORKER_OLLAMA_URL` rather than hardcoding `localhost:11434` (which is the brain's Ollama, not available to workers).
-
----
-
-## Script Guidelines
-
-Scripts in the plan folder should:
-
-1. **Accept `--batch-id`** - So they know which batch folder to use
-2. **Accept input/output paths as arguments** - Don't hardcode paths
-3. **Be self-contained** - Import what they need, use plan's `lib/` folder
-4. **Exit 0 on success, non-zero on failure** - Brain uses exit code to detect success
-5. **Write progress to stdout** - Brain logs this for monitoring
-6. **Be idempotent when possible** - Safe to retry on failure
-7. **Support resume semantics** - If run against existing batch state, skip completed work instead of resetting it
-
-**VRAM Tracking:**
-Workers automatically log VRAM usage before and after executing script tasks. This data is collected in task completion results, allowing the brain and monitoring tools to compare estimated vs actual VRAM usage. Use this data to tune VRAM estimates in future plan updates.
-
-### Script Output Convention
-
-Scripts should write output to predictable locations within the batch folder:
-
-```
-{BATCH_PATH}/
-  manifest.json           # Created by init (list of items to process)
-  results/                # Processing output (one file per item)
-    item_001.json
-    item_002.json
-  output/                 # Aggregate output (final combined result)
-    final.json
-  logs/
-    events.log            # Progress and debug info
-```
-
-The folder names (`results/`, `output/`) are conventions - use whatever makes sense for your plan.
-
----
-
-## Example Plans
-
-### Example 1: Batch File Processor (Simple)
-
-```markdown
-# Plan: Batch File Processor
-
-## Goal
-
-Process a folder of input files, transform each one, and combine results into a summary.
-
-## Inputs
-
-- **INPUT_FOLDER**: Path to folder containing files to process
-- **FILE_PATTERN**: Glob pattern for files (e.g., "*.json")
-
-## Outputs
-
-- Processed files in `{BATCH_PATH}/results/`
-- Combined summary in `{BATCH_PATH}/output/summary.json`
-
-## Available Scripts
-
-### scripts/scan.py
-
-- **Purpose**: List all files matching pattern, create manifest
-- **Task class**: script
-- **GPU**: no
-- **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/scan.py --input {INPUT_FOLDER} --pattern "{FILE_PATTERN}" --batch-id {BATCH_ID}`
-- **Output**: `{BATCH_PATH}/manifest.json` listing files to process
-
-### scripts/process.py
-
-- **Purpose**: Process files from the manifest
-- **Task class**: script
-- **GPU**: no
-- **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/process.py --batch-id {BATCH_ID}`
-- **Output**: Result files in `{BATCH_PATH}/results/`
-- **Note**: Script claims items from manifest internally until none remain
-
-### scripts/combine.py
-
-- **Purpose**: Combine all processed results into summary
-- **Task class**: script
-- **GPU**: no
-- **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/combine.py --batch-id {BATCH_ID}`
-- **Output**: `{BATCH_PATH}/output/summary.json`
-
-## Tasks
-
-### scan
-- **executor**: worker
-- **task_class**: cpu
-- **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/scan.py --input {INPUT_FOLDER} --pattern "{FILE_PATTERN}" --batch-id {BATCH_ID}`
-- **depends_on**: none
-
-### process
-- **executor**: worker
-- **task_class**: cpu
-- **vram_policy**: infer
-- **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/process.py --batch-id {BATCH_ID}`
-- **depends_on**: scan
-
-### combine
-- **executor**: worker
-- **task_class**: cpu
-- **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/combine.py --batch-id {BATCH_ID}`
-- **depends_on**: process
-
-## Notes
-
-- CPU-only plan (`task_class: cpu`), can run on any worker including RPi
-- Safe to retry - scripts skip already-processed items
-```
-
-### Example 2: GPU Compute Batch (With CUDA)
-
-```markdown
-# Plan: Embedding Generator
-
-## Goal
-
-Generate vector embeddings for a set of text documents.
-
-## Inputs
-
-- **DOCS_PATH**: Path to folder containing text files
-
-## Outputs
-
-- Embeddings in `{BATCH_PATH}/output/vectors.json`
-
-## Available Scripts
-
-### scripts/init.py
-
-- **Purpose**: Scan documents, create manifest
-- **Task class**: script
-- **GPU**: no
-- **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/init.py --docs {DOCS_PATH} --batch-id {BATCH_ID}`
-- **Output**: `{BATCH_PATH}/manifest.json`
-
-### scripts/embed.py
-
-- **Purpose**: Generate embeddings for documents using GPU (sentence-transformers)
-- **Task class**: script
-- **GPU**: yes
-- **VRAM estimate**: 500 MB
-- **Run command**: `export LD_LIBRARY_PATH="$HOME/ml-env/lib/python3.13/site-packages/nvidia/cublas/lib:$HOME/ml-env/lib/python3.13/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH" && source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/embed.py --batch-id {BATCH_ID}`
-- **Output**: Embedding files in `{BATCH_PATH}/results/`
-- **Note**: Script auto-detects available GPU via CUDA_VISIBLE_DEVICES set by worker
-
-### scripts/merge.py
-
-- **Purpose**: Merge all embeddings into single file
-- **Task class**: script
-- **GPU**: no
-- **Run command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/merge.py --batch-id {BATCH_ID}`
-- **Output**: `{BATCH_PATH}/output/vectors.json`
-
-## Tasks
-
-### init
-- **executor**: worker
-- **task_class**: cpu
-- **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/init.py --docs {DOCS_PATH} --batch-id {BATCH_ID}`
-- **depends_on**: none
-
-### embed
-- **executor**: worker
-- **task_class**: script
-- **vram_policy**: fixed
-- **vram_estimate_mb**: 500
-- **command**: `export LD_LIBRARY_PATH="$HOME/ml-env/lib/python3.13/site-packages/nvidia/cublas/lib:$HOME/ml-env/lib/python3.13/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH" && source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/embed.py --batch-id {BATCH_ID}`
-- **depends_on**: init
-
-### merge
-- **executor**: worker
-- **task_class**: cpu
-- **command**: `source ~/ml-env/bin/activate && python {PLAN_PATH}/scripts/merge.py --batch-id {BATCH_ID}`
-- **depends_on**: embed
-```
-
----
-
-## Script Adaptation Layer
-
-**External scripts may need small adjustments to work with the orchestration system.**
-
-Plans often include scripts written for standalone use or other contexts. The planner (Claude) is responsible for identifying integration gaps and documenting them so the brain can handle mismatches.
-
-### Common Adaptations
-
-| Issue | Example | Resolution |
-|-------|---------|------------|
-| Hardcoded GPU IDs | Script requires `--gpu 1` | Make optional, auto-detect from `CUDA_VISIBLE_DEVICES` |
-| Hardcoded paths | Script uses `/data/input` | Accept as argument, use `{PLAN_PATH}` variables |
-| Missing batch awareness | Script doesn't accept `--batch-id` | Add argument or wrapper script |
-| Environment assumptions | Script expects specific virtualenv | Include full activation in run command |
-
-### Documenting Adaptations
-
-If a plan uses scripts that need adaptation, document them in the `## Notes` section:
-
-```markdown
-## Notes
-
-### Script Adaptation Required
-
-| Script | Issue | Fix |
-|--------|-------|-----|
-| `process.py` | Requires `--gpu` argument | Make optional; auto-detect from `CUDA_VISIBLE_DEVICES` |
-```
-
-### Brain's Role
-
-When a task fails due to a script mismatch the brain can detect:
-1. Brain identifies the error type (missing argument, path issue, etc.)
-2. Brain attempts to infer the fix from context (e.g., add missing argument)
-3. If fixed, task is re-queued
-4. If unfixable, escalate to Claude for script rewrite (future)
-
-**Principle:** External plans provide domain logic (what to do). The orchestration system provides execution context (which GPU, batch paths, etc.). The planner documents gaps; the brain bridges them.
-
----
-
-## What the Brain Does
-
-1. **Reads plan.md** - Parses the `## Tasks` section directly (no LLM needed)
-2. **Creates batch** - Generates timestamp-based batch ID, creates `history/{batch_id}/` folders
-3. **Creates all tasks** - One task per entry in `## Tasks` section
-4. **Holds tasks privately** - In `shared/brain/private_tasks/`
-5. **Releases ready tasks** - Tasks with no pending dependencies go to public queue
-6. **Monitors completions** - Watches for tasks finishing in `shared/tasks/complete/`
-7. **Releases dependent tasks** - When a task completes, check what's now unblocked
-8. **Handles failures** - Retry or escalate based on retry count
-9. **Generates execution summary** - Auto-inserts summary task at end of every plan
-10. **Reports completion** - When all tasks complete, batch is done
-
-### Important: Batch ID Ownership
-
-By default, `execute_plan` creates a new timestamp batch id. If you need true resume behavior, your submission+scripts must explicitly target an existing batch id and avoid reinitializing state.
-
----
-
-## Automatic Execution Summary
-
-**The brain automatically inserts a final summary task for every plan.** You don't need to add this to your plan - it's handled automatically.
-
-This summary task:
-- Runs last (depends on all other tasks)
-- Analyzes all completed and failed tasks
-- Generates EXECUTION_SUMMARY.md and execution_stats.json
-- Writes both to `history/{batch_id}/`
-- Tracks what worked, what failed, and lessons learned
-
-The summary captures:
-- **Overall results**: Total tasks, success rate, duration
-- **Task class performance**: Success rates and VRAM usage by class (cpu, script, llm)
-- **Worker performance**: Which workers completed how many tasks, resource constraints
-- **Brain interventions**: Auto-fixes, model management, retries
-- **Escalations**: Issues that needed human intervention
-- **Failures analysis**: Root causes and recommended fixes
-- **VRAM tracking**: Estimated vs actual usage for tuning future runs
-- **Lessons learned**: Actionable insights for next execution
-
-This enables the system to learn from both successful and failed runs.
-
----
-
-## Submitting a Plan
-
-```bash
-python scripts/submit.py <plan_name> \
-  --config '{"INPUT_VAR": "/path/to/input", "OTHER_VAR": "value"}'
-```
-
-Examples:
-```bash
-# Simple batch processor
-python scripts/submit.py batch_processor \
-  --config '{"INPUT_FOLDER": "/data/files", "FILE_PATTERN": "*.json"}'
-
-# GPU embedding job
-python scripts/submit.py embedding_generator \
-  --config '{"DOCS_PATH": "/data/documents"}'
-
-# Resume an existing batch
-python scripts/submit.py /mnt/shared/plans/shoulders/dc_integration \
-  --config '{"RUN_MODE": "resume", "RESUME_BATCH_ID": "e49bc95c"}'
-```
-
-This creates an `execute_plan` task that the brain picks up.
-
----
-
-*Last Updated: February 2026*
+## Practical Notes
+
+- Use generic examples in shared format docs.
+- Keep plan-specific tuning knobs in the plan repo, not in the shared format spec.
+- If a repo needs environment bootstrap, include it in the plan command; the format doc should stay generic.
+- If a plan uses unusual task fields or conventions, document them in that plan’s `## Notes` section, not here.

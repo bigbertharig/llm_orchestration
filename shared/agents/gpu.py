@@ -199,6 +199,14 @@ class GPUAgent(
         self.thermal_pause_current_seconds: int = 0
         self.thermal_pause_attempts: int = 0
 
+        # Thermal incident tracking (for brain-level recovery coordination)
+        # An "incident" is a sustained overheat condition requiring escalation
+        self.thermal_overheat_started_at: Optional[float] = None  # Unix timestamp when overheat began
+        self.thermal_overheat_sustained_seconds: int = 0  # How long continuously overheated
+        self.thermal_overheat_incident_id: Optional[str] = None  # Unique ID for this incident
+        self.thermal_recovery_reset_count: int = 0  # Resets issued by brain during this incident
+        self.thermal_recovery_last_reset_at: Optional[float] = None  # Last reset timestamp
+
         # Thermal pause policy (warning-level cooldown with exponential backoff)
         pause_cfg = self.config.get("thermal_pause", {})
         self.thermal_pause_initial_seconds = int(pause_cfg.get("initial_seconds", 60))
@@ -322,6 +330,12 @@ class GPUAgent(
             "thermal_pause_current_seconds": self.thermal_pause_current_seconds,
             "thermal_pause_attempts": self.thermal_pause_attempts,
             "last_thermal_event": self.last_thermal_event,
+            # Thermal incident tracking (for brain-level recovery coordination)
+            "thermal_overheat_started_at": datetime.fromtimestamp(self.thermal_overheat_started_at).isoformat() if self.thermal_overheat_started_at else None,
+            "thermal_overheat_sustained_seconds": self.thermal_overheat_sustained_seconds,
+            "thermal_overheat_incident_id": self.thermal_overheat_incident_id,
+            "thermal_recovery_reset_count": self.thermal_recovery_reset_count,
+            "thermal_recovery_last_reset_at": datetime.fromtimestamp(self.thermal_recovery_last_reset_at).isoformat() if self.thermal_recovery_last_reset_at else None,
             "env_block_reason": self.env_block_reason,
             "stats": self.stats,
         }
