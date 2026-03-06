@@ -16,6 +16,71 @@ from runtime_reset import hard_reset_gpu_runtime
 
 
 class BrainFailureMixin:
+    def _prepare_task_for_requeue(
+        self,
+        task: Dict[str, Any],
+        reason: str,
+        *,
+        reset_attempts: bool = False,
+        drop_incident: bool = False,
+    ) -> None:
+        """Normalize a task before writing it back to the public queue."""
+        now = datetime.now().isoformat()
+        task["status"] = "pending"
+        task["requeued_at"] = now
+        task["requeue_reason"] = reason
+        task.pop("assigned_to", None)
+        task.pop("worker", None)
+        task.pop("started_at", None)
+        task.pop("completed_at", None)
+        task.pop("result", None)
+
+        if reset_attempts:
+            task["attempts"] = 0
+            task["workers_attempted"] = []
+
+        task.pop("cloud_escalated", None)
+        task.pop("cloud_escalation_id", None)
+        task.pop("blocked_reason", None)
+        if drop_incident:
+            task.pop("incident_id", None)
+
+    def _assert_queue_requeue_invariants(self, task: Dict[str, Any]) -> None:
+        """Fail fast if a requeued task still carries stale terminal ownership fields."""
+        violations = []
+        if task.get("status") != "pending":
+            violations.append(f"status={task.get('status')!r}")
+        for field in ("assigned_to", "started_at", "completed_at"):
+            if field in task:
+                violations.append(f"unexpected_{field}")
+        result = task.get("result")
+        if result not in (None, {}, []):
+            violations.append("unexpected_result")
+        if violations:
+            raise RuntimeError(
+                f"Requeue invariant violation for task {task.get('task_id', '')}: {', '.join(violations)}"
+            )
+
+    def _save_requeued_task(
+        self,
+        task_file: Path,
+        task: Dict[str, Any],
+        reason: str,
+        *,
+        reset_attempts: bool = False,
+        drop_incident: bool = False,
+    ) -> None:
+        """Apply queue re-entry normalization and write the task back to queue."""
+        self._prepare_task_for_requeue(
+            task,
+            reason,
+            reset_attempts=reset_attempts,
+            drop_incident=drop_incident,
+        )
+        self._assert_queue_requeue_invariants(task)
+        task_file.unlink(missing_ok=True)
+        self.save_to_public(task)
+
     def evaluate_worker_output(self, task: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
         """Brain evaluates worker output for quality."""
         if not result.get("success"):
@@ -128,13 +193,7 @@ JSON only:"""
         return ""
 
     def _clear_retry_runtime_fields(self, task: Dict[str, Any]) -> None:
-        task["status"] = "pending"
-        task.pop("assigned_to", None)
-        task.pop("worker", None)
-        task.pop("started_at", None)
-        task.pop("last_attempt_at", None)
-        task.pop("completed_at", None)
-        task.pop("result", None)
+        self._prepare_task_for_requeue(task, "worker_retry")
 
     def _should_hard_reset_failed_worker(self, task: Dict[str, Any]) -> bool:
         worker_name = self._failed_task_worker(task)
@@ -283,22 +342,15 @@ JSON only:"""
         return next_model
 
     def _queue_task_retry(self, task_file: Path, task: Dict[str, Any], reason: str):
-        task["status"] = "pending"
-        task["attempts"] = 0
-        task["workers_attempted"] = []
         task["retry_recovered_by_brain"] = True
         task["retry_recovery_reason"] = reason
-        # Clear stale worker assignment fields to avoid misleading queue state
-        task.pop("assigned_to", None)
-        task.pop("worker", None)
-        task.pop("started_at", None)
-        task.pop("last_attempt_at", None)
-        task.pop("cloud_escalated", None)
-        task.pop("cloud_escalation_id", None)
-        task.pop("incident_id", None)
-        task.pop("blocked_reason", None)
-        task_file.unlink(missing_ok=True)
-        self.save_to_public(task)
+        self._save_requeued_task(
+            task_file,
+            task,
+            reason,
+            reset_attempts=True,
+            drop_incident=True,
+        )
 
     def _abort_batch(self, batch_id: str, reason: str, source_task: Dict[str, Any]):
         """Terminate a batch and move pending tasks to failed/abandoned."""
@@ -610,8 +662,12 @@ JSON only:"""
                     # Definition error - try to fix the task
                     fixed = self._try_fix_definition_error(task)
                     if fixed:
-                        task_file.unlink()
-                        self.save_to_public(task)
+                        self._save_requeued_task(
+                            task_file,
+                            task,
+                            "definition_fix",
+                            reset_attempts=True,
+                        )
                         self.log_decision("TASK_FIXED",
                             f"Fixed definition error for '{task.get('name', '')}', re-queued",
                             {"task_id": task["task_id"][:8], "fix_applied": task.get("fix_applied", "")})
@@ -642,12 +698,12 @@ JSON only:"""
                         "fix_applied": task.get("fix_applied", "")
                     })
 
-                    task["status"] = "pending"
-                    task["attempts"] = 0
-                    task["workers_attempted"] = []
-
-                    task_file.unlink()
-                    self.save_to_public(task)
+                    self._save_requeued_task(
+                        task_file,
+                        task,
+                        "missing_module_fix",
+                        reset_attempts=True,
+                    )
 
                     self.log_decision(
                         "TASK_FIXED",
@@ -701,8 +757,7 @@ JSON only:"""
                     if self._is_recoverable_llm_timeout(task, result):
                         self._set_next_llm_model(task)
 
-                    task_file.unlink()
-                    self.save_to_public(task)
+                    self._save_requeued_task(task_file, task, "worker_retry")
 
                     workers_str = ", ".join(workers) if workers else "unknown"
                     self.log_decision("RETRY",
@@ -752,11 +807,12 @@ JSON only:"""
                         })
 
                         if fixed:
-                            task["status"] = "pending"
-                            task["attempts"] = 0
-                            task["workers_attempted"] = []
-                            task_file.unlink()
-                            self.save_to_public(task)
+                            self._save_requeued_task(
+                                task_file,
+                                task,
+                                "brain_fix_succeeded",
+                                reset_attempts=True,
+                            )
                             self.log_decision(
                                 "TASK_FIXED",
                                 f"Brain fix attempt {incident['brain_fix_attempts']}/{self.max_brain_fix_attempts} succeeded; re-queued",
@@ -960,12 +1016,11 @@ JSON only:"""
 
             # Apply the fix
             task["task_class"] = inferred_class
-            task["status"] = "pending"
+            self._prepare_task_for_requeue(task, "definition_fix", reset_attempts=True)
             task["fix_applied"] = f"inferred task_class='{inferred_class}' from command"
             del task["definition_error"]
             if "error_type" in task:
                 del task["error_type"]
-            task["result"] = {}  # Clear the error result
 
             self.logger.info(f"Fixed task '{task.get('name', '')}': {task['fix_applied']}")
             return True
