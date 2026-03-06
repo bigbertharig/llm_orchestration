@@ -128,6 +128,8 @@ This plan covers five centralization tracks:
 - Brain now issues first-pass cleanup decisions for critical reports and all-member error reports
 - Reservation terminal-state cleanup in `_service_split_reservations()` is now report-first
 - Only a narrow owner-local dead-runtime exception still performs local cleanup in that path
+- Cleanup commands are now fenced by both runtime generation and reservation epoch
+- Workers reject stale cleanup commands when either fence no longer matches local state
 
 Remaining work for Track 5:
 - audit any additional queue re-entry paths outside `brain_failures.py` and `brain_monitor.py`
@@ -136,9 +138,9 @@ Remaining work for Track 5:
 
 Remaining work for Track 1:
 - start issuing fenced `cleanup_split_runtime` commands from brain decisions instead of observe-only logging
-- attach real reservation epoch/runtime generation values instead of scaffolding defaults
 - expand brain cleanup decision rules beyond first-pass critical/all-member-error handling
 - audit remaining split cleanup call sites outside owner-local startup failure handling
+- replace scaffolded reservation-epoch derivation with an explicit durable epoch field if needed
 
 ---
 
