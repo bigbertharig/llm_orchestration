@@ -105,6 +105,7 @@ This plan covers five centralization tracks:
 3. Recovery fallback centralization
 4. Global model-load owner centralization
 5. Task requeue scrub centralization
+6. History-folder summary reduction for low-context review
 
 ---
 
@@ -163,6 +164,73 @@ Remaining work for Track 3:
 Remaining work for Track 4:
 - consider replacing brain-side unlink reclaim with a fully explicit superseding lease model
 - decide whether owner issues should travel via heartbeat only or also via explicit observation artifacts
+
+---
+
+## Track 6: History-Folder Summary Reduction
+
+### Problem
+
+Raw history folders contain the right evidence, but they are expensive for an
+LLM to read directly. Success, failure, and interrupted runs all leave behind
+different artifact sets, which means naive review burns a lot of context just
+to find the important files.
+
+### Goal
+
+Keep this slice external to orchestration.
+
+Build a best-effort reducer that reads one `history/{batch_id}/` directory and
+surfaces the important artifacts and excerpts it can find, regardless of
+whether the run finished cleanly.
+
+The output should be small enough for an LLM to review first, then drill into
+specific raw files only when needed.
+
+### Required Artifacts
+
+Per run:
+- `history/{batch_id}/RUN_SUMMARY.json`
+- `history/{batch_id}/RUN_SUMMARY.md`
+
+### Reduction Strategy
+
+Use a script and reducer library to compress raw runtime artifacts into a small
+review surface before asking an LLM to analyze anything.
+
+That means:
+- JSON summaries are the machine-readable source
+- markdown summaries are the human-readable render
+- the reducer surfaces important existing logs and artifacts, not conclusions
+- the LLM still decides what the surfaced artifacts imply
+
+### Recommended Implementation Order
+
+1. Build a reusable reducer for one `history/{batch_id}` folder
+2. Add a tracked CLI entrypoint that can run anywhere in the repo
+3. Surface important artifacts and compact excerpts for success, failure, and partial runs
+4. Validate against a spread of real `github_analyzer` history folders
+5. Optionally add cross-run rollup/query scripts later, built on top of the per-run reducer
+
+### Initial Scope For This Workstream
+
+First useful slice:
+- no orchestration changes
+- external reducer only
+- write `RUN_SUMMARY.json` and `RUN_SUMMARY.md` into the history folder
+- keep the reducer tolerant of missing or inconsistent artifacts
+
+### Why This Matters
+
+This is a context-reduction layer.
+
+Instead of asking an LLM to read raw history trees and logs first, scripts
+shrink the review set to the handful of artifacts and excerpts most likely to
+matter. That lowers context cost without moving decision-making into the script.
+
+---
+
+## Test Coverage Added
 
 ### Test Coverage Added
 
