@@ -173,6 +173,16 @@ class GPUAgent(
             "reported_at": None,
             "brain_timeout_seconds": SPLIT_ISSUE_BRAIN_TIMEOUT_SECONDS,
         }
+        self.pending_global_load_owner_issue: Dict[str, Any] = {
+            "has_issue": False,
+            "issue_code": None,
+            "issue_detail": None,
+            "owner_worker": None,
+            "owner_pid": None,
+            "owner_lease_id": None,
+            "detected_at": None,
+            "reported_at": None,
+        }
         self.ollama_process: Optional[subprocess.Popen] = None
 
         # Runtime state machine (authoritative)
@@ -321,6 +331,7 @@ class GPUAgent(
             "runtime_port": self.runtime_port,
             "runtime_ollama_url": self.runtime_ollama_url,
             "split_health_issue": self._get_split_health_issue_heartbeat(),
+            "global_load_owner_issue": dict(self.pending_global_load_owner_issue),
             "ollama_healthy": self.ollama_healthy,
             "ollama": ollama_health,
             "last_updated": datetime.now().isoformat(),

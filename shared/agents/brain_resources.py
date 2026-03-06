@@ -191,6 +191,29 @@ class BrainResourceMixin:
             del seen[group_id]
         self._last_split_health_issue_signatures = seen
 
+    def _monitor_global_load_owner_issues(self, gpu_states: Dict[str, Dict[str, Any]]) -> None:
+        """Observe worker-reported global load-owner issues for future centralization."""
+        seen = getattr(self, "_last_global_load_owner_issue_signatures", {})
+        active_workers = set()
+        for gpu_name, state in gpu_states.items():
+            issue = state.get("global_load_owner_issue")
+            if not isinstance(issue, dict) or not issue.get("has_issue"):
+                continue
+            signature = json.dumps(issue, sort_keys=True)
+            active_workers.add(gpu_name)
+            if seen.get(gpu_name) == signature:
+                continue
+            seen[gpu_name] = signature
+            self.log_decision(
+                "GLOBAL_LOAD_OWNER_ISSUE_OBSERVED",
+                f"Observed global load-owner issue from {gpu_name}",
+                {"gpu": gpu_name, "issue": issue},
+            )
+        stale_workers = [gpu_name for gpu_name in seen if gpu_name not in active_workers]
+        for gpu_name in stale_workers:
+            del seen[gpu_name]
+        self._last_global_load_owner_issue_signatures = seen
+
     def _iter_task_files_json(self, *paths: Path):
         for path in paths:
             for task_file in path.glob("*.json"):
@@ -2224,6 +2247,7 @@ class BrainResourceMixin:
         # This takes priority over other resource decisions
         self._check_thermal_recovery_escalation(gpu_states)
         self._monitor_split_health_issues(gpu_states)
+        self._monitor_global_load_owner_issues(gpu_states)
 
         active_gpus = [g for g in gpu_status if g["util_pct"] > 10 or g["mem_used_mb"] > 1000]
         total_power = sum(g["power_w"] for g in gpu_status)

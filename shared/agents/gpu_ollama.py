@@ -9,6 +9,7 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -359,8 +360,39 @@ class GPUOllamaMixin:
             "worker": self.name,
             "pid": os.getpid(),
             "phase": phase,
+            "lease_id": str(uuid.uuid4()),
             "acquired_at": acquired_at or now_iso,
             "heartbeat_at": now_iso,
+        }
+
+    def _report_global_load_owner_issue(self, issue_code: str, owner: Optional[Dict[str, Any]]) -> None:
+        now_iso = datetime.now().isoformat()
+        owner = owner if isinstance(owner, dict) else {}
+        self.pending_global_load_owner_issue = {
+            "has_issue": True,
+            "issue_code": issue_code,
+            "issue_detail": str(owner)[:300] if owner else None,
+            "owner_worker": str(owner.get("worker", "")).strip() or None,
+            "owner_pid": owner.get("pid"),
+            "owner_lease_id": str(owner.get("lease_id", "")).strip() or None,
+            "detected_at": now_iso,
+            "reported_at": now_iso,
+        }
+        self.logger.warning(
+            "GLOBAL_LOAD_OWNER_ISSUE_REPORTED "
+            f"worker={self.name} issue={issue_code} owner={owner or {}}"
+        )
+
+    def _clear_global_load_owner_issue(self) -> None:
+        self.pending_global_load_owner_issue = {
+            "has_issue": False,
+            "issue_code": None,
+            "issue_detail": None,
+            "owner_worker": None,
+            "owner_pid": None,
+            "owner_lease_id": None,
+            "detected_at": None,
+            "reported_at": None,
         }
 
     def _write_global_model_load_owner(self, payload: Dict[str, Any]):
@@ -424,6 +456,7 @@ class GPUOllamaMixin:
         except FileExistsError:
             owner = self._read_global_model_load_owner()
             if self._global_owner_is_stale(owner):
+                self._report_global_load_owner_issue("stale_owner_takeover", owner)
                 self.logger.warning(
                     "GLOBAL_LOAD_LOCK_STALE_OWNER_TAKEOVER "
                     f"worker={self.name} stale_owner={owner or {}}"
@@ -433,6 +466,7 @@ class GPUOllamaMixin:
                 except Exception:
                     return False
                 return False
+            self._clear_global_load_owner_issue()
             return False
 
     def _global_model_load_owner_heartbeat_loop(self, stop_event: threading.Event, phase: str):
