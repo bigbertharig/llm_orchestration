@@ -138,6 +138,8 @@ This plan covers five centralization tracks:
 - Workers now report stale-owner takeover observations to the brain via heartbeat state
 - Workers no longer unlink stale global load-owner leases locally
 - Brain now reclaims stale global load-owner leases after verifying the observed lease still matches disk state
+- Brain and workers now use the same stale-owner timeout constant
+- Workers clear stale owner-issue state on successful lease acquire/release
 
 Remaining work for Track 5:
 - audit any additional queue re-entry paths outside `brain_failures.py` and `brain_monitor.py`
