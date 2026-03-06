@@ -2589,20 +2589,8 @@ class GPUSplitMixin:
             )
             if immediate_clear or self.split_runtime_invariant_failures >= 3:
                 self.logger.error(
-                    f"SPLIT_INVARIANT_CLEAR group={group_id} model={model_id} port={port} reason={reason}"
-                )
-                self._mark_split_reservation_runtime_invalid(group_id, reason)
-                if self.split_runtime_owner:
-                    self._stop_split_runtime()
-                # Use coordinated cleanup to actually reset local state, not just clear fields
-                try:
-                    split_port = int(port) if port else None
-                except Exception:
-                    split_port = None
-                self._coordinated_split_failure_cleanup(
-                    group_id=group_id,
-                    split_port=split_port,
-                    reason=f"invariant_{reason}",
+                    f"SPLIT_INVARIANT_BRAIN_DECISION_REQUIRED group={group_id} "
+                    f"model={model_id} port={port} reason={reason}"
                 )
             return
 

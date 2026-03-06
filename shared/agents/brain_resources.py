@@ -12,6 +12,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from filelock import FileLock
+from gpu_constants import (
+    SPLIT_ISSUE_SEVERITY_CRITICAL,
+    SPLIT_ISSUE_SEVERITY_ERROR,
+)
 
 # Split wedge reclaim policy constants
 SPLIT_WEDGE_RECONCILE_THRESHOLD = 3  # Consecutive wedged detections before reclaim
@@ -60,8 +64,74 @@ BRAIN_SPLIT_QUARANTINE_COOLDOWN_SECONDS = 900  # 15 minutes - must match gpu_con
 
 
 class BrainResourceMixin:
+    def _split_group_members_for_group_id(self, group_id: str) -> List[str]:
+        members: List[str] = []
+        if not group_id:
+            return members
+        for meta in self.model_meta_by_id.values():
+            groups = meta.get("split_groups", [])
+            if not isinstance(groups, list):
+                continue
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                current_group_id = str(group.get("id") or "").strip()
+                if current_group_id != group_id:
+                    continue
+                members = [str(m).strip() for m in group.get("members", []) if str(m).strip()]
+                if members:
+                    return members
+        return members
+
+    def _evaluate_split_cleanup_decision(
+        self,
+        group_id: str,
+        reports: List[Dict[str, Any]],
+        gpu_states: Dict[str, Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Return cleanup command details when observed issues justify cleanup."""
+        if not reports:
+            return None
+        members = self._split_group_members_for_group_id(group_id)
+        target_workers = members or [str(r.get("gpu", "")).strip() for r in reports if str(r.get("gpu", "")).strip()]
+        if not target_workers:
+            return None
+
+        critical = []
+        error_like = []
+        runtime_generation = None
+        split_port = None
+        for report in reports:
+            issue = report["issue"]
+            severity = str(issue.get("severity") or "").strip()
+            if severity == SPLIT_ISSUE_SEVERITY_CRITICAL:
+                critical.append(report)
+            if severity in {SPLIT_ISSUE_SEVERITY_CRITICAL, SPLIT_ISSUE_SEVERITY_ERROR}:
+                error_like.append(report)
+            runtime_generation = runtime_generation or issue.get("runtime_generation") or report.get("runtime_generation")
+            split_port = split_port or issue.get("split_port")
+
+        if critical:
+            return {
+                "reason": f"critical:{critical[0]['issue'].get('issue_code') or 'split_issue'}",
+                "target_workers": target_workers,
+                "runtime_generation": runtime_generation,
+                "split_port": split_port,
+            }
+
+        expected_members = len(members) if members else len(target_workers)
+        if expected_members > 0 and len(error_like) >= expected_members:
+            return {
+                "reason": f"all_members_error:{error_like[0]['issue'].get('issue_code') or 'split_issue'}",
+                "target_workers": target_workers,
+                "runtime_generation": runtime_generation,
+                "split_port": split_port,
+            }
+
+        return None
+
     def _monitor_split_health_issues(self, gpu_states: Dict[str, Dict[str, Any]]) -> None:
-        """Observe worker-reported split health issues for future centralized cleanup."""
+        """Observe worker-reported split health issues and issue cleanup when warranted."""
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for gpu_name, state in gpu_states.items():
             issue = state.get("split_health_issue")
@@ -100,6 +170,15 @@ class BrainResourceMixin:
                 f"Observed split health issues for {group_id}",
                 {"group_id": group_id, "reports": summary},
             )
+            cleanup_decision = self._evaluate_split_cleanup_decision(group_id, reports, gpu_states)
+            if cleanup_decision:
+                self._issue_split_cleanup_command(
+                    group_id,
+                    cleanup_decision["target_workers"],
+                    cleanup_decision["reason"],
+                    split_port=cleanup_decision.get("split_port"),
+                    runtime_generation=cleanup_decision.get("runtime_generation"),
+                )
 
         seen = getattr(self, "_last_split_health_issue_signatures", {})
         stale_groups = [group_id for group_id in seen if group_id not in grouped]
