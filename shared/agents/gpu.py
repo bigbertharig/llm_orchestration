@@ -188,8 +188,8 @@ class GPUAgent(
         # Ollama health tracking
         self.ollama_healthy = True
         self.ollama_consecutive_failures = 0
-        self.ollama_health_threshold = 3  # Restart after this many consecutive failures
-        self.ollama_circuit_breaker = 5   # Stop claiming LLM tasks after this many
+        self.ollama_health_threshold = 6  # Restart after ~30s of consecutive failures
+        self.ollama_circuit_breaker = 8   # Stop claiming LLM tasks before forced restart
 
         # Thermal/constrained-state tracking for explicit stall visibility
         self.thermal_pause_active = False

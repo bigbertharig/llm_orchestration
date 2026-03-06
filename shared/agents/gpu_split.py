@@ -38,6 +38,7 @@ from gpu_constants import (
     RUNTIME_STATES_READY,
     SPLIT_LAUNCHER_HEARTBEAT_MAX_AGE_SECONDS,
     SPLIT_MEMBER_CLEAN_STALL_TIMEOUT_SECONDS,
+    SPLIT_META_TIMEOUT_SECONDS,
     SPLIT_PORT_MODEL_MISS_CONSECUTIVE_COUNT,
     SPLIT_PORT_MODEL_MISS_WINDOW_SECONDS,
     SPLIT_QUARANTINE_COOLDOWN_SECONDS,
@@ -1607,8 +1608,10 @@ class GPUSplitMixin:
             )
 
             # Warm/load the target model on shared runtime.
+            split_load_deadline = time.time() + SPLIT_META_TIMEOUT_SECONDS
+
             def _warm_split_runtime():
-                warmup_deadline = time.time() + 600
+                warmup_deadline = split_load_deadline
                 last_warmup_error = ""
                 warmup_started = time.time()
                 attempts = 0
@@ -1625,6 +1628,7 @@ class GPUSplitMixin:
 
                         def _warmup_request():
                             try:
+                                remaining_budget = max(1, int(warmup_deadline - time.time()))
                                 req_result["response"] = requests.post(
                                     f"http://127.0.0.1:{port}/api/generate",
                                     json={
@@ -1637,10 +1641,7 @@ class GPUSplitMixin:
                                             "num_ctx": self.worker_num_ctx,
                                         }
                                     },
-                                    # Split first-load warmup on GTX 1060 pairs can exceed 25s
-                                    # even when healthy; premature client timeouts can retrigger
-                                    # generate calls and wedge the runtime in practice.
-                                    timeout=180
+                                    timeout=remaining_budget
                                 )
                             except Exception as exc:
                                 req_result["error"] = exc
@@ -1698,7 +1699,7 @@ class GPUSplitMixin:
                 self._run_with_global_model_load_lock(
                     phase="split_model_load",
                     fn=_warm_split_runtime,
-                    max_wait_seconds=900,
+                    max_wait_seconds=SPLIT_META_TIMEOUT_SECONDS,
                 )
                 # Close log file on success (keep log file around for debugging)
                 if self._split_runtime_log_file:

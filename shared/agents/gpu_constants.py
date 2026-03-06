@@ -12,9 +12,11 @@ DEFAULT_LLM_MIN_TIER = 1
 # =============================================================================
 # Split Runtime Configuration
 # =============================================================================
+# Single-GPU load budget: lock wait + warmup request + readiness probe.
+SINGLE_META_TIMEOUT_SECONDS = 180
 # Split loads can spend significant time waiting on the global load lock and then
 # warming a large model on the shared split runtime.
-SPLIT_META_TIMEOUT_SECONDS = 900
+SPLIT_META_TIMEOUT_SECONDS = 300
 SPLIT_LAUNCHER_HEARTBEAT_MAX_AGE_SECONDS = 45
 # Fail-fast timeout: if all_joined && all_prepared but member_clean still missing
 # after this many seconds, fail the reservation instead of waiting forever

@@ -22,6 +22,7 @@ from gpu_constants import (
     RUNTIME_STATE_COLD,
     RUNTIME_STATE_LOADING_SINGLE,
     RUNTIME_STATE_READY_SINGLE,
+    SINGLE_META_TIMEOUT_SECONDS,
     RUNTIME_STATE_UNLOADING,
 )
 
@@ -185,8 +186,15 @@ class GPUOllamaMixin:
 
         self.logger.info(f"Loading model {target_model} into VRAM...")
         start_time = time.time()
+        deadline = start_time + SINGLE_META_TIMEOUT_SECONDS
 
         def _do_load():
+            remaining_budget = deadline - time.time()
+            if remaining_budget <= 0:
+                raise RuntimeError(
+                    f"single model load timeout after {SINGLE_META_TIMEOUT_SECONDS}s "
+                    "(no time left after global lock wait)"
+                )
             # Initial pull/load request (can block while weights are loaded)
             req_result: Dict[str, Any] = {"done": False, "response": None, "error": None}
 
@@ -204,7 +212,7 @@ class GPUOllamaMixin:
                                 "num_ctx": self.worker_num_ctx,
                             }
                         },
-                        timeout=600
+                        timeout=max(1, int(remaining_budget))
                     )
                 except Exception as exc:
                     req_result["error"] = exc
@@ -234,8 +242,17 @@ class GPUOllamaMixin:
             response.raise_for_status()
 
             # Readiness gate: only mark hot once generation is reliably responsive.
-            if not self._wait_for_model_ready(model_id=target_model, max_wait_seconds=90):
-                raise RuntimeError("model readiness probe timed out after load")
+            remaining_readiness_budget = deadline - time.time()
+            if remaining_readiness_budget <= 0:
+                raise RuntimeError(
+                    f"single model load timeout after {SINGLE_META_TIMEOUT_SECONDS}s "
+                    "(budget exhausted before readiness probe)"
+                )
+            readiness_budget = max(1, int(remaining_readiness_budget))
+            if not self._wait_for_model_ready(model_id=target_model, max_wait_seconds=readiness_budget):
+                raise RuntimeError(
+                    f"model readiness probe timed out within {SINGLE_META_TIMEOUT_SECONDS}s load budget"
+                )
 
         try:
             self._set_runtime_state(
@@ -246,7 +263,7 @@ class GPUOllamaMixin:
             self._run_with_global_model_load_lock(
                 phase="single_model_load",
                 fn=_do_load,
-                max_wait_seconds=900,
+                max_wait_seconds=SINGLE_META_TIMEOUT_SECONDS,
             )
             elapsed = int(time.time() - start_time)
             self.model_loaded = True
