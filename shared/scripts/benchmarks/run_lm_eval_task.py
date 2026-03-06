@@ -223,7 +223,7 @@ def main() -> int:
         )
 
     status = load_status(Path(args.status_path))
-    backend_id = derive_backend_id(args.model, args.model_args)
+    backend_id = derive_backend_id(args.model, args.model_args, args.apply_chat_template)
     if backend_id and not args.skip_compat_check:
         certified = find_certified_test(status, backend_id, args.id)
         if certified is not None:

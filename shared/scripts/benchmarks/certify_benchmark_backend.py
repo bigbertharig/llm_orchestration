@@ -74,7 +74,7 @@ def main() -> int:
     this_dir = Path(__file__).resolve().parent
     runner = this_dir / "run_lm_eval_task.py"
     status_path = Path(args.status_path).expanduser().resolve()
-    backend_id = derive_backend_id(args.model, args.model_args)
+    backend_id = derive_backend_id(args.model, args.model_args, args.apply_chat_template)
     if not backend_id:
         raise SystemExit("Unable to derive backend_id from --model and --model-args")
 

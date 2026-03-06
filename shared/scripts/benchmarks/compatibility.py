@@ -33,11 +33,11 @@ def save_status(data: dict[str, Any], path: Path | None = None) -> Path:
     return status_path
 
 
-def derive_backend_id(model_backend: str, model_args: str) -> str:
+def derive_backend_id(model_backend: str, model_args: str, apply_chat_template: bool = False) -> str:
     backend = str(model_backend or "").strip()
     args = str(model_args or "")
     if backend == "local-chat-completions" and "/v1/chat/completions" in args:
-        return "ollama_chat_completions"
+        return "ollama_chat_completions_templated" if apply_chat_template else "ollama_chat_completions_raw"
     if backend == "local-completions" and "/v1/completions" in args:
         return "ollama_completions"
     return ""

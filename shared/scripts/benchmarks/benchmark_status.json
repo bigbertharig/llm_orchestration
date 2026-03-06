@@ -1,10 +1,16 @@
 {
   "backend_notes": [
     {
-      "backend_id": "ollama_chat_completions",
+      "backend_id": "ollama_chat_completions_raw",
       "transport": "local-chat-completions",
       "base_url_suffix": "/v1/chat/completions",
-      "scope": "Backend-level certification for Ollama chat completions."
+      "scope": "Ollama chat completions without apply_chat_template."
+    },
+    {
+      "backend_id": "ollama_chat_completions_templated",
+      "transport": "local-chat-completions",
+      "base_url_suffix": "/v1/chat/completions",
+      "scope": "Ollama chat completions with apply_chat_template."
     },
     {
       "backend_id": "ollama_completions",
@@ -15,13 +21,31 @@
   ],
   "certified_tests": [
     {
-      "backend_id": "ollama_chat_completions",
-      "test_id": "boolq",
-      "task_name": "boolq",
+      "backend_id": "ollama_chat_completions_raw",
+      "test_id": "gsm8k",
+      "task_name": "gsm8k",
       "state": "blocked",
-      "note": "lm_eval loglikelihood path is not supported on chat completions.",
+      "note": "LocalChatCompletion expects messages as list[dict]. Raw chat-completions needs apply_chat_template for these generation tasks.",
+      "model_id": "qwen2.5-coder:7b",
+      "observed_at": "2026-03-05T20:08:07"
+    },
+    {
+      "backend_id": "ollama_chat_completions_templated",
+      "test_id": "gsm8k",
+      "task_name": "gsm8k",
+      "state": "supported",
+      "note": "Probe run completed successfully.",
+      "model_id": "qwen2.5-coder:7b",
+      "observed_at": "2026-03-05T20:07:34"
+    },
+    {
+      "backend_id": "ollama_chat_completions_templated",
+      "test_id": "drop",
+      "task_name": "drop",
+      "state": "supported",
+      "note": "Probe run completed successfully.",
       "model_id": "qwen2.5:7b",
-      "observed_at": "2026-03-05T00:00:00"
+      "observed_at": "2026-03-05T20:07:34"
     },
     {
       "backend_id": "ollama_completions",
@@ -31,15 +55,6 @@
       "note": "Current Ollama completions compatibility rejects the lm_eval prompt array shape for loglikelihood tasks.",
       "model_id": "qwen2.5:7b",
       "observed_at": "2026-03-05T00:00:00"
-    },
-    {
-      "backend_id": "ollama_chat_completions",
-      "test_id": "gsm8k",
-      "task_name": "gsm8k",
-      "state": "env_blocked",
-      "note": "ModuleNotFoundError: Attempted to use an API model, but the required packages ['tenacity'] are not installed. Please install these via `pip install lm-eval[api]` or `pip install -e .\"[api]\"`",
-      "model_id": "mistral:7b-instruct",
-      "observed_at": "2026-03-05T19:57:21"
     }
   ],
   "model_tokenizers": {
@@ -72,9 +87,9 @@
     {
       "issue_id": "benchenv:lm_eval_api_dependencies",
       "subject": "lm_eval API benchmark environment",
-      "state": "env_blocked",
-      "observed_at": "2026-03-05T00:00:00",
-      "note": "Current ~/ml-env is missing lm_eval API dependency tenacity, so OpenAI-compatible Ollama probe runs cannot complete until the benchmark environment is repaired."
+      "state": "resolved",
+      "observed_at": "2026-03-05T20:05:00",
+      "note": "tenacity was installed into ~/ml-env, clearing the earlier lm_eval API dependency blocker."
     }
   ]
 }
