@@ -125,6 +125,11 @@ Rules:
 - backend certification is environment-level first, not model-by-model by default
 - uncertified tests stay unknown until probed
 - blocked backend/test pairs should fail fast instead of being rediscovered in suite runs
+- for local custom tests, use `run_local_custom_task.py` instead of `run_lm_eval_task.py`
+- when certifying standardized tests on Ollama, treat these as separate backend profiles:
+  - `ollama_chat_completions_raw`
+  - `ollama_chat_completions_templated`
+  - `ollama_completions`
 
 Run one test:
 
@@ -133,6 +138,25 @@ python3 /media/bryan/shared/scripts/benchmarks/run_lm_eval_task.py \
   --id gsm8k \
   --model local-chat-completions \
   --model-args "model=qwen2.5-coder:7b,base_url=http://localhost:11436/v1,api_key=ollama"
+```
+
+For the currently working standardized lane, include chat templating explicitly:
+
+```bash
+python3 /media/bryan/shared/scripts/benchmarks/run_lm_eval_task.py \
+  --id gsm8k \
+  --model local-chat-completions \
+  --model-args "model=qwen2.5-coder:7b,base_url=http://localhost:11435/v1/chat/completions,api_key=ollama,eos_string=<|im_end|>" \
+  --apply-chat-template
+```
+
+Run one local custom test:
+
+```bash
+python3 /media/bryan/shared/scripts/benchmarks/run_local_custom_task.py \
+  --id custom_command_safety \
+  --model qwen2.5:7b \
+  --base-url http://localhost:11436
 ```
 
 Build a preset suite first when you want a repeatable batch:
@@ -247,6 +271,16 @@ As of 2026-03-05:
   - current tested chat/completions endpoint paths do not support that combination cleanly
 
 Use the living reference to track whether these blockers have been cleared before treating those models or suites as runnable again.
+
+Additional standardized-test lessons now confirmed:
+- `local-chat-completions` without `--apply_chat_template` is a broken lane for generation tasks on the current stack
+- `local-chat-completions` with `--apply_chat_template` is the current working lane for at least:
+  - `gsm8k`
+  - `drop`
+- `local-completions` is still blocked for multiple-choice/loglikelihood tasks on the current Ollama stack
+  - confirmed failures include:
+    - `boolq`
+    - `arc_challenge`
 
 ## What Not To Do
 

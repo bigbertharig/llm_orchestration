@@ -60,6 +60,28 @@ python3 /media/bryan/shared/scripts/benchmarks/certify_benchmark_backend.py \
   --model-args "model=qwen2.5:7b,base_url=http://localhost:11436/v1/chat/completions,api_key=ollama"
 ```
 
+Catalog audit command:
+
+```bash
+python3 /media/bryan/shared/scripts/benchmarks/audit_benchmark_catalog.py
+```
+
+This writes a machine-readable coverage summary showing which catalog tests are:
+- supported
+- blocked
+- env_blocked
+- missing_task
+- missing_runner
+- not_audited
+
+Current backend-profile lessons:
+- `local-chat-completions` is not one thing
+- raw chat-completions and templated chat-completions must be tracked as separate profiles
+- current working standardized lane is:
+  - `ollama_chat_completions_templated`
+- current broken standardized lane is:
+  - `ollama_completions` for MC/loglikelihood-style tasks
+
 ## Model Library
 
 Shared archive location:
@@ -138,6 +160,23 @@ Canonical machine-readable definitions:
 | tool and agent behavior | `bfcl_v4`, `terminal_bench_2` | measure tool use and terminal competence |
 | long context | `longbench`, `ruler` | measure long-context limits |
 | local pipeline reliability | `custom_json_schema_strict`, `custom_tool_plan_sequence`, `custom_command_safety`, `custom_long_context_extract` | measure actual rig-specific behavior |
+
+### Current Custom-Test State
+
+- runnable baseline custom tests now exist for:
+  - `custom_json_schema_strict`
+  - `custom_command_safety`
+  - `custom_ambiguity_handling`
+- these are now executable through `run_local_custom_task.py` and recorded in the shared benchmark ledger
+- current recorded baseline results show:
+  - `custom_command_safety` can already serve as a useful reliability signal
+  - `custom_ambiguity_handling` can already serve as a useful reliability signal
+  - `custom_json_schema_strict` is useful, but still exposes formatting failures like fenced JSON
+- the custom suite still needs expansion before it can be treated like a broad reliability benchmark
+- next missing custom implementations:
+  - `custom_tool_plan_sequence`
+  - `custom_orchestration_tradeoff`
+  - `custom_long_context_extract`
 
 ### Current Suite Presets
 

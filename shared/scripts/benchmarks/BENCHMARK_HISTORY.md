@@ -158,6 +158,38 @@ What changed:
 - `benchmark_status.json` records supported, blocked, and still-unknown coverage
 - `certify_benchmark_backend.py` is the canonical probe path for new Ollama test compatibility
 
+### 13. Custom tests were defined before they were runnable
+
+What happened:
+- custom test ids existed in the benchmark catalog
+- but there was no executable `local_custom` runner behind them
+- this made the custom suite look broader than it really was
+
+What changed:
+- a runnable `run_local_custom_task.py` path now exists
+- baseline coverage exists for:
+  - `custom_json_schema_strict`
+  - `custom_command_safety`
+  - `custom_ambiguity_handling`
+- more custom tests still need implementation before the suite is complete
+
+### 14. Standardized Ollama compatibility turned out to be profile-specific
+
+What happened:
+- we initially treated `local-chat-completions` as one backend state
+- in practice, raw chat-completions and templated chat-completions behave differently
+- this made the certification matrix misleading until the profiles were split
+
+What changed:
+- backend status now distinguishes:
+  - `ollama_chat_completions_raw`
+  - `ollama_chat_completions_templated`
+  - `ollama_completions`
+- current observed state:
+  - raw chat-completions is broken for generation tasks
+  - templated chat-completions is the working standardized generation lane
+  - completions is still blocked for MC/loglikelihood tasks because of Ollama prompt-shape incompatibility
+
 ### 11. Split baseline on pair_4_5 is currently unstable
 
 Observed on 2026-03-05:
