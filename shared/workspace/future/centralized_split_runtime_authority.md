@@ -124,6 +124,8 @@ This plan covers five centralization tracks:
 - Explicit brain-issued `cleanup_split_runtime` meta command path now exists
 - Meta-task dedupe now includes split cleanup fencing fields (`target_workers`, epochs, runtime generation)
 - Workers reject stale cleanup commands when the runtime generation does not match local state
+- Split invariant-triggered cleanup is no longer worker-local
+- Brain now issues first-pass cleanup decisions for critical reports and all-member error reports
 
 Remaining work for Track 5:
 - audit any additional queue re-entry paths outside `brain_failures.py` and `brain_monitor.py`
@@ -131,10 +133,10 @@ Remaining work for Track 5:
 - consider enforcing queue-write invariants at a lower shared brain queue layer if more paths appear
 
 Remaining work for Track 1:
-- replace local invariant-triggered cleanup with report-only behavior
 - start issuing fenced `cleanup_split_runtime` commands from brain decisions instead of observe-only logging
 - attach real reservation epoch/runtime generation values instead of scaffolding defaults
-- add brain cleanup decision rules instead of observe-only logging
+- expand brain cleanup decision rules beyond first-pass critical/all-member-error handling
+- convert deferred reservation terminal-state cleanup path to brain authority
 
 ---
 
