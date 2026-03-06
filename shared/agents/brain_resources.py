@@ -402,6 +402,8 @@ class BrainResourceMixin:
         runtime_generation: Optional[str] = None,
     ) -> None:
         """Queue a fenced split cleanup command for workers to execute."""
+        if group_id:
+            self._record_split_failure_brain(group_id, reason)
         meta = {
             "group_id": group_id,
             "target_workers": [w for w in target_workers if str(w).strip()],

@@ -45,9 +45,6 @@ from gpu_constants import (
     SPLIT_META_TIMEOUT_SECONDS,
     SPLIT_PORT_MODEL_MISS_CONSECUTIVE_COUNT,
     SPLIT_PORT_MODEL_MISS_WINDOW_SECONDS,
-    SPLIT_QUARANTINE_COOLDOWN_SECONDS,
-    SPLIT_QUARANTINE_FAILURE_COUNT,
-    SPLIT_QUARANTINE_FAILURE_WINDOW_SECONDS,
     SPLIT_READY_GRACE_WINDOW_SECONDS,
     SPLIT_RESERVATION_LOADING_STATES,
 )
@@ -675,85 +672,6 @@ class GPUSplitMixin:
     # Auto-Recovery Workflow
     # =========================================================================
 
-    def _record_split_failure_for_quarantine(self, group_id: str, reason: str):
-        """Record a split failure for quarantine tracking.
-
-        If failures exceed threshold within window, pair enters quarantine.
-        """
-        if not group_id:
-            return
-
-        now = time.time()
-        failures = getattr(self, 'split_pair_failures', {})
-        if group_id not in failures:
-            failures[group_id] = []
-
-        failures[group_id].append({
-            "timestamp": now,
-            "reason": reason,
-        })
-
-        # Prune old failures outside window
-        cutoff = now - SPLIT_QUARANTINE_FAILURE_WINDOW_SECONDS
-        failures[group_id] = [f for f in failures[group_id] if f["timestamp"] > cutoff]
-        self.split_pair_failures = failures
-
-        failure_count = len(failures[group_id])
-        self.logger.debug(
-            f"SPLIT_FAILURE_RECORDED group={group_id} reason={reason} "
-            f"count={failure_count}/{SPLIT_QUARANTINE_FAILURE_COUNT}"
-        )
-
-        # Check if quarantine threshold reached
-        if failure_count >= SPLIT_QUARANTINE_FAILURE_COUNT:
-            self._enter_split_pair_quarantine(group_id, failures[group_id])
-
-    def _enter_split_pair_quarantine(self, group_id: str, failures: list):
-        """Enter quarantine for a split pair after repeated failures."""
-        quarantine_until = time.time() + SPLIT_QUARANTINE_COOLDOWN_SECONDS
-        quarantined = getattr(self, 'quarantined_split_pairs', {})
-        quarantined[group_id] = {
-            "entered_at": time.time(),
-            "until": quarantine_until,
-            "failure_count": len(failures),
-            "recent_failures": failures[-3:],  # Keep last 3 for diagnostics
-        }
-        self.quarantined_split_pairs = quarantined
-
-        self.logger.warning(
-            f"AUTO_RECOVERY_QUARANTINE_ENTER group={group_id} "
-            f"failures={len(failures)} cooldown_seconds={SPLIT_QUARANTINE_COOLDOWN_SECONDS}"
-        )
-
-    def _is_split_pair_quarantined(self, group_id: str) -> tuple[bool, Optional[Dict]]:
-        """Check if a split pair is in quarantine.
-
-        Returns (is_quarantined, quarantine_info). Also handles quarantine expiry.
-        """
-        if not group_id:
-            return False, None
-
-        quarantined = getattr(self, 'quarantined_split_pairs', {})
-        if group_id not in quarantined:
-            return False, None
-
-        info = quarantined[group_id]
-        now = time.time()
-
-        # Check if quarantine has expired
-        if now >= info.get("until", 0):
-            # Quarantine expired - remove and allow
-            del quarantined[group_id]
-            self.quarantined_split_pairs = quarantined
-            self.logger.info(
-                f"AUTO_RECOVERY_QUARANTINE_EXIT group={group_id} "
-                f"expired after {SPLIT_QUARANTINE_COOLDOWN_SECONDS}s"
-            )
-            return False, None
-
-        remaining = int(info.get("until", 0) - now)
-        return True, {"remaining_seconds": remaining, **info}
-
     def _trigger_auto_recovery_split(self, group_id: str, reason: str) -> Dict[str, Any]:
         """Stage A: Initiate auto-recovery for split runtime failure.
 
@@ -772,9 +690,6 @@ class GPUSplitMixin:
         self.logger.info(
             f"AUTO_RECOVERY_TRIGGER worker={self.name} group={group_id} reason={reason}"
         )
-
-        # Record failure for quarantine tracking
-        self._record_split_failure_for_quarantine(group_id, reason)
 
         # Mark local state as recovering
         self._set_runtime_state(
