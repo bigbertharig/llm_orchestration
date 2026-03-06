@@ -7,11 +7,12 @@ auto-fixes, and cloud escalation gating.
 import json
 import os
 import re
-import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+
+from runtime_reset import hard_reset_gpu_runtime
 
 
 class BrainFailureMixin:
@@ -101,6 +102,118 @@ JSON only:"""
     def _is_missing_scraped_file(self, result: Dict[str, Any]) -> bool:
         text = self._result_text({}, result)
         return "scraped file not found" in text
+
+    def _reset_split_groups_for_gpu(self, gpu_name: str) -> List[Dict[str, Any]]:
+        groups: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for meta in self.model_meta_by_id.values():
+            for group in meta.get("split_groups", []) or []:
+                if not isinstance(group, dict):
+                    continue
+                group_id = str(group.get("id", "")).strip()
+                members = [str(m).strip() for m in group.get("members", []) if str(m).strip()]
+                if not group_id or group_id in seen or gpu_name not in members:
+                    continue
+                seen.add(group_id)
+                groups.append(group)
+        return groups
+
+    def _failed_task_worker(self, task: Dict[str, Any]) -> str:
+        assigned = str(task.get("assigned_to") or task.get("worker") or "").strip()
+        if assigned:
+            return assigned
+        workers = task.get("workers_attempted", [])
+        if isinstance(workers, list) and workers:
+            return str(workers[-1]).strip()
+        return ""
+
+    def _clear_retry_runtime_fields(self, task: Dict[str, Any]) -> None:
+        task["status"] = "pending"
+        task.pop("assigned_to", None)
+        task.pop("worker", None)
+        task.pop("started_at", None)
+        task.pop("last_attempt_at", None)
+        task.pop("completed_at", None)
+        task.pop("result", None)
+
+    def _should_hard_reset_failed_worker(self, task: Dict[str, Any]) -> bool:
+        worker_name = self._failed_task_worker(task)
+        if not worker_name or worker_name not in self.gpu_agents:
+            return False
+        if str(task.get("executor", "")).lower() == "brain":
+            return False
+        task_class = str(task.get("task_class", "")).lower()
+        if task_class == "cpu":
+            return False
+        return True
+
+    def _hard_reset_failed_worker(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        worker_name = self._failed_task_worker(task)
+        if not worker_name:
+            return {"ok": False, "message": "missing failed worker name"}
+
+        gpu_cfg = self.gpu_agents.get(worker_name)
+        if not gpu_cfg:
+            return {"ok": False, "message": f"unknown gpu worker: {worker_name}"}
+
+        try:
+            worker_port = int(gpu_cfg.get("port"))
+        except Exception:
+            return {"ok": False, "message": f"missing/invalid port for {worker_name}"}
+
+        split_groups = self._reset_split_groups_for_gpu(worker_name)
+        split_ports: List[int] = []
+        split_ids: List[str] = []
+        for group in split_groups:
+            split_ids.append(str(group.get("id", "")).strip())
+            try:
+                split_ports.append(int(group.get("port")))
+            except Exception:
+                continue
+        split_ports = sorted(set(split_ports))
+        split_ids = [sid for sid in split_ids if sid]
+
+        owner_path = self.signals_path / "model_load.global.json"
+        cleared_load_owner = False
+        try:
+            if owner_path.exists():
+                with open(owner_path, "r", encoding="utf-8") as f:
+                    owner = json.load(f)
+                if str(owner.get("worker", "")).strip() == worker_name:
+                    owner_path.unlink(missing_ok=True)
+                    cleared_load_owner = True
+        except Exception:
+            pass
+
+        try:
+            result = hard_reset_gpu_runtime(
+                gpu_name=worker_name,
+                worker_port=worker_port,
+                split_ports=split_ports,
+                split_ids=split_ids,
+                config_path=str(self.config_path),
+                signals_path=str(self.signals_path),
+                clear_global_load_owner=not cleared_load_owner,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "gpu": worker_name,
+                "worker_port": worker_port,
+                "split_ports": split_ports,
+                "cleared_load_owner": cleared_load_owner,
+                "error": str(exc),
+            }
+
+        return {
+            "ok": bool(result.get("ok")),
+            "gpu": worker_name,
+            "worker_port": worker_port,
+            "split_ports": split_ports,
+            "split_group_ids": split_ids,
+            "cleared_load_owner": cleared_load_owner or bool(result.get("cleared_load_owner")),
+            "result": result,
+        }
 
     def _extract_person_id(self, task: Dict[str, Any]) -> str:
         item_ids = task.get("item_ids", [])
@@ -550,7 +663,41 @@ JSON only:"""
 
                 elif attempts < max_attempts:
                     # Worker failure - retry
-                    task["status"] = "pending"
+                    load_reset = None
+                    if self._should_hard_reset_failed_worker(task):
+                        load_reset = self._hard_reset_failed_worker(task)
+                        task["worker_failure_reset"] = {
+                            "at": datetime.now().isoformat(),
+                            **load_reset,
+                        }
+                        if not load_reset.get("ok"):
+                            with open(task_file, "w") as f:
+                                json.dump(task, f, indent=2)
+                            self.log_decision(
+                                "RETRY_RESET_FAILED",
+                                f"Failed to hard-reset worker after task failure for '{task.get('name', '')}'",
+                                {
+                                    "task_id": task["task_id"][:8],
+                                    "worker": self._failed_task_worker(task),
+                                    "task_class": str(task.get("task_class", "")),
+                                    "error": str(load_reset.get("error", ""))[:300],
+                                },
+                            )
+                            continue
+
+                        self.log_decision(
+                            "RETRY_RESET",
+                            f"Hard-reset worker {load_reset.get('gpu')} after task failure",
+                            {
+                                "task_id": task["task_id"][:8],
+                                "worker": load_reset.get("gpu"),
+                                "worker_port": load_reset.get("worker_port"),
+                                "split_ports": load_reset.get("split_ports", []),
+                                "cleared_load_owner": load_reset.get("cleared_load_owner", False),
+                            },
+                        )
+
+                    self._clear_retry_runtime_fields(task)
                     if self._is_recoverable_llm_timeout(task, result):
                         self._set_next_llm_model(task)
 
@@ -1133,4 +1280,3 @@ Return only valid JSON (no markdown, no explanation):"""
     # =========================================================================
     # Resource Monitoring
     # =========================================================================
-

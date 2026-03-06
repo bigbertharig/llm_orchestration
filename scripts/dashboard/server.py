@@ -341,10 +341,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         local_kill = scripts_dir / "kill_plan.py"
         cmd = f"python3 {shlex.quote(str(local_kill))} {shlex.quote(batch_id)} --keep-workers --keep-models --no-default-warm"
         out = run_shell(cmd, timeout_s=240)
+        lock_cleanup = self._cleanup_orphan_task_locks()
+        system_meta = self._cleanup_system_meta_artifacts()
         cleaned = self._cleanup_stale_processing_heartbeats()
-        out["cleanup"] = cleaned
+        out["cleanup"] = {
+            "heartbeats": cleaned,
+            "orphan_task_locks": lock_cleanup,
+            "system_meta": system_meta,
+        }
         if cleaned.get("errors"):
             out["stderr"] = f"{out.get('stderr', '')}\nheartbeat_cleanup_errors={cleaned.get('errors')}".strip()
+        if lock_cleanup.get("errors"):
+            out["stderr"] = f"{out.get('stderr', '')}\nlock_cleanup_errors={lock_cleanup.get('errors')}".strip()
+        if system_meta.get("errors"):
+            out["stderr"] = f"{out.get('stderr', '')}\nsystem_meta_cleanup_errors={system_meta.get('errors')}".strip()
         out["message"] = f"Killed batch {batch_id}" if out.get("ok") else f"Failed to kill batch {batch_id}"
         return out
 
@@ -353,10 +363,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         local_kill = scripts_dir / "kill_plan.py"
         cmd = f"python3 {local_kill} --keep-workers --keep-models --no-default-warm"
         out = run_shell(cmd, timeout_s=300)
+        lock_cleanup = self._cleanup_orphan_task_locks()
+        system_meta = self._cleanup_system_meta_artifacts()
         cleaned = self._cleanup_stale_processing_heartbeats()
-        out["cleanup"] = cleaned
+        out["cleanup"] = {
+            "heartbeats": cleaned,
+            "orphan_task_locks": lock_cleanup,
+            "system_meta": system_meta,
+        }
         if cleaned.get("errors"):
             out["stderr"] = f"{out.get('stderr', '')}\nheartbeat_cleanup_errors={cleaned.get('errors')}".strip()
+        if lock_cleanup.get("errors"):
+            out["stderr"] = f"{out.get('stderr', '')}\nlock_cleanup_errors={lock_cleanup.get('errors')}".strip()
+        if system_meta.get("errors"):
+            out["stderr"] = f"{out.get('stderr', '')}\nsystem_meta_cleanup_errors={system_meta.get('errors')}".strip()
         out["message"] = "Killed all active batches" if out.get("ok") else "Failed to kill all active batches"
         return out
 
@@ -576,6 +596,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "errors": errors,
         }
 
+    def _cleanup_orphan_task_locks(self) -> dict[str, Any]:
+        """Remove orphan *.json.lock files across queue/processing/failed lanes."""
+        tasks_dir = self.shared_path / "tasks"
+        removed = 0
+        errors: list[str] = []
+        for lane in ("queue", "processing", "failed"):
+            lane_dir = tasks_dir / lane
+            if not lane_dir.exists():
+                continue
+            for lock_path in sorted(lane_dir.glob("*.json.lock")):
+                task_json = Path(str(lock_path)[:-5])  # strip ".lock"
+                if task_json.exists():
+                    continue
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    removed += 1
+                except Exception as exc:
+                    errors.append(f"{lock_path.name}: {exc}")
+        return {"removed": removed, "errors": errors}
+
     def _requeue_processing_tasks_for_reset(self, assigned_to: str | None = None) -> dict[str, Any]:
         """Return non-brain processing tasks back to queue before reset.
 
@@ -724,50 +764,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         split_ids = [s for s in split_ids if s]
 
         requeued_processing = self._requeue_processing_tasks_for_reset(assigned_to=gpu_name)
+        lock_cleanup = self._cleanup_orphan_task_locks()
 
-        remote_lines = [
-            "set +e",
-            f'GPU_NAME="{gpu_name}"',
-            f'WORKER_PORT="{worker_port}"',
-            f'SPLIT_PORTS="{ " ".join(str(p) for p in split_ports) }"',
-            f'SPLIT_IDS="{ " ".join(split_ids) }"',
-            "kill_hard() {",
-            "  pid=\"$1\"",
-            "  [ -n \"$pid\" ] || return 0",
-            "  kill \"$pid\" 2>/dev/null || true",
-            "  sleep 0.2",
-            "  kill -0 \"$pid\" 2>/dev/null || return 0",
-            "  kill -9 \"$pid\" 2>/dev/null || true",
-            "}",
-            "killed_gpu_proc=0",
-            "killed_ports=0",
-            "removed_split_files=0",
-            "removed_split_locks=0",
-            "pkill -9 -f \"/mnt/shared/agents/gpu.py ${GPU_NAME}\" >/dev/null 2>&1 && killed_gpu_proc=1 || true",
-            "for p in $WORKER_PORT $SPLIT_PORTS; do",
-            "  [ -n \"$p\" ] || continue",
-            "  pids=$(ss -ltnp 2>/dev/null | grep \":${p}\\\\b\" | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | sort -u || true)",
-            "  for pid in $pids; do",
-            "    kill_hard \"$pid\"",
-            "    killed_ports=$((killed_ports + 1))",
-            "  done",
-            "done",
-            "# Clean split reservation artifacts for groups involving this GPU so pairing can restart cleanly.",
-            "for gid in $SPLIT_IDS; do",
-            "  [ -n \"$gid\" ] || continue",
-            "  for f in /mnt/shared/signals/split_llm/${gid}.json /mnt/shared/signals/split_llm/${gid}.runtime_owner.json; do",
-            "    [ -e \"$f\" ] || continue",
-            "    rm -f \"$f\" && removed_split_files=$((removed_split_files + 1))",
-            "  done",
-            "  lock=\"/mnt/shared/signals/split_llm/${gid}.json.lock\"",
-            "  if [ -e \"$lock\" ]; then rm -f \"$lock\" && removed_split_locks=$((removed_split_locks + 1)); fi",
-            "done",
-            "nohup /home/bryan/ml-env/bin/python /mnt/shared/agents/gpu.py \"$GPU_NAME\" --config /mnt/shared/agents/config.json >/tmp/${GPU_NAME}.log 2>&1 < /dev/null &",
-            "sleep 2",
-            "pgrep -af \"/mnt/shared/agents/gpu.py ${GPU_NAME}\" || true",
-            "printf '{\"gpu\":\"%s\",\"worker_port\":%s,\"split_ports\":\"%s\",\"killed_gpu_proc\":%s,\"killed_port_listeners\":%s,\"removed_split_files\":%s,\"removed_split_locks\":%s}\\n' \"$GPU_NAME\" \"$WORKER_PORT\" \"$SPLIT_PORTS\" \"$killed_gpu_proc\" \"$killed_ports\" \"$removed_split_files\" \"$removed_split_locks\"",
+        helper_cmd = [
+            "python3",
+            "/mnt/shared/agents/runtime_reset.py",
+            "--gpu-name",
+            gpu_name,
+            "--worker-port",
+            str(worker_port),
+            "--config-path",
+            "/mnt/shared/agents/config.json",
         ]
-        out = self._gpu_ssh("\n".join(remote_lines), timeout_s=90)
+        for port in split_ports:
+            helper_cmd.extend(["--split-port", str(port)])
+        for group_id in split_ids:
+            helper_cmd.extend(["--split-id", group_id])
+
+        out = self._gpu_ssh(" ".join(shlex.quote(part) for part in helper_cmd), timeout_s=90)
         parsed_remote: dict[str, Any] = {}
         if out.get("ok"):
             lines = str(out.get("stdout") or "").strip().splitlines()
@@ -785,7 +799,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "gpu": gpu_name,
             "worker_port": worker_port,
             "split_ports": split_ports,
-            "requeued_processing": requeued_processing,
+            "cleanup": {
+                "requeued_processing": requeued_processing,
+                "orphan_task_locks": lock_cleanup,
+            },
             "remote": parsed_remote,
             "stdout": out.get("stdout", ""),
             "stderr": out.get("stderr", ""),
@@ -883,6 +900,7 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_
     def _return_default(self) -> dict[str, Any]:
         local_cleanup = self._cleanup_system_meta_artifacts()
         requeued_processing = self._requeue_processing_tasks_for_reset()
+        lock_cleanup = self._cleanup_orphan_task_locks()
         scripts_dir = Path(__file__).resolve().parent.parent
         script = scripts_dir / "return_default.py"
         cmd = f"python3 {shlex.quote(str(script))} --json"
@@ -906,6 +924,7 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_
             "cleanup": {
                 "system_meta": local_cleanup,
                 "requeued_processing": requeued_processing,
+                "orphan_task_locks": lock_cleanup,
             },
         }
 

@@ -23,6 +23,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -34,6 +35,8 @@ from hardware import scan_gpus, scan_ollama, scan_cpu_temps
 BRAIN_MAX_WAIT = 300
 GPU_MAX_WAIT = 60
 FLAG_CHECK_INTERVAL = 0.5
+GPU_RESTART_WINDOW_SECONDS = 300
+GPU_RESTART_LIMIT = 6
 
 READY_FLAG_DIR = Path("/tmp/llm-orchestration-flags")
 LAUNCH_LOCK = READY_FLAG_DIR / "launch.lock"
@@ -523,6 +526,111 @@ def _check_restart_workers_signal(shared_path: Path) -> dict | None:
     return None
 
 
+def _consume_runtime_reset_marker(shared_path: Path, gpu_name: str) -> dict | None:
+    marker_path = shared_path / "signals" / "runtime_reset" / f"{gpu_name}.json"
+    if not marker_path.exists():
+        return None
+    try:
+        with open(marker_path, "r", encoding="utf-8") as f:
+            marker = json.load(f)
+    except Exception as e:
+        print(f"  Warning: Error reading runtime reset marker for {gpu_name}: {e}")
+        marker = None
+    try:
+        marker_path.unlink()
+    except Exception:
+        pass
+    return marker
+
+
+def _start_gpu_worker(
+    gpu_config: dict,
+    agents_dir: Path,
+    config_path: str,
+    processes: list,
+    max_wait: int = GPU_MAX_WAIT,
+    context: str = "startup",
+) -> subprocess.Popen:
+    gpu_name = gpu_config["name"]
+    gpu_port = gpu_config.get("port")
+
+    print(f"\n  Starting {gpu_name} (GPU {gpu_config['id']}) [{context}]...")
+
+    if gpu_port:
+        _reclaim_worker_port(gpu_port, gpu_name)
+
+    gpu_cmd = [
+        sys.executable,
+        str(agents_dir / "gpu.py"),
+        gpu_name,
+        "--config",
+        config_path,
+    ]
+
+    gpu_proc = subprocess.Popen(gpu_cmd, stdout=sys.stdout, stderr=sys.stderr)
+
+    for i, (name, _) in enumerate(processes):
+        if name == gpu_name:
+            processes[i] = (gpu_name, gpu_proc)
+            break
+    else:
+        processes.append((gpu_name, gpu_proc))
+
+    if not wait_for_ready_flag(gpu_name, max_wait):
+        print(f"WARNING: {gpu_name} may not be ready, continuing anyway...")
+
+    return gpu_proc
+
+
+def _prune_restart_history(history: deque[float], now: float) -> None:
+    while history and (now - history[0]) > GPU_RESTART_WINDOW_SECONDS:
+        history.popleft()
+
+
+def _restart_gpu_worker_after_exit(
+    gpu_name: str,
+    worker_configs: dict[str, dict],
+    restart_history: dict[str, deque[float]],
+    shared_path: Path,
+    agents_dir: Path,
+    config_path: str,
+    processes: list,
+) -> bool:
+    gpu_config = worker_configs.get(gpu_name)
+    if not gpu_config:
+        print(f"  WARNING: No config found for exited worker {gpu_name}; not restarting.")
+        return False
+
+    now = time.time()
+    history = restart_history.setdefault(gpu_name, deque())
+    _prune_restart_history(history, now)
+
+    reset_marker = _consume_runtime_reset_marker(shared_path, gpu_name)
+    if reset_marker:
+        print(
+            f"  Restarting {gpu_name} after intentional runtime reset "
+            f"(worker port {reset_marker.get('worker_port')})"
+        )
+    else:
+        if len(history) >= GPU_RESTART_LIMIT:
+            print(
+                f"  ERROR: {gpu_name} exceeded {GPU_RESTART_LIMIT} restarts in "
+                f"{GPU_RESTART_WINDOW_SECONDS}s. Leaving it stopped."
+            )
+            return False
+        print(f"  Restarting {gpu_name} after unexpected exit.")
+
+    history.append(now)
+    _start_gpu_worker(
+        gpu_config=gpu_config,
+        agents_dir=agents_dir,
+        config_path=config_path,
+        processes=processes,
+        context="supervisor-restart",
+    )
+    return True
+
+
 def _restart_gpu_workers(
     config: dict,
     agents_dir: Path,
@@ -573,35 +681,13 @@ def _restart_gpu_workers(
     # Step 4: Restart GPU workers
     print("  Starting GPU workers...")
     for gpu_config in gpus_to_start:
-        gpu_name = gpu_config["name"]
-        gpu_port = gpu_config.get("port")
-        print(f"    Starting {gpu_name} (GPU {gpu_config['id']})...")
-
-        if gpu_port:
-            _reclaim_worker_port(gpu_port, gpu_name)
-
-        gpu_cmd = [
-            sys.executable,
-            str(agents_dir / "gpu.py"),
-            gpu_name,
-            "--config",
-            config_path,
-        ]
-
-        gpu_proc = subprocess.Popen(
-            gpu_cmd, stdout=sys.stdout, stderr=sys.stderr
+        _start_gpu_worker(
+            gpu_config=gpu_config,
+            agents_dir=agents_dir,
+            config_path=config_path,
+            processes=processes,
+            context="brain-requested-restart",
         )
-
-        # Update processes list
-        for i, (name, _) in enumerate(processes):
-            if name == gpu_name:
-                processes[i] = (gpu_name, gpu_proc)
-                break
-        else:
-            processes.append((gpu_name, gpu_proc))
-
-        if not wait_for_ready_flag(gpu_name, GPU_MAX_WAIT):
-            print(f"    WARNING: {gpu_name} may not be ready")
 
     print(f"RESTART: Complete - {len(gpus_to_start)} workers restarted")
     print(f"{'=' * 60}\n")
@@ -752,6 +838,8 @@ def main():
         gpus_to_start = hw["available_workers"]
         if args.gpus is not None:
             gpus_to_start = gpus_to_start[: args.gpus]
+    worker_configs = {gpu["name"]: gpu for gpu in gpus_to_start}
+    restart_history: dict[str, deque[float]] = {}
 
     worker_mode = config.get("worker_mode", "hot")
 
@@ -762,31 +850,12 @@ def main():
         )
 
         for gpu_config in gpus_to_start:
-            gpu_name = gpu_config["name"]
-            gpu_port = gpu_config.get("port")
-            print(f"\n  Starting {gpu_name} (GPU {gpu_config['id']})...")
-
-            if gpu_port:
-                _reclaim_worker_port(gpu_port, gpu_name)
-
-            gpu_cmd = [
-                sys.executable,
-                str(agents_dir / "gpu.py"),
-                gpu_name,
-                "--config",
-                args.config,
-            ]
-
-            gpu_proc = subprocess.Popen(
-                gpu_cmd, stdout=sys.stdout, stderr=sys.stderr
+            _start_gpu_worker(
+                gpu_config=gpu_config,
+                agents_dir=agents_dir,
+                config_path=args.config,
+                processes=processes,
             )
-            processes.append((gpu_name, gpu_proc))
-
-            if not wait_for_ready_flag(gpu_name, GPU_MAX_WAIT):
-                print(
-                    f"WARNING: {gpu_name} may not be ready, "
-                    f"continuing anyway..."
-                )
 
     # Optional startup warm-up: queue load_llm meta tasks.
     # Workers still start cold; these tasks selectively heat up N workers.
@@ -873,6 +942,15 @@ def main():
                         f"Tasks assigned to it may need re-queuing."
                     )
                     processes[i] = (name, None)
+                    _restart_gpu_worker_after_exit(
+                        gpu_name=name,
+                        worker_configs=worker_configs,
+                        restart_history=restart_history,
+                        shared_path=shared_path,
+                        agents_dir=agents_dir,
+                        config_path=args.config,
+                        processes=processes,
+                    )
 
         alive_gpus = [
             p for name, p in processes if p is not None and name != "brain"
