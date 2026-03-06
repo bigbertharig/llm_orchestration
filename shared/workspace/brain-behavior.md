@@ -14,6 +14,30 @@ The brain is the central coordinator. It:
 - Manages LLM loading/unloading via meta tasks
 - Detects stuck tasks with escalating intervention (abort -> kill)
 
+### What The Brain Should And Should Not Own
+
+The brain owns **shared authority**, not all execution details.
+
+The brain should own:
+- queue truth (`pending`, `processing`, `complete`, `failed`)
+- cross-worker coordination
+- shared runtime ownership decisions
+- quarantine/retry policy
+- fenced destructive coordination commands
+
+The brain should not own:
+- per-step worker execution internals
+- local process babysitting that stays isolated to one worker
+- high-frequency local probes that workers can do themselves
+
+Operational rule:
+- workers detect and report
+- brain decides when shared coordination state changes
+- workers execute explicit commands or continue local isolated work
+
+This keeps brain state authoritative without creating a scaling bottleneck from
+brain-side micromanagement.
+
 ---
 
 ## The Brain Loop

@@ -47,6 +47,60 @@ A **multi-GPU LLM orchestration system** that coordinates local language models 
 
 See [brain-behavior.md](brain-behavior.md) for detailed brain loop and task handling.
 
+## Authority Boundary
+
+The brain is the authority for **shared coordination state**. Workers are the
+authority for **local execution mechanics**.
+
+This distinction matters for scaling. The goal is **not** for the brain to
+micromanage every worker action. The goal is for the brain to own only the
+decisions that must stay globally consistent across the system.
+
+### Brain Owns Shared Authority
+
+The brain decides anything that can affect:
+- more than one worker
+- queue truth
+- shared runtime ownership
+- scheduler/resource allocation
+- retry/quarantine policy
+- destructive coordinated cleanup
+
+Examples:
+- task release and queue re-entry
+- split-runtime cleanup decisions
+- split-pair quarantine
+- global model-load ownership / reclaim
+- reservation terminal-state decisions
+- targeted unload/reset/cleanup commands
+
+### Workers Own Local Execution
+
+GPU and CPU workers manage:
+- local process supervision
+- local task execution
+- local probes and telemetry
+- local child-process cleanup
+- short-lived isolated recovery for processes they definitively own
+- reporting observations to the brain
+
+Examples:
+- spawn and monitor subprocesses
+- probe local ports, VRAM, temperature, and heartbeat state
+- stop a process the worker itself launched
+- execute a fenced brain-issued command
+- emit health issues, failures, and completion results
+
+### Decision Rule
+
+Use this rule when deciding where logic belongs:
+
+- If the decision only affects the local worker and can be proven isolated, the worker may own it.
+- If the decision can affect shared state, another worker, scheduling, or queue truth, it belongs to the brain.
+
+This keeps the brain as the source of truth for coordination without turning it
+into a per-step remote-control loop for all workers.
+
 ### Error Handling & Escalation
 
 Each layer handles problems at its level. Unresolvable issues escalate upward.
