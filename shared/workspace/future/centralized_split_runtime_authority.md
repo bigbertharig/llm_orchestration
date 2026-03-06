@@ -121,6 +121,9 @@ This plan covers five centralization tracks:
 - GPU heartbeats now publish split health issue observations and split runtime generation state
 - Split invariant checks now emit issue reports for brain visibility before any future authority flip
 - Brain resource loop now observes and deduplicates split health issue reports for planning/visibility
+- Explicit brain-issued `cleanup_split_runtime` meta command path now exists
+- Meta-task dedupe now includes split cleanup fencing fields (`target_workers`, epochs, runtime generation)
+- Workers reject stale cleanup commands when the runtime generation does not match local state
 
 Remaining work for Track 5:
 - audit any additional queue re-entry paths outside `brain_failures.py` and `brain_monitor.py`
@@ -129,7 +132,7 @@ Remaining work for Track 5:
 
 Remaining work for Track 1:
 - replace local invariant-triggered cleanup with report-only behavior
-- add fenced brain-issued `cleanup_split_runtime` commands
+- start issuing fenced `cleanup_split_runtime` commands from brain decisions instead of observe-only logging
 - attach real reservation epoch/runtime generation values instead of scaffolding defaults
 - add brain cleanup decision rules instead of observe-only logging
 
