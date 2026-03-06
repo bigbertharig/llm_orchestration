@@ -823,57 +823,6 @@ Required JSON format:
                 if not task_def.get("depends_on"):
                     tasks_with_no_deps.append(task)
 
-        # For goal-driven plans, find the final non-foreach task for summary deps
-        compile_output_task_id = None
-        if goal_spec:
-            # Find last non-foreach task (e.g., compile_output)
-            non_foreach_tasks = [t for t in task_defs if not t.get("foreach")]
-            if non_foreach_tasks:
-                last_task_name = non_foreach_tasks[-1]["id"]
-                # Find its task_id from the created tasks
-                for task_file in self.private_tasks_path.glob("*.json"):
-                    try:
-                        with open(task_file) as f:
-                            t = json.load(f)
-                        if t.get("batch_id") == batch_id and t.get("name") == last_task_name:
-                            compile_output_task_id = t["task_id"]
-                            break
-                    except Exception:
-                        pass
-
-        # Auto-insert execution summary task
-        if goal_spec and compile_output_task_id:
-            # Goal-driven: summary depends on the final aggregation task only
-            summary_depends = [non_foreach_tasks[-1]["id"]]
-        else:
-            # Standard: summary depends on all tasks
-            summary_depends = [t["id"] for t in task_defs]
-
-        all_task_ids = [t["id"] for t in task_defs]
-        summary_command = f"python {self.shared_path}/scripts/generate_batch_summary.py --batch-id {batch_id} --plan-name {plan_dir.name} --plan-dir {plan_dir.resolve()}"
-
-        summary_task = self.create_task(
-            task_type="shell",
-            command=summary_command,
-            batch_id=batch_id,
-            task_name="batch_summary",
-            priority=max(1, batch_priority_value - 4),  # Lower than batch work; runs at end.
-            depends_on=summary_depends,
-            executor="worker",
-            task_class="cpu",
-            batch_priority=batch_priority_label,
-            preemptible=batch_preemptible,
-        )
-        summary_task["plan_path"] = str(plan_dir.resolve())
-        summary_task["batch_path"] = str(effective_batch_dir.resolve())
-        summary_task["env_manifest_path"] = str(env_manifest_path.resolve())
-
-        self.save_to_private(summary_task)
-        self.log_decision("TASK_CREATED", "Created automatic summary task (depends on all tasks)", {
-            "task_id": summary_task["task_id"][:8],
-            "depends_on_count": len(all_task_ids)
-        })
-
         # Track this batch (include paths for foreach expansion)
         batch_meta = {
             "plan": plan_dir.name,
@@ -885,7 +834,7 @@ Required JSON format:
             "env_manifest_path": str(env_manifest_path.resolve()),
             "started_at": datetime.now().isoformat(),
             "config": config,
-            "total_tasks": len(task_defs) + 1,  # +1 for automatic summary task
+            "total_tasks": len(task_defs),
             "priority": batch_priority_label,
             "preemptible": batch_preemptible,
         }

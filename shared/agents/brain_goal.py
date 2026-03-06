@@ -1035,7 +1035,19 @@ class BrainGoalMixin:
 
         self.log_decision("BATCH_COMPLETE", f"Batch {batch_id} finished successfully",
                           completion_details)
+        self._append_batch_event(
+            batch_id,
+            "batch_completed",
+            {
+                "batch_status": "complete",
+                "completed_at": datetime.now().isoformat(),
+                "plan": batch_meta.get("plan", ""),
+            },
+            batch_meta=batch_meta,
+        )
+        self._refresh_batch_summary(batch_id, status="complete", batch_meta=batch_meta)
         del self.active_batches[batch_id]
+        self.batch_event_index.pop(batch_id, None)
         self._save_brain_state()
 
     def _parse_goal_section(self, plan_content: str) -> Optional[Dict[str, Any]]:

@@ -22,6 +22,10 @@ class BrainTaskQueueMixin:
         with open(task_file, 'w') as f:
             json.dump(task, f, indent=2)
 
+        batch_id = str(task.get("batch_id", "")).strip()
+        if batch_id:
+            self._append_batch_event(batch_id, "task_released", self._task_payload(task))
+
         self.log_decision("TASK_RELEASED", f"Released task to queue: {task.get('name', task['task_id'][:8])}",
                           {"task_id": task['task_id'][:8], "depends_on": task.get('depends_on', [])})
 
@@ -30,6 +34,10 @@ class BrainTaskQueueMixin:
         task_file = self.failed_path / f"{task['task_id']}.json"
         with open(task_file, 'w') as f:
             json.dump(task, f, indent=2)
+        batch_id = str(task.get("batch_id", "")).strip()
+        if batch_id:
+            self._append_batch_event(batch_id, "task_failed", self._task_payload(task))
+            self._refresh_batch_summary(batch_id)
 
     def get_private_tasks(self, batch_id: str = None) -> List[Dict]:
         """Get private tasks, optionally filtered by batch."""
@@ -80,6 +88,10 @@ class BrainTaskQueueMixin:
         out = self.complete_path / f"{task['task_id']}.json"
         with open(out, "w") as f:
             json.dump(task, f, indent=2)
+        batch_id = str(task.get("batch_id", "")).strip()
+        if batch_id:
+            self._append_batch_event(batch_id, "task_succeeded", self._task_payload(task))
+            self._refresh_batch_summary(batch_id)
 
     def check_and_release_tasks(self):
         """Check private tasks and release any whose dependencies are met."""
@@ -409,4 +421,3 @@ class BrainTaskQueueMixin:
                 continue
 
         return satisfied
-

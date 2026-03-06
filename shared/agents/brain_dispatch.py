@@ -53,6 +53,11 @@ class BrainDispatchMixin:
         dest_file = self.complete_path / f"{task['task_id']}.json"
         with open(dest_file, 'w') as f:
             json.dump(task, f, indent=2)
+        batch_id = str(task.get("batch_id", "")).strip()
+        if batch_id:
+            event = "task_succeeded" if task.get("result", {}).get("success") else "task_failed"
+            self._append_batch_event(batch_id, event, self._task_payload(task))
+            self._refresh_batch_summary(batch_id)
 
     def handle_shell_task(self, task: Dict[str, Any]):
         """Handle a shell task (brain executes it directly)."""
@@ -76,6 +81,9 @@ class BrainDispatchMixin:
         task["last_attempt_at"] = now_iso
         with open(processing_file, "w") as f:
             json.dump(task, f, indent=2)
+        batch_id = str(task.get("batch_id", "")).strip()
+        if batch_id:
+            self._append_batch_event(batch_id, "task_started", self._task_payload(task))
 
         try:
             env = os.environ.copy()
@@ -206,6 +214,11 @@ class BrainDispatchMixin:
         dest_file = dest_base / f"{task['task_id']}.json"
         with open(dest_file, 'w') as f:
             json.dump(task, f, indent=2)
+        batch_id = str(task.get("batch_id", "")).strip()
+        if batch_id:
+            event = "task_succeeded" if task["result"].get("success") else "task_failed"
+            self._append_batch_event(batch_id, event, self._task_payload(task))
+            self._refresh_batch_summary(batch_id)
 
         # Log completion
         elapsed = task["result"].get("elapsed_seconds", 0)
@@ -233,6 +246,10 @@ class BrainDispatchMixin:
         dest_file = self.complete_path / f"{task['task_id']}.json"
         with open(dest_file, 'w') as f:
             json.dump(task, f, indent=2)
+        batch_id = str(task.get("batch_id", "")).strip()
+        if batch_id:
+            self._append_batch_event(batch_id, "task_succeeded", self._task_payload(task))
+            self._refresh_batch_summary(batch_id)
 
     def handle_system_task(self, task: Dict[str, Any]):
         """Handle brain-level system commands (orchestrator_full_reset, etc.)."""
@@ -252,6 +269,9 @@ class BrainDispatchMixin:
         processing_file = self.processing_path / f"{task['task_id']}.json"
         with open(processing_file, "w") as f:
             json.dump(task, f, indent=2)
+        batch_id = str(task.get("batch_id", "")).strip()
+        if batch_id:
+            self._append_batch_event(batch_id, "task_started", self._task_payload(task))
 
         try:
             if command == "orchestrator_full_reset":
@@ -283,6 +303,10 @@ class BrainDispatchMixin:
         dest_file = dest_base / f"{task['task_id']}.json"
         with open(dest_file, "w") as f:
             json.dump(task, f, indent=2)
+        if batch_id:
+            event = "task_succeeded" if result.get("success") else "task_failed"
+            self._append_batch_event(batch_id, event, self._task_payload(task))
+            self._refresh_batch_summary(batch_id)
 
         self.log_decision(
             "SYSTEM_TASK_COMPLETE" if result.get("success") else "SYSTEM_TASK_FAILED",
@@ -545,4 +569,3 @@ class BrainDispatchMixin:
     # =========================================================================
     # Output Evaluation
     # =========================================================================
-

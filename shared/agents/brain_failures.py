@@ -78,6 +78,16 @@ class BrainFailureMixin:
             drop_incident=drop_incident,
         )
         self._assert_queue_requeue_invariants(task)
+        batch_id = str(task.get("batch_id", "")).strip()
+        if batch_id:
+            self._append_batch_event(
+                batch_id,
+                "task_retried",
+                {
+                    **self._task_payload(task),
+                    "reason": reason,
+                },
+            )
         task_file.unlink(missing_ok=True)
         self.save_to_public(task)
 
@@ -450,8 +460,27 @@ JSON only:"""
                 "abandoned_tasks": aborted_count,
             },
         )
+        self._append_batch_event(
+            batch_id,
+            "batch_aborted",
+            {
+                "batch_status": "failed",
+                "reason": reason[:400],
+                "source_task": source_task.get("name", ""),
+                "source_task_id": source_task.get("task_id", ""),
+                "abandoned_tasks": aborted_count,
+            },
+            batch_meta=batch_meta,
+        )
+        self._refresh_batch_summary(
+            batch_id,
+            status="failed",
+            failure_reason=reason,
+            batch_meta=batch_meta,
+        )
         if batch_id in self.active_batches:
             del self.active_batches[batch_id]
+        self.batch_event_index.pop(batch_id, None)
         self._save_brain_state()
 
     def _requeue_upstream_scrape_for_person(self, batch_id: str, person_id: str) -> bool:

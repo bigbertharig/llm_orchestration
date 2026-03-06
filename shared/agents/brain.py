@@ -40,6 +40,7 @@ from brain_dispatch import BrainDispatchMixin
 from brain_plan import BrainPlanMixin
 from brain_failures import BrainFailureMixin
 from brain_monitor import BrainMonitorMixin
+from brain_summary import BrainSummaryMixin
 from brain_tasks import BrainTaskQueueMixin
 from brain_resources import BrainResourceMixin
 
@@ -58,7 +59,7 @@ logging.basicConfig(
 #   - brain: Brain-only tasks (always executed by brain, never by workers)
 #   - meta: Model load/unload tasks (inserted by brain, claimed by GPU workers)
 # =============================================================================
-class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin, BrainMonitorMixin, BrainResourceMixin, BrainFailureMixin, BrainDispatchMixin):
+class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin, BrainMonitorMixin, BrainResourceMixin, BrainFailureMixin, BrainSummaryMixin, BrainDispatchMixin):
     def __init__(self, config_path: str):
         self.config_path = Path(config_path)
         self.config = self._load_config(config_path)
@@ -136,6 +137,7 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
 
         # Track active batches: batch_id -> {plan, started_at, config}
         self.active_batches: Dict[str, Dict] = {}
+        self.batch_event_index: Dict[str, set] = {}
 
         # Decision log file
         self.log_path = self.shared_path / "logs"
@@ -394,7 +396,11 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
                 # 2b. Process goal-driven plan validations
                 self._process_goal_validations()
 
-                # 2c. Reconcile batch completion for all active batches.
+                # 2c. Reconcile batch events and incremental summaries from current task state.
+                for _batch_id in list(self.active_batches.keys()):
+                    self._reconcile_batch_history(_batch_id)
+
+                # 2d. Reconcile batch completion for all active batches.
                 # Prevent stale active_batches entries when no new task releases occur.
                 for _batch_id in list(self.active_batches.keys()):
                     self._check_batch_completion(_batch_id)
