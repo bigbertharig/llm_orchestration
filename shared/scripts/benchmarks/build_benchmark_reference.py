@@ -134,6 +134,17 @@ def main() -> int:
             ]
         )
 
+    runtime_note_rows: list[list[str]] = []
+    for row in sorted(status.get("task_runtime_notes", []), key=lambda item: status_sort_key(item, "test_id")):
+        runtime_note_rows.append(
+            [
+                str(row.get("test_id", "")),
+                str(row.get("runtime_class", "")),
+                str(row.get("observed_at", "")),
+                str(row.get("note", "")),
+            ]
+        )
+
     generated_at = datetime.now().isoformat()
     content = [
         "# Model Benchmark Reference",
@@ -159,6 +170,13 @@ def main() -> int:
         md_table(
             ["Backend", "Test ID", "State", "Probe Model", "Last Observed", "Notes"],
             certified_test_rows or [["-", "-", "-", "-", "-", "-"]]
+        ),
+        "",
+        "### Task Runtime Notes",
+        "",
+        md_table(
+            ["Test ID", "Runtime Class", "Last Observed", "Notes"],
+            runtime_note_rows or [["-", "-", "-", "-"]]
         ),
         "",
         "## Latest Score Per Model/Test",

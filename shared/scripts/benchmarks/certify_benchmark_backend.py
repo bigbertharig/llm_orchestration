@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from compatibility import derive_backend_id, load_status, save_status, set_certified_test
-from run_lm_eval_task import default_benchmark_python, default_output_dir
+from run_lm_eval_task import default_benchmark_python, default_output_dir, load_tests, lm_eval_task_set, resolve_task_name
 
 
 def iso_now() -> str:
@@ -37,7 +37,11 @@ def classify_result(stdout: str, stderr: str, returncode: int) -> tuple[str, str
     combined = "\n".join(part for part in [stdout, stderr] if part).strip()
     lines = [line.strip() for line in combined.splitlines() if line.strip()]
     for line in reversed(lines):
+        if "DatasetNotFoundError:" in line or "gated dataset on the Hub" in line:
+            return "env_blocked", line
         if "required packages ['tenacity'] are not installed" in line:
+            return "env_blocked", line
+        if "required for generating translation task prompt templates" in line:
             return "env_blocked", line
         if "No module named lm_eval" in line:
             return "env_blocked", line
@@ -109,7 +113,14 @@ def main() -> int:
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
     status = load_status(status_path)
-    task_name = args.id
+    catalog_path = (this_dir / args.catalog).resolve() if not Path(args.catalog).is_absolute() else Path(args.catalog)
+    tests = load_tests(catalog_path)
+    selected = tests.get(args.id, {})
+    configured_task_name = str(selected.get("task_name", args.id)).strip() or args.id
+    try:
+        task_name = resolve_task_name(configured_task_name, lm_eval_task_set(args.python)) or configured_task_name
+    except SystemExit:
+        task_name = configured_task_name
     model_id = parse_model_id(args.model_args)
     state, note = classify_result(proc.stdout, proc.stderr, proc.returncode)
     set_certified_test(

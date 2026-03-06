@@ -15,6 +15,16 @@ from typing import Any
 from compatibility import derive_backend_id, find_certified_test, load_status, required_tokenizer
 
 
+TASK_NAME_ALIASES: dict[str, tuple[str, ...]] = {
+    "gpqa_diamond": ("gpqa_diamond_zeroshot", "gpqa_diamond_n_shot"),
+    # Use one representative MMMLU subject for backend certification; full benchmark runs
+    # should still target the real grouped task once the harness path is finalized.
+    "mmmlu": ("mmmlu_de_de_abstract_algebra",),
+    "math_500": ("minerva_math500", "hendrycks_math500"),
+    "aime_2024": ("aime24",),
+}
+
+
 def now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -76,6 +86,15 @@ def lm_eval_task_set(python_bin: str) -> set[str]:
             if name and " " not in name:
                 tasks.add(name)
     return tasks
+
+
+def resolve_task_name(task_name: str, available_tasks: set[str]) -> str | None:
+    if task_name in available_tasks:
+        return task_name
+    for alias in TASK_NAME_ALIASES.get(task_name, ()):
+        if alias in available_tasks:
+            return alias
+    return None
 
 
 def parse_model_id(model_args: str) -> str:
@@ -216,11 +235,13 @@ def main() -> int:
         raise SystemExit(f"Test '{args.id}' has no task_name in catalog.")
 
     available_tasks = lm_eval_task_set(args.python)
-    if task_name not in available_tasks:
+    resolved_task_name = resolve_task_name(task_name, available_tasks)
+    if resolved_task_name is None:
         raise SystemExit(
             f"lm-eval task '{task_name}' is not available in this environment. "
             "Run `python3 -m lm_eval --tasks list` to inspect installed task names."
         )
+    task_name = resolved_task_name
 
     status = load_status(Path(args.status_path))
     backend_id = derive_backend_id(args.model, args.model_args, args.apply_chat_template)
