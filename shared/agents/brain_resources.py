@@ -101,6 +101,7 @@ class BrainResourceMixin:
         error_like = []
         runtime_generation = None
         split_port = None
+        reservation_epoch = None
         for report in reports:
             issue = report["issue"]
             severity = str(issue.get("severity") or "").strip()
@@ -110,6 +111,7 @@ class BrainResourceMixin:
                 error_like.append(report)
             runtime_generation = runtime_generation or issue.get("runtime_generation") or report.get("runtime_generation")
             split_port = split_port or issue.get("split_port")
+            reservation_epoch = reservation_epoch or issue.get("reservation_epoch")
 
         if critical:
             return {
@@ -117,6 +119,7 @@ class BrainResourceMixin:
                 "target_workers": target_workers,
                 "runtime_generation": runtime_generation,
                 "split_port": split_port,
+                "reservation_epoch": reservation_epoch,
             }
 
         expected_members = len(members) if members else len(target_workers)
@@ -126,6 +129,7 @@ class BrainResourceMixin:
                 "target_workers": target_workers,
                 "runtime_generation": runtime_generation,
                 "split_port": split_port,
+                "reservation_epoch": reservation_epoch,
             }
 
         return None
@@ -177,6 +181,7 @@ class BrainResourceMixin:
                     cleanup_decision["target_workers"],
                     cleanup_decision["reason"],
                     split_port=cleanup_decision.get("split_port"),
+                    reservation_epoch=cleanup_decision.get("reservation_epoch"),
                     runtime_generation=cleanup_decision.get("runtime_generation"),
                 )
 

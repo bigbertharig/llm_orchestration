@@ -155,6 +155,20 @@ class GPUSplitMixin:
         )
         issue["awaiting_brain_decision"] = False
 
+    def _split_reservation_epoch_from_dict(self, reservation: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not isinstance(reservation, dict):
+            return None
+        return str(
+            reservation.get("created_at")
+            or reservation.get("ready_at")
+            or reservation.get("updated_at")
+            or ""
+        ).strip() or None
+
+    def _read_split_reservation_epoch(self, group_id: str) -> Optional[str]:
+        reservation = self._read_json_file(self._split_reservation_path(group_id)) if group_id else None
+        return self._split_reservation_epoch_from_dict(reservation)
+
     def _split_reservation_path(self, group_id: str) -> Path:
         safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(group_id))
         return self.split_state_dir / f"{safe}.json"
@@ -2586,6 +2600,7 @@ class GPUSplitMixin:
                 group_id=group_id,
                 split_port=port,
                 consecutive_detections=self.split_runtime_invariant_failures,
+                reservation_epoch=self._read_split_reservation_epoch(group_id),
             )
             if immediate_clear or self.split_runtime_invariant_failures >= 3:
                 self.logger.error(
@@ -2909,11 +2924,7 @@ class GPUSplitMixin:
 
                     if status in {"unloaded", "failed", "expired"}:
                         if self.runtime_group_id == reservation.get("group_id"):
-                            reservation_epoch = str(
-                                reservation.get("updated_at")
-                                or reservation.get("created_at")
-                                or ""
-                            ).strip() or None
+                            reservation_epoch = self._split_reservation_epoch_from_dict(reservation)
                             # Narrow local exception: owner can clean up if it can prove
                             # the runtime it launched is already gone.
                             if self.split_runtime_owner and self.split_runtime_process is None:

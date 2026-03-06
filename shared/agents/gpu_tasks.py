@@ -1511,9 +1511,23 @@ class GPUTaskMixin:
             task_id = task.get("task_id")
             group_id = str(task.get("group_id", "")).strip() or str(self.runtime_group_id or "")
             cleanup_reason = str(task.get("cleanup_reason", "")).strip() or "brain_cleanup_command"
+            expected_reservation_epoch = str(task.get("reservation_epoch", "")).strip() or None
             expected_generation = str(task.get("runtime_generation", "")).strip() or None
+            actual_reservation_epoch = self._read_split_reservation_epoch(group_id)
             actual_generation = str(getattr(self, "split_runtime_generation", "") or "").strip() or None
-            if expected_generation and actual_generation and expected_generation != actual_generation:
+            if expected_reservation_epoch and actual_reservation_epoch and expected_reservation_epoch != actual_reservation_epoch:
+                result = {
+                    "success": True,
+                    "output": (
+                        f"Skipped stale split cleanup for {group_id or '-'}: "
+                        f"expected_reservation_epoch={expected_reservation_epoch} "
+                        f"actual_reservation_epoch={actual_reservation_epoch}"
+                    ),
+                    "stale_command": True,
+                    "worker": self.name,
+                    "max_vram_used_mb": 0,
+                }
+            elif expected_generation and actual_generation and expected_generation != actual_generation:
                 result = {
                     "success": True,
                     "output": (
