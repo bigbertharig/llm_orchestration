@@ -552,7 +552,7 @@ Higher priority = claimed first by workers.
 |----------|----------|
 | 10 | Meta tasks: load_llm, unload_llm (resource management) |
 | 5 | Normal work tasks |
-| 1 | Auto-inserted batch_summary task (runs last) |
+| 1 | Brain-owned summary refreshes and run-event writes |
 
 ---
 

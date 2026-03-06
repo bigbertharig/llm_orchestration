@@ -291,7 +291,7 @@ llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
 7. GPU agents spawn worker subprocesses to execute each task
 8. Workers print result JSON to stdout, GPU agent collects and writes to complete/
 9. Brain checks completed tasks, releases dependent tasks
-10. Brain auto-inserts batch_summary task (depends on all others)
+10. Brain records run events and refreshes per-run summary artifacts
 11. When all tasks complete, batch is done
 ```
 
