@@ -26,7 +26,7 @@ import time
 from datetime import datetime
 from multiprocessing import Queue
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from gpu_constants import (
     ACTIVE_WORK_HEARTBEAT_INTERVAL,
@@ -34,6 +34,7 @@ from gpu_constants import (
     EXTERNAL_HEARTBEAT_INTERVAL,
     INTERNAL_POLL_INTERVAL,
     RUNTIME_STATE_COLD,
+    SPLIT_ISSUE_BRAIN_TIMEOUT_SECONDS,
 )
 from gpu_core import GPUCoreMixin
 from gpu_ollama import GPUOllamaMixin
@@ -156,6 +157,22 @@ class GPUAgent(
         self.last_split_runtime_error: str = ""
         self.split_runtime_owner_meta_path: Optional[Path] = None
         self.split_runtime_invariant_failures: int = 0
+        self.split_runtime_generation: Optional[str] = None
+        self.pending_split_health_issue: Dict[str, Any] = {
+            "has_issue": False,
+            "severity": None,
+            "issue_code": None,
+            "issue_detail": None,
+            "group_id": None,
+            "split_port": None,
+            "reservation_epoch": None,
+            "runtime_generation": None,
+            "detected_at": None,
+            "consecutive_detections": 0,
+            "awaiting_brain_decision": False,
+            "reported_at": None,
+            "brain_timeout_seconds": SPLIT_ISSUE_BRAIN_TIMEOUT_SECONDS,
+        }
         self.ollama_process: Optional[subprocess.Popen] = None
 
         # Runtime state machine (authoritative)
@@ -300,8 +317,10 @@ class GPUAgent(
             "runtime_placement": self.runtime_placement,
             "runtime_group_id": self.runtime_group_id,
             "split_runtime_owner": self.split_runtime_owner,
+            "split_runtime_generation": self.split_runtime_generation,
             "runtime_port": self.runtime_port,
             "runtime_ollama_url": self.runtime_ollama_url,
+            "split_health_issue": self._get_split_health_issue_heartbeat(),
             "ollama_healthy": self.ollama_healthy,
             "ollama": ollama_health,
             "last_updated": datetime.now().isoformat(),
@@ -377,6 +396,7 @@ class GPUAgent(
                 self._check_kill_signal()
                 self._service_split_reservations()
                 self._check_split_runtime_invariants()
+                self._check_split_health_issue_timeout()
 
                 # Auto-recovery check: if wedged with no active work, trigger recovery
                 should_recover, recover_reason = self._should_trigger_auto_recovery()

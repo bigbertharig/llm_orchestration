@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 import uuid
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -36,6 +37,9 @@ from gpu_constants import (
     RUNTIME_STATE_RECOVERING_SINGLE,
     RUNTIME_STATE_RECOVERING_SPLIT,
     RUNTIME_STATES_READY,
+    SPLIT_ISSUE_SEVERITY_CRITICAL,
+    SPLIT_ISSUE_SEVERITY_ERROR,
+    SPLIT_ISSUE_SEVERITY_WARNING,
     SPLIT_LAUNCHER_HEARTBEAT_MAX_AGE_SECONDS,
     SPLIT_MEMBER_CLEAN_STALL_TIMEOUT_SECONDS,
     SPLIT_META_TIMEOUT_SECONDS,
@@ -51,6 +55,105 @@ from gpu_constants import (
 
 class GPUSplitMixin:
     """Mixin providing split GPU runtime coordination methods."""
+
+    def _get_split_health_issue_heartbeat(self) -> Dict[str, Any]:
+        issue = getattr(self, "pending_split_health_issue", None)
+        if not isinstance(issue, dict):
+            return {
+                "has_issue": False,
+                "severity": None,
+                "issue_code": None,
+                "issue_detail": None,
+                "group_id": None,
+                "split_port": None,
+                "reservation_epoch": None,
+                "runtime_generation": None,
+                "detected_at": None,
+                "consecutive_detections": 0,
+                "awaiting_brain_decision": False,
+                "reported_at": None,
+                "brain_timeout_seconds": None,
+            }
+        return deepcopy(issue)
+
+    def _report_split_health_issue(
+        self,
+        *,
+        severity: str,
+        issue_code: str,
+        issue_detail: str = "",
+        group_id: str = "",
+        split_port: Optional[int] = None,
+        consecutive_detections: int = 1,
+        reservation_epoch: Optional[str] = None,
+        runtime_generation: Optional[str] = None,
+    ) -> None:
+        now = datetime.now().isoformat()
+        self.pending_split_health_issue = {
+            "has_issue": True,
+            "severity": severity,
+            "issue_code": issue_code,
+            "issue_detail": issue_detail or None,
+            "group_id": group_id or None,
+            "split_port": split_port,
+            "reservation_epoch": reservation_epoch,
+            "runtime_generation": runtime_generation or getattr(self, "split_runtime_generation", None),
+            "detected_at": now,
+            "consecutive_detections": max(1, int(consecutive_detections or 1)),
+            "awaiting_brain_decision": True,
+            "reported_at": now,
+            "brain_timeout_seconds": self.pending_split_health_issue.get("brain_timeout_seconds"),
+        }
+        self.logger.warning(
+            "SPLIT_HEALTH_ISSUE_REPORTED "
+            f"group={group_id or '-'} severity={severity} issue={issue_code} "
+            f"port={split_port} detections={consecutive_detections}"
+        )
+
+    def _clear_split_health_issue(self) -> None:
+        timeout_seconds = None
+        existing = getattr(self, "pending_split_health_issue", None)
+        if isinstance(existing, dict):
+            timeout_seconds = existing.get("brain_timeout_seconds")
+        self.pending_split_health_issue = {
+            "has_issue": False,
+            "severity": None,
+            "issue_code": None,
+            "issue_detail": None,
+            "group_id": None,
+            "split_port": None,
+            "reservation_epoch": None,
+            "runtime_generation": None,
+            "detected_at": None,
+            "consecutive_detections": 0,
+            "awaiting_brain_decision": False,
+            "reported_at": None,
+            "brain_timeout_seconds": timeout_seconds,
+        }
+
+    def _check_split_health_issue_timeout(self) -> None:
+        """Scaffolding hook for future brain-decision timeout enforcement."""
+        issue = getattr(self, "pending_split_health_issue", None)
+        if not isinstance(issue, dict) or not issue.get("has_issue"):
+            return
+        if not issue.get("awaiting_brain_decision"):
+            return
+        reported_at = issue.get("reported_at")
+        timeout_seconds = int(issue.get("brain_timeout_seconds") or 0)
+        if not reported_at or timeout_seconds <= 0:
+            return
+        try:
+            age_seconds = (datetime.now() - datetime.fromisoformat(str(reported_at))).total_seconds()
+        except Exception:
+            return
+        if age_seconds < timeout_seconds:
+            return
+        self.logger.warning(
+            "SPLIT_HEALTH_ISSUE_TIMEOUT "
+            f"group={issue.get('group_id') or '-'} issue={issue.get('issue_code') or '-'} "
+            f"age_seconds={int(age_seconds)}"
+        )
+        issue["awaiting_brain_decision"] = False
 
     def _split_reservation_path(self, group_id: str) -> Path:
         safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(group_id))
@@ -235,11 +338,13 @@ class GPUSplitMixin:
             f"http://localhost:{self.runtime_port}" if self.runtime_port else None
         )
         self.split_runtime_owner = bool(as_owner)
+        self.split_runtime_generation = str(uuid.uuid4()) if as_owner else None
         self.split_runtime_invariant_failures = 0
         # Track when split became ready for grace window
         self.split_runtime_ready_at = time.time()
         # Reset port_model_missing tracking
         self.split_runtime_port_model_miss_timestamps = []
+        self._clear_split_health_issue()
         # Transition to ready_split state
         self._set_runtime_state(
             RUNTIME_STATE_READY_SPLIT,
@@ -357,9 +462,11 @@ class GPUSplitMixin:
         self.runtime_port = self.port
         self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
         self.split_runtime_owner = False
+        self.split_runtime_generation = None
         self.split_runtime_invariant_failures = 0
         self.split_runtime_ready_at = None
         self.split_runtime_port_model_miss_timestamps = []
+        self._clear_split_health_issue()
 
         # 5. Transition to cold state
         self._set_runtime_state(
@@ -386,7 +493,9 @@ class GPUSplitMixin:
         self.runtime_port = self.port
         self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
         self.split_runtime_owner = False
+        self.split_runtime_generation = None
         self.split_runtime_invariant_failures = 0
+        self._clear_split_health_issue()
         # Transition to cold state
         self._set_runtime_state(
             RUNTIME_STATE_COLD,
@@ -2460,11 +2569,24 @@ class GPUSplitMixin:
             # port_model_missing with threshold: immediate clear (already passed threshold)
             # reservation_* issues: require 3 failures (may be transient sync issues)
             immediate_clear = reason.startswith("owner_meta_mismatch") or reason.startswith("port_model_missing")
+            severity = SPLIT_ISSUE_SEVERITY_WARNING
+            if reason.startswith("owner_meta_mismatch"):
+                severity = SPLIT_ISSUE_SEVERITY_CRITICAL
+            elif immediate_clear:
+                severity = SPLIT_ISSUE_SEVERITY_ERROR
 
             if self.split_runtime_invariant_failures == 1:
                 self.logger.warning(
                     f"SPLIT_INVARIANT_WARN group={group_id} model={model_id} port={port} reason={reason}"
                 )
+            self._report_split_health_issue(
+                severity=severity,
+                issue_code=f"invariant_{reason}",
+                issue_detail=f"model={model_id}",
+                group_id=group_id,
+                split_port=port,
+                consecutive_detections=self.split_runtime_invariant_failures,
+            )
             if immediate_clear or self.split_runtime_invariant_failures >= 3:
                 self.logger.error(
                     f"SPLIT_INVARIANT_CLEAR group={group_id} model={model_id} port={port} reason={reason}"
@@ -2487,6 +2609,7 @@ class GPUSplitMixin:
         # All checks passed - reset failure tracking
         self.split_runtime_invariant_failures = 0
         self.split_runtime_port_model_miss_timestamps = []
+        self._clear_split_health_issue()
 
     def _split_group_has_any_active_work(self, group_id: str) -> bool:
         """Return True if any reservation member currently reports active work.

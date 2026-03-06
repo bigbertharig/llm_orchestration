@@ -60,6 +60,53 @@ BRAIN_SPLIT_QUARANTINE_COOLDOWN_SECONDS = 900  # 15 minutes - must match gpu_con
 
 
 class BrainResourceMixin:
+    def _monitor_split_health_issues(self, gpu_states: Dict[str, Dict[str, Any]]) -> None:
+        """Observe worker-reported split health issues for future centralized cleanup."""
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for gpu_name, state in gpu_states.items():
+            issue = state.get("split_health_issue")
+            if not isinstance(issue, dict) or not issue.get("has_issue"):
+                continue
+            group_id = str(issue.get("group_id") or "").strip() or f"worker:{gpu_name}"
+            grouped.setdefault(group_id, []).append({
+                "gpu": gpu_name,
+                "issue": issue,
+                "runtime_generation": state.get("split_runtime_generation"),
+                "runtime_state": state.get("runtime_state"),
+            })
+
+        for group_id, reports in grouped.items():
+            summary = []
+            for report in reports:
+                issue = report["issue"]
+                summary.append(
+                    {
+                        "gpu": report["gpu"],
+                        "severity": issue.get("severity"),
+                        "issue_code": issue.get("issue_code"),
+                        "awaiting_brain_decision": issue.get("awaiting_brain_decision"),
+                        "runtime_generation": issue.get("runtime_generation") or report.get("runtime_generation"),
+                        "runtime_state": report.get("runtime_state"),
+                    }
+                )
+            signature = json.dumps(summary, sort_keys=True)
+            seen = getattr(self, "_last_split_health_issue_signatures", {})
+            if seen.get(group_id) == signature:
+                continue
+            seen[group_id] = signature
+            self._last_split_health_issue_signatures = seen
+            self.log_decision(
+                "SPLIT_HEALTH_ISSUES_OBSERVED",
+                f"Observed split health issues for {group_id}",
+                {"group_id": group_id, "reports": summary},
+            )
+
+        seen = getattr(self, "_last_split_health_issue_signatures", {})
+        stale_groups = [group_id for group_id in seen if group_id not in grouped]
+        for group_id in stale_groups:
+            del seen[group_id]
+        self._last_split_health_issue_signatures = seen
+
     def _iter_task_files_json(self, *paths: Path):
         for path in paths:
             for task_file in path.glob("*.json"):
@@ -2051,6 +2098,7 @@ class BrainResourceMixin:
         # Check for thermal recovery escalation (brain-level)
         # This takes priority over other resource decisions
         self._check_thermal_recovery_escalation(gpu_states)
+        self._monitor_split_health_issues(gpu_states)
 
         active_gpus = [g for g in gpu_status if g["util_pct"] > 10 or g["mem_used_mb"] > 1000]
         total_power = sum(g["power_w"] for g in gpu_status)

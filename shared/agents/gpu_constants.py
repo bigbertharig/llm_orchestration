@@ -28,6 +28,10 @@ SPLIT_READY_GRACE_WINDOW_SECONDS = 15
 # Require N consecutive port_model_missing events within M seconds to clear
 SPLIT_PORT_MODEL_MISS_CONSECUTIVE_COUNT = 3
 SPLIT_PORT_MODEL_MISS_WINDOW_SECONDS = 30
+SPLIT_ISSUE_BRAIN_TIMEOUT_SECONDS = 30
+SPLIT_ISSUE_SEVERITY_WARNING = "warning"
+SPLIT_ISSUE_SEVERITY_ERROR = "error"
+SPLIT_ISSUE_SEVERITY_CRITICAL = "critical"
 
 # =============================================================================
 # Global Model Load Lock
