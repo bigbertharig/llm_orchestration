@@ -164,6 +164,19 @@ Remaining work for Track 4:
 - consider replacing brain-side unlink reclaim with a fully explicit superseding lease model
 - decide whether owner issues should travel via heartbeat only or also via explicit observation artifacts
 
+### Test Coverage Added
+
+- `shared/agents/tests/test_centralized_runtime_authority.py`
+
+Current targeted coverage includes:
+- brain queues split cleanup on critical issue reports
+- brain does not queue cleanup on single-worker warning reports
+- worker rejects stale cleanup commands on reservation-epoch mismatch
+- worker rejects stale cleanup commands on runtime-generation mismatch
+- worker executes cleanup when both fences match
+- brain reclaims stale global load-owner leases only when the observed lease still matches disk state
+- brain does not reclaim when the observed lease does not match current disk state
+
 ---
 
 ## Track 1: Split Runtime Cleanup Centralization
