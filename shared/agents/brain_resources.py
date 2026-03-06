@@ -1219,7 +1219,7 @@ class BrainResourceMixin:
         """Process recovery fallback signals from GPU workers.
 
         Workers emit *.recovery_fallback.json signals when auto-recovery Stage D
-        triggers. Brain converts these to actual meta tasks.
+        triggers. Signals are observation-only; brain derives the actual recovery tasks.
         """
         processed = []
         for signal_file in self.signals_path.glob("*.recovery_fallback.json"):
@@ -1228,12 +1228,15 @@ class BrainResourceMixin:
                     signal = json.load(f)
 
                 signal_type = signal.get("type", "")
-                if signal_type != "split_recovery_fallback":
+                if signal_type not in {"split_recovery_fallback", "split_recovery_observation"}:
                     continue
 
                 group_id = signal.get("group_id", "")
                 worker = signal.get("worker", "")
-                tasks_needed = signal.get("tasks_needed", [])
+                members = [str(m).strip() for m in signal.get("members", []) if str(m).strip()]
+                if not members and group_id:
+                    members = self._split_group_members_for_group_id(group_id)
+                issue_code = str(signal.get("issue_code", "")).strip() or "recovery_fallback"
 
                 self.log_decision(
                     "RECOVERY_FALLBACK_SIGNAL",
@@ -1243,23 +1246,19 @@ class BrainResourceMixin:
 
                 # Record failure for quarantine tracking
                 if group_id:
-                    self._record_split_failure_brain(group_id, "recovery_fallback")
+                    self._record_split_failure_brain(group_id, issue_code)
 
-                # Emit the requested tasks
-                for task_spec in tasks_needed:
-                    command = task_spec.get("command", "")
-                    if command == "unload_split_llm":
-                        self._insert_resource_task(
-                            "unload_split_llm",
-                            meta={"group_id": task_spec.get("group_id", group_id)},
-                        )
-                    elif command == "unload_llm":
-                        candidates = task_spec.get("candidate_workers", [])
-                        if candidates:
-                            self._insert_resource_task(
-                                "unload_llm",
-                                meta={"candidate_workers": candidates},
-                            )
+                # Brain derives the remediation plan from the observation.
+                if group_id:
+                    self._insert_resource_task(
+                        "unload_split_llm",
+                        meta={"group_id": group_id},
+                    )
+                for member in members:
+                    self._insert_resource_task(
+                        "unload_llm",
+                        meta={"candidate_workers": [member]},
+                    )
 
                 processed.append(str(signal_file))
 

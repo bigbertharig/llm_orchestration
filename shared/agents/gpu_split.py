@@ -865,22 +865,22 @@ class GPUSplitMixin:
             except Exception:
                 pass
 
-        # Build tasks for BOTH pair members (policy requirement)
-        tasks_needed = [
-            {"command": "unload_split_llm", "group_id": group_id},
-        ]
-        for member in members:
-            tasks_needed.append({"command": "unload_llm", "candidate_workers": [member]})
-
-        # Write recovery signal files for brain to pick up
-        # (Brain will emit the actual meta tasks)
+        # Write observation-only recovery signal for brain to evaluate.
         recovery_signal = {
-            "type": "split_recovery_fallback",
+            "type": "split_recovery_observation",
             "group_id": group_id,
             "worker": self.name,
             "members": members,
+            "issue_code": "verified_cold_failed",
+            "runtime_generation": getattr(self, "split_runtime_generation", None),
+            "reservation_epoch": self._read_split_reservation_epoch(group_id),
+            "observed_state": {
+                "runtime_state": self.runtime_state,
+                "split_runtime_owner": self.split_runtime_owner,
+                "split_port": split_port,
+                "verified_cold": False,
+            },
             "requested_at": datetime.now().isoformat(),
-            "tasks_needed": tasks_needed,
         }
 
         try:
