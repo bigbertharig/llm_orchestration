@@ -134,6 +134,8 @@ This plan covers five centralization tracks:
 - Brain now owns split failure counting/quarantine state for cleanup-driven failures
 - Recovery fallback signals are now observation-driven instead of worker-authored task plans
 - Brain derives fallback unload actions from observed group/member state
+- Global load-owner payloads now carry lease IDs
+- Workers now report stale-owner takeover observations to the brain via heartbeat state
 
 Remaining work for Track 5:
 - audit any additional queue re-entry paths outside `brain_failures.py` and `brain_monitor.py`
@@ -153,6 +155,10 @@ Remaining work for Track 2:
 Remaining work for Track 3:
 - remove legacy compatibility handling for old `split_recovery_fallback` signal payloads after rollout
 - decide whether fallback observations should carry richer verified-cold failure details for brain policy
+
+Remaining work for Track 4:
+- replace worker-local stale-owner unlink with brain-issued reclaim or superseding fenced lease
+- decide whether owner issues should travel via heartbeat only or also via explicit observation artifacts
 
 ---
 
