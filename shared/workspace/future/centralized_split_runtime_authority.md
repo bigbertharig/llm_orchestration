@@ -130,6 +130,8 @@ This plan covers five centralization tracks:
 - Only a narrow owner-local dead-runtime exception still performs local cleanup in that path
 - Cleanup commands are now fenced by both runtime generation and reservation epoch
 - Workers reject stale cleanup commands when either fence no longer matches local state
+- Worker-local split-pair quarantine tracking has been removed
+- Brain now owns split failure counting/quarantine state for cleanup-driven failures
 
 Remaining work for Track 5:
 - audit any additional queue re-entry paths outside `brain_failures.py` and `brain_monitor.py`
@@ -141,6 +143,10 @@ Remaining work for Track 1:
 - expand brain cleanup decision rules beyond first-pass critical/all-member-error handling
 - audit remaining split cleanup call sites outside owner-local startup failure handling
 - replace scaffolded reservation-epoch derivation with an explicit durable epoch field if needed
+
+Remaining work for Track 2:
+- decide whether non-cleanup failure signals should also increment brain-side pair failure counts
+- expose brain-owned quarantine state in a more explicit observable surface if needed
 
 ---
 
