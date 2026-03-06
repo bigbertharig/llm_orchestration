@@ -2909,17 +2909,44 @@ class GPUSplitMixin:
 
                     if status in {"unloaded", "failed", "expired"}:
                         if self.runtime_group_id == reservation.get("group_id"):
-                            # Collect cleanup params - execute AFTER releasing lock
-                            # (cleanup tries to re-lock for member_reset, and does heavy I/O)
-                            try:
-                                deferred_cleanup_port = int(reservation.get("port")) if reservation.get("port") else None
-                            except Exception:
-                                deferred_cleanup_port = None
-                            deferred_cleanup = {
-                                "group_id": str(reservation.get("group_id") or ""),
-                                "split_port": deferred_cleanup_port,
-                                "reason": f"reservation_{status}",
-                            }
+                            reservation_epoch = str(
+                                reservation.get("updated_at")
+                                or reservation.get("created_at")
+                                or ""
+                            ).strip() or None
+                            # Narrow local exception: owner can clean up if it can prove
+                            # the runtime it launched is already gone.
+                            if self.split_runtime_owner and self.split_runtime_process is None:
+                                # Collect cleanup params - execute AFTER releasing lock
+                                # (cleanup tries to re-lock for member_reset, and does heavy I/O)
+                                try:
+                                    deferred_cleanup_port = int(reservation.get("port")) if reservation.get("port") else None
+                                except Exception:
+                                    deferred_cleanup_port = None
+                                deferred_cleanup = {
+                                    "group_id": str(reservation.get("group_id") or ""),
+                                    "split_port": deferred_cleanup_port,
+                                    "reason": f"reservation_{status}",
+                                }
+                            else:
+                                try:
+                                    issue_port = int(reservation.get("port")) if reservation.get("port") else None
+                                except Exception:
+                                    issue_port = None
+                                self._report_split_health_issue(
+                                    severity=SPLIT_ISSUE_SEVERITY_ERROR,
+                                    issue_code=f"reservation_{status}",
+                                    issue_detail=str(reservation.get("error", "") or "")[:300],
+                                    group_id=str(reservation.get("group_id") or ""),
+                                    split_port=issue_port,
+                                    reservation_epoch=reservation_epoch,
+                                    runtime_generation=getattr(self, "split_runtime_generation", None),
+                                )
+                                self.logger.warning(
+                                    "SPLIT_RESERVATION_TERMINAL_REPORTED "
+                                    f"group={reservation.get('group_id') or '-'} status={status} "
+                                    "awaiting_brain_cleanup_decision"
+                                )
             except Timeout:
                 lock_error = True
             except Exception:
