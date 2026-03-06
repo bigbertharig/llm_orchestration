@@ -1,0 +1,80 @@
+{
+  "backend_notes": [
+    {
+      "backend_id": "ollama_chat_completions",
+      "transport": "local-chat-completions",
+      "base_url_suffix": "/v1/chat/completions",
+      "scope": "Backend-level certification for Ollama chat completions."
+    },
+    {
+      "backend_id": "ollama_completions",
+      "transport": "local-completions",
+      "base_url_suffix": "/v1/completions",
+      "scope": "Backend-level certification for Ollama completions."
+    }
+  ],
+  "certified_tests": [
+    {
+      "backend_id": "ollama_chat_completions",
+      "test_id": "boolq",
+      "task_name": "boolq",
+      "state": "blocked",
+      "note": "lm_eval loglikelihood path is not supported on chat completions.",
+      "model_id": "qwen2.5:7b",
+      "observed_at": "2026-03-05T00:00:00"
+    },
+    {
+      "backend_id": "ollama_completions",
+      "test_id": "boolq",
+      "task_name": "boolq",
+      "state": "blocked",
+      "note": "Current Ollama completions compatibility rejects the lm_eval prompt array shape for loglikelihood tasks.",
+      "model_id": "qwen2.5:7b",
+      "observed_at": "2026-03-05T00:00:00"
+    },
+    {
+      "backend_id": "ollama_chat_completions",
+      "test_id": "gsm8k",
+      "task_name": "gsm8k",
+      "state": "env_blocked",
+      "note": "ModuleNotFoundError: Attempted to use an API model, but the required packages ['tenacity'] are not installed. Please install these via `pip install lm-eval[api]` or `pip install -e .\"[api]\"`",
+      "model_id": "mistral:7b-instruct",
+      "observed_at": "2026-03-05T19:57:21"
+    }
+  ],
+  "model_tokenizers": {
+    "qwen2.5-coder:7b": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "qwen2.5:7b": "Qwen/Qwen2.5-7B-Instruct",
+    "mistral:7b-instruct": "mistralai/Mistral-7B-Instruct-v0.2"
+  },
+  "runtime_issues": [
+    {
+      "issue_id": "model:qwen3.5:4b",
+      "subject": "qwen3.5:4b",
+      "state": "blocked",
+      "observed_at": "2026-03-05T00:00:00",
+      "note": "Present in Ollama but worker loads and direct generate probes failed. Not currently benchmarkable on this stack."
+    },
+    {
+      "issue_id": "model:qwen3.5:9b",
+      "subject": "qwen3.5:9b",
+      "state": "blocked",
+      "observed_at": "2026-03-05T00:00:00",
+      "note": "Same failure class as qwen3.5:4b after re-import and direct Ollama probes."
+    },
+    {
+      "issue_id": "split:qwen2.5:14b@pair_4_5",
+      "subject": "qwen2.5:14b on pair_4_5",
+      "state": "split_blocked",
+      "observed_at": "2026-03-05T00:00:00",
+      "note": "Split warmup failed repeatedly on pair_4_5 and no stable 11441 runtime remained."
+    },
+    {
+      "issue_id": "benchenv:lm_eval_api_dependencies",
+      "subject": "lm_eval API benchmark environment",
+      "state": "env_blocked",
+      "observed_at": "2026-03-05T00:00:00",
+      "note": "Current ~/ml-env is missing lm_eval API dependency tenacity, so OpenAI-compatible Ollama probe runs cannot complete until the benchmark environment is repaired."
+    }
+  ]
+}
