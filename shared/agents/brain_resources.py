@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from filelock import FileLock
 from gpu_constants import (
+    GLOBAL_MODEL_LOAD_OWNER_STALE_SECONDS,
     SPLIT_ISSUE_SEVERITY_CRITICAL,
     SPLIT_ISSUE_SEVERITY_ERROR,
 )
@@ -236,7 +237,7 @@ class BrainResourceMixin:
         try:
             heartbeat_dt = datetime.fromisoformat(str(heartbeat_raw))
             age = (datetime.now() - heartbeat_dt).total_seconds()
-            return age > 45
+            return age > GLOBAL_MODEL_LOAD_OWNER_STALE_SECONDS
         except Exception:
             return True
 

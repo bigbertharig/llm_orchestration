@@ -309,6 +309,7 @@ class GPUOllamaMixin:
                 lock.acquire(timeout=1)
                 if self._try_acquire_global_model_load_owner(phase=phase):
                     lease_acquired = True
+                    self._clear_global_load_owner_issue()
                     self.logger.info(
                         f"GLOBAL_LOAD_LOCK_ACQUIRED phase={phase} worker={self.name} pid={os.getpid()}"
                     )
@@ -490,6 +491,7 @@ class GPUOllamaMixin:
                     and int(owner.get("pid", -1)) == os.getpid()
                 ):
                     self.model_load_owner_path.unlink(missing_ok=True)
+                    self._clear_global_load_owner_issue()
                     return
             # If owner file is already gone or rotated, do nothing.
         except Exception:
