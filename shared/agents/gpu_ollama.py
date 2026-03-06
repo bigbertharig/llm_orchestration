@@ -458,13 +458,9 @@ class GPUOllamaMixin:
             if self._global_owner_is_stale(owner):
                 self._report_global_load_owner_issue("stale_owner_takeover", owner)
                 self.logger.warning(
-                    "GLOBAL_LOAD_LOCK_STALE_OWNER_TAKEOVER "
+                    "GLOBAL_LOAD_LOCK_STALE_OWNER_REPORTED "
                     f"worker={self.name} stale_owner={owner or {}}"
                 )
-                try:
-                    self.model_load_owner_path.unlink()
-                except Exception:
-                    return False
                 return False
             self._clear_global_load_owner_issue()
             return False

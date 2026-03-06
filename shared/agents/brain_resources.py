@@ -4,6 +4,7 @@ Extracted from brain.py to keep split/meta resource decisions modular.
 """
 
 import json
+import os
 import time
 import uuid
 from datetime import datetime
@@ -209,10 +210,65 @@ class BrainResourceMixin:
                 f"Observed global load-owner issue from {gpu_name}",
                 {"gpu": gpu_name, "issue": issue},
             )
+            self._brain_reclaim_stale_global_load_owner(issue)
         stale_workers = [gpu_name for gpu_name in seen if gpu_name not in active_workers]
         for gpu_name in stale_workers:
             del seen[gpu_name]
         self._last_global_load_owner_issue_signatures = seen
+
+    def _brain_global_load_owner_is_stale(self, owner: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(owner, dict) or not owner:
+            return True
+        pid = owner.get("pid")
+        try:
+            pid_int = int(pid)
+        except Exception:
+            pid_int = None
+        if pid_int:
+            try:
+                os.kill(pid_int, 0)
+                pid_alive = True
+            except Exception:
+                pid_alive = False
+            if not pid_alive:
+                return True
+        heartbeat_raw = owner.get("heartbeat_at") or owner.get("acquired_at")
+        try:
+            heartbeat_dt = datetime.fromisoformat(str(heartbeat_raw))
+            age = (datetime.now() - heartbeat_dt).total_seconds()
+            return age > 45
+        except Exception:
+            return True
+
+    def _brain_reclaim_stale_global_load_owner(self, issue: Dict[str, Any]) -> None:
+        owner_path = self.signals_path / "model_load.global.json"
+        if not owner_path.exists():
+            return
+        try:
+            with open(owner_path, "r", encoding="utf-8") as f:
+                current_owner = json.load(f)
+        except Exception:
+            return
+        if not isinstance(current_owner, dict):
+            return
+        expected_lease_id = str(issue.get("owner_lease_id", "")).strip()
+        expected_worker = str(issue.get("owner_worker", "")).strip()
+        if expected_lease_id and str(current_owner.get("lease_id", "")).strip() != expected_lease_id:
+            return
+        if expected_worker and str(current_owner.get("worker", "")).strip() != expected_worker:
+            return
+        if not self._brain_global_load_owner_is_stale(current_owner):
+            return
+        try:
+            owner_path.unlink(missing_ok=True)
+        except Exception as exc:
+            self.logger.warning(f"Failed to reclaim stale global load owner: {exc}")
+            return
+        self.log_decision(
+            "GLOBAL_LOAD_OWNER_RECLAIMED",
+            "Brain reclaimed stale global load-owner lease",
+            {"owner": current_owner},
+        )
 
     def _iter_task_files_json(self, *paths: Path):
         for path in paths:
