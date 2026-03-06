@@ -132,6 +132,8 @@ This plan covers five centralization tracks:
 - Workers reject stale cleanup commands when either fence no longer matches local state
 - Worker-local split-pair quarantine tracking has been removed
 - Brain now owns split failure counting/quarantine state for cleanup-driven failures
+- Recovery fallback signals are now observation-driven instead of worker-authored task plans
+- Brain derives fallback unload actions from observed group/member state
 
 Remaining work for Track 5:
 - audit any additional queue re-entry paths outside `brain_failures.py` and `brain_monitor.py`
@@ -147,6 +149,10 @@ Remaining work for Track 1:
 Remaining work for Track 2:
 - decide whether non-cleanup failure signals should also increment brain-side pair failure counts
 - expose brain-owned quarantine state in a more explicit observable surface if needed
+
+Remaining work for Track 3:
+- remove legacy compatibility handling for old `split_recovery_fallback` signal payloads after rollout
+- decide whether fallback observations should carry richer verified-cold failure details for brain policy
 
 ---
 
