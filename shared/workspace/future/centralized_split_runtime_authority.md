@@ -117,11 +117,21 @@ This plan covers five centralization tracks:
 - Brain failure retry/fix requeue paths were routed through the helper
 - Brain monitor orphan-recovery and force-kill timeout requeue paths were routed through the helper
 - Requeue invariants now fail fast if stale ownership or terminal fields remain on queue re-entry
+- Track 1 scaffolding started
+- GPU heartbeats now publish split health issue observations and split runtime generation state
+- Split invariant checks now emit issue reports for brain visibility before any future authority flip
+- Brain resource loop now observes and deduplicates split health issue reports for planning/visibility
 
 Remaining work for Track 5:
 - audit any additional queue re-entry paths outside `brain_failures.py` and `brain_monitor.py`
 - decide final policy for preserving vs resetting `incident_id`
 - consider enforcing queue-write invariants at a lower shared brain queue layer if more paths appear
+
+Remaining work for Track 1:
+- replace local invariant-triggered cleanup with report-only behavior
+- add fenced brain-issued `cleanup_split_runtime` commands
+- attach real reservation epoch/runtime generation values instead of scaffolding defaults
+- add brain cleanup decision rules instead of observe-only logging
 
 ---
 
