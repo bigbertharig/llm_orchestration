@@ -7,7 +7,10 @@ Reduce LLM context load when reviewing a finished, failed, or interrupted batch.
 Instead of reading an entire `history/<batch_id>/` tree, run one reducer over
 the folder and read the generated summary artifacts first.
 
-This is an external analysis tool. It does not change batch execution logic.
+This started as an external analysis tool and still has a standalone CLI.
+
+The same reducer is now also used by the brain to refresh per-run summaries
+during batch execution and on terminal batch lifecycle events.
 
 ## Inputs
 
@@ -57,6 +60,12 @@ reads that reduced surface and decides what matters.
 Tracked entrypoint:
 
 - `scripts/summarize_history_run.py`
+
+Brain-owned runtime artifacts:
+
+- `history/<batch_id>/logs/batch_events.jsonl`
+- `history/<batch_id>/RUN_SUMMARY.json`
+- `history/<batch_id>/RUN_SUMMARY.md`
 
 Example:
 

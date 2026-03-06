@@ -105,7 +105,7 @@ This plan covers five centralization tracks:
 3. Recovery fallback centralization
 4. Global model-load owner centralization
 5. Task requeue scrub centralization
-6. History-folder summary reduction for low-context review
+6. Brain-owned run summary and event ledger
 
 ---
 
@@ -167,58 +167,83 @@ Remaining work for Track 4:
 
 ---
 
-## Track 6: History-Folder Summary Reduction
+## Track 6: Brain-Owned Run Summary And Event Ledger
 
 ### Problem
 
-Raw history folders contain the right evidence, but they are expensive for an
-LLM to read directly. Success, failure, and interrupted runs all leave behind
-different artifact sets, which means naive review burns a lot of context just
-to find the important files.
+Raw history folders contain the right evidence, but the old summary path was
+still structurally wrong:
+
+- `brain_plan.py` inserted `batch_summary` as a terminal task
+- plan-task dependencies gated when the summary could run
+- fatal aborts bypassed that task path
+
+That meant failure-heavy runs often had no clean summary unless a separate
+post-run script was invoked.
 
 ### Goal
 
-Keep this slice external to orchestration.
+Make the brain own the per-run event ledger and incremental summary refresh,
+while keeping the reducer reusable as a standalone script.
 
-Build a best-effort reducer that reads one `history/{batch_id}/` directory and
-surfaces the important artifacts and excerpts it can find, regardless of
-whether the run finished cleanly.
-
-The output should be small enough for an LLM to review first, then drill into
-specific raw files only when needed.
+That means:
+- no summary task in the plan graph
+- append-only batch events under `logs/batch_events.jsonl`
+- brain-owned summary refresh on terminal task events and batch terminal states
+- the same reducer can still be run manually on any history folder later
 
 ### Required Artifacts
 
 Per run:
+- `history/{batch_id}/logs/batch_events.jsonl`
 - `history/{batch_id}/RUN_SUMMARY.json`
 - `history/{batch_id}/RUN_SUMMARY.md`
 
 ### Reduction Strategy
 
-Use a script and reducer library to compress raw runtime artifacts into a small
-review surface before asking an LLM to analyze anything.
+Use a reducer library to compress raw runtime artifacts into a small review
+surface before asking an LLM to analyze anything.
 
 That means:
 - JSON summaries are the machine-readable source
 - markdown summaries are the human-readable render
+- the brain refreshes those summaries during batch execution
+- the standalone CLI can still summarize any history folder after the fact
 - the reducer surfaces important existing logs and artifacts, not conclusions
 - the LLM still decides what the surfaced artifacts imply
 
 ### Recommended Implementation Order
 
-1. Build a reusable reducer for one `history/{batch_id}` folder
-2. Add a tracked CLI entrypoint that can run anywhere in the repo
-3. Surface important artifacts and compact excerpts for success, failure, and partial runs
-4. Validate against a spread of real `github_analyzer` history folders
+1. Remove `batch_summary` from the plan graph
+2. Add brain-owned `batch_events.jsonl` writes from task/batch lifecycle state
+3. Refresh `RUN_SUMMARY.json` and `RUN_SUMMARY.md` from the brain using the reducer
+4. Keep a tracked CLI entrypoint for manual/offline summarization
 5. Optionally add cross-run rollup/query scripts later, built on top of the per-run reducer
 
 ### Initial Scope For This Workstream
 
 First useful slice:
-- no orchestration changes
-- external reducer only
-- write `RUN_SUMMARY.json` and `RUN_SUMMARY.md` into the history folder
+- no cross-run rollups yet
+- per-run batch event log only
+- per-run summary refresh only
 - keep the reducer tolerant of missing or inconsistent artifacts
+
+### Progress
+
+Landed:
+- reusable reducer in `shared/agents/run_summary.py`
+- tracked CLI in `scripts/summarize_history_run.py`
+- brain-owned `batch_events.jsonl` writing via `brain_summary.py`
+- automatic `RUN_SUMMARY.json` / `RUN_SUMMARY.md` refresh on:
+  - terminal task events observed by the brain
+  - fatal batch abort
+  - normal batch completion
+- automatic `batch_summary` task insertion removed from `brain_plan.py`
+
+Not landed yet:
+- manual-stop summary refresh
+- resume-handoff summary refresh
+- cross-run rollup ledgers under `history/_summary/`
 
 ### Why This Matters
 

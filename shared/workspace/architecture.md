@@ -101,6 +101,18 @@ Use this rule when deciding where logic belongs:
 This keeps the brain as the source of truth for coordination without turning it
 into a per-step remote-control loop for all workers.
 
+## Batch Summary Authority
+
+The brain owns per-run batch-summary lifecycle artifacts.
+
+That means:
+- the brain writes append-only run events to `history/<batch_id>/logs/batch_events.jsonl`
+- the brain refreshes `RUN_SUMMARY.json` and `RUN_SUMMARY.md` on terminal task
+  and terminal batch events
+- final batch-summary coordination is not delegated to a normal worker task
+- the standalone history-folder summarizer reuses the same reducer for offline
+  and after-the-fact review
+
 ### Error Handling & Escalation
 
 Each layer handles problems at its level. Unresolvable issues escalate upward.

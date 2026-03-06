@@ -191,7 +191,10 @@ def parse_plan_md(self, plan_content: str) -> List[Dict]:
 
 **Variable substitution:** Commands support `{BATCH_ID}`, `{PLAN_PATH}`, `{BATCH_PATH}` placeholders, plus any config overrides passed at submission time.
 
-**Auto summary task:** Brain automatically inserts a `batch_summary` task that depends on all other tasks in the batch. This runs `generate_batch_summary.py` to create a batch report.
+**Run summary lifecycle:** The brain does not insert a terminal `batch_summary`
+task anymore. Instead, it writes `logs/batch_events.jsonl` for each run and
+refreshes `RUN_SUMMARY.json` and `RUN_SUMMARY.md` directly from core lifecycle
+code on terminal task events and terminal batch transitions.
 
 ### Task Schema
 
