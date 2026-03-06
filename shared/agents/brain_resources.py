@@ -197,6 +197,10 @@ class BrainResourceMixin:
             "candidate_workers": task.get("candidate_workers"),
             "target_worker": task.get("target_worker"),
             "target_gpu": task.get("target_gpu"),
+            "target_workers": task.get("target_workers"),
+            "cleanup_reason": task.get("cleanup_reason"),
+            "reservation_epoch": task.get("reservation_epoch"),
+            "runtime_generation": task.get("runtime_generation"),
         }
         return json.dumps(key, sort_keys=True)
 
@@ -302,6 +306,42 @@ class BrainResourceMixin:
                 'created_at': datetime.now(),
                 'gpus_needed': cold_gpus.copy()
             }
+
+    def _issue_split_cleanup_command(
+        self,
+        group_id: str,
+        target_workers: List[str],
+        reason: str,
+        *,
+        split_port: Optional[int] = None,
+        reservation_epoch: Optional[str] = None,
+        runtime_generation: Optional[str] = None,
+    ) -> None:
+        """Queue a fenced split cleanup command for workers to execute."""
+        meta = {
+            "group_id": group_id,
+            "target_workers": [w for w in target_workers if str(w).strip()],
+            "cleanup_reason": reason,
+        }
+        if split_port is not None:
+            meta["split_port"] = split_port
+        if reservation_epoch is not None:
+            meta["reservation_epoch"] = reservation_epoch
+        if runtime_generation is not None:
+            meta["runtime_generation"] = runtime_generation
+        self._insert_resource_task("cleanup_split_runtime", meta=meta)
+        self.log_decision(
+            "SPLIT_CLEANUP_COMMAND_QUEUED",
+            f"Queued split cleanup for {group_id}",
+            {
+                "group_id": group_id,
+                "target_workers": meta["target_workers"],
+                "reason": reason,
+                "split_port": split_port,
+                "reservation_epoch": reservation_epoch,
+                "runtime_generation": runtime_generation,
+            },
+        )
 
     def _handle_missing_gpu_escalations(self, truly_missing: List[str], queue_stats: Dict[str, Any]):
         """

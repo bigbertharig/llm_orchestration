@@ -26,6 +26,7 @@ from gpu_constants import (
     MISMATCH_WEDGE_COOLDOWN_SECONDS,
     READY_MIN_AGE_SECONDS,
     RUNTIME_STATE_COLD,
+    RUNTIME_STATE_RESETTING_THERMAL,
     RUNTIME_STATE_UNLOADING,
     RUNTIME_STATE_WEDGED,
     SPLIT_META_TIMEOUT_SECONDS,
@@ -604,11 +605,32 @@ class GPUTaskMixin:
         """
         command = task.get("command", "")
 
+        def _is_targeted_to_self() -> bool:
+            target_worker = task.get("target_worker") or task.get("target_gpu")
+            if target_worker and str(target_worker).strip() == self.name:
+                return True
+            candidates = task.get("candidate_workers", [])
+            if isinstance(candidates, list) and candidates:
+                allowed = [str(name).strip() for name in candidates if str(name).strip()]
+                return len(allowed) == 1 and allowed[0] == self.name
+            return False
+
         if command == "load_llm":
             # Strict: Only cold workers should claim load commands.
             # Reject if in any ready, transitioning, or wedged state.
             can_load, reason = self._can_accept_load_task()
             if not can_load:
+                # Targeted load_llm can be consumed as a no-op if this worker is
+                # already hot and stable; this prevents stale targeted startup/default
+                # load tasks from wedging queue progress forever.
+                if (
+                    reason in ("model_already_loaded", "ready_state")
+                    and self.model_loaded
+                    and self.runtime_placement != "split_gpu"
+                    and self.runtime_state in RUNTIME_STATES_READY
+                    and _is_targeted_to_self()
+                ):
+                    return True, ""
                 return False, f"preflight_{reason}"
             if self.model_loaded:
                 return False, "model_already_loaded"
@@ -681,6 +703,15 @@ class GPUTaskMixin:
                     return False, "not_split_runtime"
                 return True, ""
             if self.runtime_group_id != target_group and not self._is_runtime_wedged():
+                return False, f"group_mismatch:{self.runtime_group_id}"
+            return True, ""
+
+        if command == "cleanup_split_runtime":
+            target_workers = [str(w).strip() for w in task.get("target_workers", []) if str(w).strip()]
+            if target_workers and self.name not in target_workers:
+                return False, "not_target_worker"
+            target_group = str(task.get("group_id", "")).strip()
+            if target_group and self.runtime_group_id and target_group != self.runtime_group_id:
                 return False, f"group_mismatch:{self.runtime_group_id}"
             return True, ""
 
@@ -1476,10 +1507,46 @@ class GPUTaskMixin:
                 "orphan_runners_killed": orphan_runners_killed,
                 "max_vram_used_mb": 0,
             }
+        elif command == "cleanup_split_runtime":
+            task_id = task.get("task_id")
+            group_id = str(task.get("group_id", "")).strip() or str(self.runtime_group_id or "")
+            cleanup_reason = str(task.get("cleanup_reason", "")).strip() or "brain_cleanup_command"
+            expected_generation = str(task.get("runtime_generation", "")).strip() or None
+            actual_generation = str(getattr(self, "split_runtime_generation", "") or "").strip() or None
+            if expected_generation and actual_generation and expected_generation != actual_generation:
+                result = {
+                    "success": True,
+                    "output": (
+                        f"Skipped stale split cleanup for {group_id or '-'}: "
+                        f"expected_generation={expected_generation} actual_generation={actual_generation}"
+                    ),
+                    "stale_command": True,
+                    "worker": self.name,
+                    "max_vram_used_mb": 0,
+                }
+            else:
+                self._touch_meta_task(phase="cleanup_split_runtime")
+                split_port = task.get("split_port", self.runtime_port)
+                try:
+                    split_port_int = int(split_port) if split_port is not None else None
+                except Exception:
+                    split_port_int = None
+                cleanup = self._coordinated_split_failure_cleanup(
+                    group_id=group_id,
+                    split_port=split_port_int,
+                    reason=f"brain_command:{cleanup_reason}",
+                    task_id=task_id,
+                )
+                result = {
+                    "success": True,
+                    "output": f"Split runtime cleanup executed for {group_id or '-'}",
+                    "cleanup": cleanup,
+                    "worker": self.name,
+                    "max_vram_used_mb": 0,
+                }
         elif command == "reset_gpu_runtime":
             # Emergency thermal recovery: full local reset
             # Called by brain's thermal recovery controller during sustained overheat
-            from gpu_constants import RUNTIME_STATE_RESETTING_THERMAL, RUNTIME_STATE_COLD
             task_id = task.get("task_id")
             incident_id = task.get("incident_id", "unknown")
             reason = f"thermal_recovery:incident={incident_id}"
@@ -1530,7 +1597,6 @@ class GPUTaskMixin:
             )
         elif command == "reset_split_runtime":
             # Emergency thermal recovery: reset split runtime for this GPU
-            from gpu_constants import RUNTIME_STATE_RESETTING_THERMAL, RUNTIME_STATE_COLD
             task_id = task.get("task_id")
             incident_id = task.get("incident_id", "unknown")
             group_id = task.get("group_id") or getattr(self, 'runtime_group_id', None)
