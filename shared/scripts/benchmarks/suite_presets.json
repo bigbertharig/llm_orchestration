@@ -1,0 +1,90 @@
+{
+  "presets": [
+    {
+      "id": "baseline_core",
+      "description": "Balanced baseline across math, language, QA, reasoning, truthfulness, and coding.",
+      "include_ids": [
+        "gsm8k",
+        "mmlu",
+        "arc_challenge",
+        "hellaswag",
+        "winogrande",
+        "truthfulqa_mc2",
+        "humaneval_plus"
+      ],
+      "environment_map": {
+        "ollama": ["gsm8k"],
+        "vllm": ["mmlu", "arc_challenge", "hellaswag", "winogrande", "truthfulqa_mc2"],
+        "evalplus": ["humaneval_plus"]
+      }
+    },
+    {
+      "id": "fast_smoke",
+      "description": "Quick regression checks before longer runs.",
+      "include_ids": [
+        "boolq",
+        "piqa",
+        "hellaswag",
+        "gsm8k"
+      ],
+      "environment_map": {
+        "ollama": ["gsm8k"],
+        "vllm": ["boolq", "piqa", "hellaswag"]
+      }
+    },
+    {
+      "id": "reasoning_heavy",
+      "description": "Prioritize multi-step and hard reasoning.",
+      "include_ids": [
+        "gsm8k",
+        "arc_challenge",
+        "bbh",
+        "drop",
+        "truthfulqa_mc2",
+        "mmlu_pro"
+      ],
+      "environment_map": {
+        "ollama": ["gsm8k", "bbh", "drop"],
+        "vllm": ["arc_challenge", "truthfulqa_mc2"],
+        "lighteval": ["mmlu_pro"]
+      }
+    },
+    {
+      "id": "coding_heavy",
+      "description": "Programming-centric benchmark set.",
+      "include_ids": [
+        "humaneval_plus",
+        "mbpp_plus",
+        "livecodebench",
+        "swe_bench_verified"
+      ],
+      "environment_map": {
+        "evalplus": ["humaneval_plus", "mbpp_plus"],
+        "livecodebench": ["livecodebench"],
+        "swebench": ["swe_bench_verified"]
+      }
+    },
+    {
+      "id": "agent_reliability",
+      "description": "Production behavior for your orchestration/pipeline quality gates.",
+      "include_ids": [
+        "custom_json_schema_strict",
+        "custom_tool_plan_sequence",
+        "custom_ambiguity_handling",
+        "custom_command_safety",
+        "custom_orchestration_tradeoff",
+        "custom_long_context_extract"
+      ],
+      "environment_map": {
+        "ollama": [
+          "custom_json_schema_strict",
+          "custom_tool_plan_sequence",
+          "custom_ambiguity_handling",
+          "custom_command_safety",
+          "custom_orchestration_tradeoff",
+          "custom_long_context_extract"
+        ]
+      }
+    }
+  ]
+}

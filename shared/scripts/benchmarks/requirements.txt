@@ -1,0 +1,8 @@
+# Benchmark dependencies wrapper.
+# Default install (core only):
+#   pip install -r /mnt/shared/scripts/benchmarks/requirements.txt
+#
+# Optional heavy stack:
+#   pip install -r /mnt/shared/scripts/benchmarks/requirements-optional.txt
+
+-r requirements-core.txt

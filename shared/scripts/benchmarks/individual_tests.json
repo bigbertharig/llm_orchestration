@@ -1,0 +1,102 @@
+{
+  "tests": [
+    {
+      "id": "gsm8k",
+      "category": "math",
+      "harness": "lm_eval",
+      "task_name": "gsm8k",
+      "description": "Grade-school math word-problem reasoning."
+    },
+    {
+      "id": "mmlu",
+      "category": "language_knowledge",
+      "harness": "lm_eval",
+      "task_name": "mmlu",
+      "description": "Broad multi-domain knowledge and question answering."
+    },
+    {
+      "id": "arc_challenge",
+      "category": "reasoning",
+      "harness": "lm_eval",
+      "task_name": "arc_challenge",
+      "description": "Science QA with non-trivial reasoning."
+    },
+    {
+      "id": "hellaswag",
+      "category": "language_reasoning",
+      "harness": "lm_eval",
+      "task_name": "hellaswag",
+      "description": "Commonsense next-sentence prediction."
+    },
+    {
+      "id": "piqa",
+      "category": "reasoning",
+      "harness": "lm_eval",
+      "task_name": "piqa",
+      "description": "Physical commonsense reasoning."
+    },
+    {
+      "id": "winogrande",
+      "category": "language_reasoning",
+      "harness": "lm_eval",
+      "task_name": "winogrande",
+      "description": "Pronoun/coreference disambiguation."
+    },
+    {
+      "id": "bbh",
+      "category": "reasoning",
+      "harness": "lm_eval",
+      "task_name": "bbh",
+      "description": "BIG-Bench Hard reasoning tasks."
+    },
+    {
+      "id": "truthfulqa_mc2",
+      "category": "truthfulness",
+      "harness": "lm_eval",
+      "task_name": "truthfulqa_mc2",
+      "description": "Truthfulness under multiple-choice framing."
+    },
+    {
+      "id": "drop",
+      "category": "question_answering",
+      "harness": "lm_eval",
+      "task_name": "drop",
+      "description": "Discrete reading comprehension and numeric reasoning."
+    },
+    {
+      "id": "boolq",
+      "category": "question_answering",
+      "harness": "lm_eval",
+      "task_name": "boolq",
+      "description": "Boolean question answering over passages."
+    },
+    {
+      "id": "humaneval",
+      "category": "programming",
+      "harness": "evalplus",
+      "task_name": "humaneval",
+      "description": "Code generation correctness via unit tests."
+    },
+    {
+      "id": "mbpp",
+      "category": "programming",
+      "harness": "evalplus",
+      "task_name": "mbpp",
+      "description": "Python code generation for beginner-level problems."
+    },
+    {
+      "id": "livecodebench",
+      "category": "programming",
+      "harness": "livecodebench",
+      "task_name": "livecodebench",
+      "description": "Time-sensitive coding benchmark."
+    },
+    {
+      "id": "swe_bench_verified",
+      "category": "agentic_programming",
+      "harness": "swebench",
+      "task_name": "swe_bench_verified",
+      "description": "Repository-level bug-fixing benchmark."
+    }
+  ]
+}

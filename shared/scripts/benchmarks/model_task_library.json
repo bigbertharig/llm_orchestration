@@ -1,0 +1,130 @@
+{
+  "version": "2026-03-05",
+  "goal": "Map task profiles to preferred models so new plans can choose llm_model/llm_min_tier/llm_placement consistently.",
+  "task_profiles": [
+    {
+      "id": "structured_extraction",
+      "description": "Strict schema extraction, deterministic JSON, short/medium prompts.",
+      "recommended_model": {
+        "llm_model": "qwen2.5:7b",
+        "llm_min_tier": 1,
+        "llm_placement": "single_gpu"
+      },
+      "fallback_models": [
+        {
+          "llm_model": "qwen2.5-coder:14b",
+          "llm_min_tier": 2,
+          "llm_placement": "split_gpu"
+        }
+      ],
+      "evidence_test_ids": [
+        "custom_json_schema_strict",
+        "boolq"
+      ]
+    },
+    {
+      "id": "deep_reasoning",
+      "description": "Higher-complexity scoring/judgment and tradeoff reasoning.",
+      "recommended_model": {
+        "llm_model": "qwen2.5-coder:14b",
+        "llm_min_tier": 2,
+        "llm_placement": "split_gpu"
+      },
+      "fallback_models": [
+        {
+          "llm_model": "qwen2.5:7b",
+          "llm_min_tier": 1,
+          "llm_placement": "single_gpu"
+        }
+      ],
+      "evidence_test_ids": [
+        "gsm8k",
+        "bbh",
+        "custom_orchestration_tradeoff"
+      ]
+    },
+    {
+      "id": "code_generation",
+      "description": "Code synthesis and patch drafting tasks.",
+      "recommended_model": {
+        "llm_model": "qwen2.5-coder:14b",
+        "llm_min_tier": 2,
+        "llm_placement": "split_gpu"
+      },
+      "fallback_models": [
+        {
+          "llm_model": "qwen2.5:7b",
+          "llm_min_tier": 1,
+          "llm_placement": "single_gpu"
+        }
+      ],
+      "evidence_test_ids": [
+        "humaneval_plus",
+        "mbpp_plus"
+      ]
+    },
+    {
+      "id": "code_review",
+      "description": "Bug-finding, diagnostics, and refactoring guidance.",
+      "recommended_model": {
+        "llm_model": "qwen2.5-coder:14b",
+        "llm_min_tier": 2,
+        "llm_placement": "split_gpu"
+      },
+      "fallback_models": [
+        {
+          "llm_model": "qwen2.5:7b",
+          "llm_min_tier": 1,
+          "llm_placement": "single_gpu"
+        }
+      ],
+      "evidence_test_ids": [
+        "swe_bench_verified",
+        "custom_tool_plan_sequence"
+      ]
+    },
+    {
+      "id": "general_qa",
+      "description": "General QA and summarization where throughput matters.",
+      "recommended_model": {
+        "llm_model": "qwen2.5:7b",
+        "llm_min_tier": 1,
+        "llm_placement": "single_gpu"
+      },
+      "fallback_models": [
+        {
+          "llm_model": "qwen2.5-coder:14b",
+          "llm_min_tier": 2,
+          "llm_placement": "split_gpu"
+        }
+      ],
+      "evidence_test_ids": [
+        "mmlu",
+        "arc_challenge",
+        "hellaswag"
+      ]
+    }
+  ],
+  "keyword_profile_map": [
+    {
+      "profile": "structured_extraction",
+      "keywords": ["extract", "json", "schema", "parse", "triage", "plan_searches"]
+    },
+    {
+      "profile": "deep_reasoning",
+      "keywords": ["score", "judge", "reason", "rank", "decide", "tradeoff"]
+    },
+    {
+      "profile": "code_generation",
+      "keywords": ["generate code", "write code", "implement", "patch", "fix bug"]
+    },
+    {
+      "profile": "code_review",
+      "keywords": ["review", "diagnose", "debug", "refactor"]
+    },
+    {
+      "profile": "general_qa",
+      "keywords": ["summarize", "answer", "qa", "question"]
+    }
+  ]
+}

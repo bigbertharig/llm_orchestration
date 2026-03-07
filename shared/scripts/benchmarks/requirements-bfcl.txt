@@ -1,0 +1,7 @@
+# BFCL-only requirements.
+#
+# Note: bfcl-eval currently pins numpy==1.26.4, which does not have a
+# compatible wheel for Python 3.13 on this rig. Use a Python 3.11/3.12 env
+# for BFCL installs/runs.
+
+bfcl-eval

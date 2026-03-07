@@ -37,6 +37,21 @@ shared/agents/__pycache__/
 shared/agents/*.pyc
 shared/agents/permissions/
 
+# SYNC: Shared benchmark tooling committed into the main repo
+!shared/scripts/
+shared/scripts/*
+!shared/scripts/benchmarks/
+!shared/scripts/benchmarks/**
+shared/scripts/**/__pycache__/
+shared/scripts/**/*.pyc
+shared/scripts/benchmarks/containers/images/
+shared/scripts/benchmarks/*.backup.json
+shared/scripts/benchmarks/benchmark_audit_summary.json
+shared/scripts/*.key
+shared/scripts/*.pem
+shared/scripts/*ed25519
+shared/scripts/*ed25519.pub
+
 # NO SYNC: Runtime logs
 # shared/logs/ contains high-churn runtime artifacts and should not be versioned.
 shared/logs/
