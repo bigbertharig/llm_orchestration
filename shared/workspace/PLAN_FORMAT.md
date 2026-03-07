@@ -31,6 +31,10 @@ Plans should be:
 Important boundary:
 - Generic infrastructure checks that must pass before any plan starts belong in the submit wrapper, not in the plan graph.
 - Only put setup steps in `## Tasks` when they are specific to that plan's workflow.
+- Reuse shared runtime prep/health flows instead of re-creating them in each plan.
+  - Canonical runtime prep script: `/mnt/shared/scripts/prepare_llm_runtimes.py`
+  - This script includes stale launch-lock cleanup, deterministic load order, and split-runtime recovery.
+  - Plans should not duplicate force-unload/restart/load-scan logic unless they truly require custom behavior.
 
 ---
 
@@ -130,12 +134,37 @@ Valid values:
 - `script`
 - `llm`
 - `brain`
+- `meta`
 
 Use:
 - `cpu` for normal CPU-only scripting
 - `script` for non-LLM tasks that may need GPU or explicit VRAM tracking
 - `llm` for model-backed tasks
 - `brain` only for tasks that are logically owned by the brain itself
+- `meta` for runtime control operations (model load/unload/reset commands)
+
+### Known Meta Commands
+
+`meta` tasks use `command` to specify the operation. Current known commands:
+
+- `load_llm`
+- `unload_llm`
+- `load_split_llm`
+- `unload_split_llm`
+- `force_unload_llm`
+- `force_unload_split_llm`
+- `reset_gpu_runtime`
+- `reset_split_runtime`
+
+Example:
+
+```markdown
+### force_cleanup_pair_4_5
+- **executor**: worker
+- **task_class**: meta
+- **command**: `force_unload_split_llm`
+- **depends_on**: none
+```
 
 ### Foreach Expansion
 
@@ -175,8 +204,11 @@ shared/plans/<plan_name>/
       output/
       results/
       logs/
-      EXECUTION_SUMMARY.md
-      execution_stats.json
+      batch_events.jsonl
+      RUN_SUMMARY.md
+      RUN_SUMMARY.json
+      EXECUTION_SUMMARY.md      # optional legacy artifact
+      execution_stats.json      # optional legacy artifact
 ```
 
 This layout is conventional, not magical. A plan may add more files, but commands should reference them explicitly.

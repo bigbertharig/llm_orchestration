@@ -201,6 +201,26 @@ What changed:
 - this is now treated as an operational status item in the living benchmark reference
 - split model scores should not be compared as if the split lane were healthy until `pair_4_5` can complete a clean load and stay ready
 
+### 15. Ollama cannot run MC/loglikelihood benchmarks — period
+
+Observed on 2026-03-06:
+
+The persistent failures on boolq, arc_challenge, hellaswag, piqa, winogrande, mmlu, and truthfulqa_mc2 are not configuration problems. They are fundamental Ollama API limitations:
+
+1. **Array prompt rejection**: Ollama's `/v1/completions` rejects array-shaped prompts. A proxy (port 11435) was built to flatten these, which fixed the shape issue.
+2. **Missing logprobs**: Even with the proxy, Ollama does not return `logprobs` in completions responses. lm_eval's loglikelihood evaluation requires logprobs to score MC tasks. This is not fixable externally.
+
+Both issues were confirmed on Ollama v0.17.6. The Ollama team has added logprobs support to chat completions (since v0.12.11) but the completions endpoint still does not return them.
+
+What changed:
+- MC/loglikelihood tasks are now routed to vLLM (or equivalent full-API backend)
+- Ollama remains the production runtime and handles generation-based benchmarks + custom tests
+- The 5 test suites now map across multiple environments, not just Ollama
+- Suite presets track which environment each test requires
+- This is documented in README.md under "Runtime Environments" and "Suite-to-Environment Mapping"
+
+The key insight: run each test in the environment it was designed for. The model weights are identical across backends (loaded from the same shared archive), so scores are comparable. The backend is the test harness, not the thing being tested.
+
 ## Important Changes We Have Already Made
 
 ### Runtime and procedure changes
@@ -225,8 +245,8 @@ What changed:
 
 ## Historical Notes Worth Keeping
 
-- 7B vs paired 14B tradeoffs were captured in `/media/bryan/shared/workspace/llm_benchmark_plan.md`
-- the 2026-03-05 execution details were captured in `/media/bryan/shared/workspace/benchmark_run_report_20260305.md`
+- 7B vs paired 14B tradeoffs were captured in `/media/bryan/shared/scripts/benchmarks/llm_benchmark_plan.md`
+- the 2026-03-05 execution details were captured in `/media/bryan/shared/scripts/benchmarks/benchmark_run_report_20260305.md`
 
 Keep those as run-specific records.
 Do not use them as the current procedure doc.

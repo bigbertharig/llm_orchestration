@@ -1,217 +1,109 @@
 # Distributed Work Guide
 
-How work flows through the orchestration system: from Claude planning to worker execution.
+How work moves through the current orchestration system, from plan creation to
+runtime review.
+
+For operator commands, use [quickstart.md](quickstart.md). For structure and
+contracts, use [architecture.md](architecture.md), [PLAN_FORMAT.md](PLAN_FORMAT.md),
+and [brain-behavior.md](brain-behavior.md).
 
 ---
 
-## The Workflow
+## Workflow
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  1. PLANNING (Claude)                                               │
-│     - Analyze the goal                                              │
-│     - Write plan.md with scripts and tasks                          │
-│     - Prepare environment setup in run commands                     │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  2. SUBMISSION (User)                                               │
-│     python scripts/submit.py <plan_folder> --config '{...}'         │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  3. INTERPRETATION (Brain)                                          │
-│     - Read and parse plan.md                                        │
-│     - Create all tasks with dependencies                            │
-│     - Release tasks when dependencies are met                       │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  4. EXECUTION (Workers)                                             │
-│     - Claim tasks from public queue                                 │
-│     - Run shell commands                                            │
-│     - Report results                                                │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  5. MONITORING (Brain)                                              │
-│     - Check for completed tasks                                     │
-│     - Release newly-unblocked tasks                                 │
-│     - Handle failures and retries                                   │
-└─────────────────────────────────────────────────────────────────────┘
-```
+1. Planning:
+   - a plan folder is created under `shared/plans/arms/` or `shared/plans/shoulders/`
+   - `plan.md` defines tasks, dependencies, and required artifacts
+2. Submission:
+   - operator submits through `scripts/submit.py` or the dashboard `Start Plan` action
+   - normal runs do not use direct `/mnt/shared/agents/submit.py`
+3. Brain interpretation:
+   - brain parses `plan.md`
+   - all tasks start in `shared/brain/private_tasks/`
+   - ready tasks are released to `shared/tasks/queue/`
+4. Worker execution:
+   - GPU or CPU workers claim eligible tasks
+   - workers manage local execution and report results
+   - brain-issued `meta` tasks handle runtime changes like model load/unload
+5. Brain monitoring:
+   - brain watches completion/failure lanes
+   - retries, requeues, quarantines, and shared runtime cleanup stay brain-owned
+   - brain refreshes per-run summary artifacts during execution
+6. Review:
+   - inspect `history/<batch_id>/RUN_SUMMARY.json` or `RUN_SUMMARY.md`
+   - for older or partial runs, use the history summary tools to reduce context first
 
 ---
 
-## Step 1: Planning with Claude
+## Submission Path
 
-When you need to process something, discuss with Claude to create a plan.
-
-**You:** "I need to process 100 PDF invoices and extract totals into a spreadsheet"
-
-**Claude:** "I'll create a plan with tasks and dependencies:
-1. **scan** - Find all PDFs, create a manifest
-2. **extract** - Extract totals (depends on scan)
-3. **combine** - Merge into final CSV (depends on extract)
-
-Let me write the plan and scripts..."
-
-Claude then creates:
-- `shared/plans/invoice_processor/plan.md`
-- `shared/plans/invoice_processor/scripts/scan.py`
-- `shared/plans/invoice_processor/scripts/extract.py`
-- `shared/plans/invoice_processor/scripts/combine.py`
-
-**For plan format details, see [PLAN_FORMAT.md](PLAN_FORMAT.md).**
-
----
-
-## Step 2: Submitting a Plan
+Preferred CLI:
 
 ```bash
-python scripts/submit.py shared/plans/invoice_processor \
-  --config '{"INPUT_FOLDER": "/data/invoices", "OUTPUT_FILE": "/data/totals.csv"}'
+python3 ~/llm_orchestration/scripts/submit.py \
+  ~/llm_orchestration/shared/plans/<shoulder-or-arm>/<plan_name> \
+  --config '{"KEY":"VALUE"}'
 ```
 
-This creates an `execute_plan` task that the brain picks up.
+Equivalent operator UI:
+
+- dashboard `Start Plan`
+
+This creates an `execute_plan` task that the brain claims and expands into the
+real task graph.
 
 ---
 
-## Step 3: Brain Interpretation
+## Runtime Ownership
 
-The brain reads the plan and manages task execution:
+- brain owns queue truth, dependency release, retries, requeues, quarantine,
+  and shared runtime authority
+- workers own local process execution, probes, and child cleanup
+- workers report observations upward; the brain decides shared-state changes
 
-1. **Parses plan.md** - Extracts tasks from the `## Tasks` section
-2. **Creates all tasks** - With their dependency relationships
-3. **Holds tasks privately** - In `shared/brain/private_tasks/`
-4. **Releases tasks** - To public queue when dependencies are met
-
-**For brain behavior details, see [brain-behavior.md](brain-behavior.md).**
-
----
-
-## Step 4: GPU Agent Execution
-
-GPU agents own a physical GPU and manage task execution through worker subprocesses:
-
-```python
-# Dual-cycle loop
-while running:
-    # Internal cycle (every 5s): check signals, collect finished workers
-    check_stop_signal()
-    check_abort_signal()
-    check_kill_signal()
-    collect_finished_workers()
-    update_worker_vram()
-
-    # External cycle (every 30s, or when all workers done):
-    if external_due or all_workers_done:
-        flush_outbox()        # Write results to filesystem
-        write_heartbeat()     # Update GPU state file
-        claimed = claim_tasks()  # Claim within VRAM budget
-        for task in claimed:
-            if task.task_class == "meta":
-                handle_meta_task(task)   # Load/unload LLM directly
-            else:
-                spawn_worker(task)       # New subprocess per task
-```
-
-GPU agents don't know about plans or dependencies. They claim tasks from the queue, spawn worker subprocesses, and report results.
-
-Each GPU has one agent. Workers are short-lived subprocesses that execute a single task and exit. The GPU agent tracks VRAM budget internally to limit concurrent workers.
+That keeps the brain authoritative without turning it into a per-step worker
+controller.
 
 ---
 
-## Step 5: Brain Monitoring
+## Batch Artifacts
 
-The brain continuously monitors execution:
+Each batch writes under:
 
-- **Watches for completions** - Checks `shared/tasks/complete/`
-- **Releases dependent tasks** - When dependencies are met
-- **Expands foreach tasks** - Template tasks become N tasks from manifest data
-- **Handles failures** - Retries up to 3 times, fixes definition errors, then abandons
-- **Detects stuck tasks** - Sends abort/kill signals to GPU agents after 20 min
-- **Manages resources** - Inserts load_llm/unload_llm meta tasks as needed
-- **Logs decisions** - To `shared/logs/brain_decisions.log`
-
----
-
-## Task Types
-
-| Type | Handler | Example |
-|------|---------|---------|
-| `execute_plan` | Brain | Read plan, create tasks |
-| `shell` | GPU Agents (via worker subprocess) | Run a shell command |
-| `decide` | Brain | Complex reasoning |
-| `generate` | GPU Agents (via worker subprocess) | Text generation |
-| `parse` | GPU Agents (via worker subprocess) | Extract structured data |
-| `meta` | GPU Agents (handled directly) | Load/unload LLM model |
-
-GPU agents also distinguish by task class:
-- **script** - GPU compute without LLM (transcribe, embed, etc.)
-- **llm** - Needs the language model loaded
-- **cpu** - CPU-only work (file manipulation, aggregation)
-- **meta** - GPU agent management (load_llm, unload_llm)
-
----
-
-## Monitoring Execution
-
-### Watch brain decisions
-```bash
-tail -f shared/logs/brain_decisions.log
-```
-
-### Check task status
-```bash
-python scripts/status.py
-```
-
-### View failed tasks
-```bash
-ls shared/tasks/failed/
-cat shared/tasks/failed/<task_id>.json
-```
-
-### Batch output
-```
+```text
 shared/plans/<plan_name>/history/<batch_id>/
-  results/        # Processing output
-  output/         # Final aggregated output
-  logs/           # Batch-specific logs
+  logs/
+    batch_events.jsonl
+  output/
+  results/
+  RUN_SUMMARY.json
+  RUN_SUMMARY.md
 ```
 
-Batch IDs are timestamp-based (`YYYYMMDD_HHMMSS`). The `{BATCH_PATH}` variable in task commands resolves to this directory.
+Legacy artifacts like `EXECUTION_SUMMARY.md` or `execution_stats.json` may
+still exist for older runs, but the runtime-owned summary path is now
+`RUN_SUMMARY.*`.
 
 ---
 
-## Best Practices
+## Review Path
 
-### Writing Good Plans
+For one batch:
 
-1. **Be precise in run commands** - Brain copies them directly
-2. **Include full environment setup** - Workers don't assume anything
-3. **Use explicit dependencies** - `depends_on` controls ordering
-4. **Keep tasks generic** - Don't reference specific workers or GPUs
+```bash
+python3 ~/llm_orchestration/scripts/summarize_history_run.py \
+  ~/llm_orchestration/shared/plans/<plan>/history/<batch_id>
+```
 
-### Task Sizing
+For many batches:
 
-| Size | Approach |
-|------|----------|
-| Small (1 file) | Single task handles it |
-| Medium (10-100 items) | Multiple parallel tasks |
-| Large (1000+ items) | Workers claim from manifest file |
+```bash
+python3 ~/llm_orchestration/scripts/rollup_history.py \
+  ~/llm_orchestration/shared/plans/<plan>/history
+```
 
-### Error Handling
-
-- Scripts should exit non-zero on failure
-- Brain retries up to 3 times
-- After 3 failures, task is abandoned
-- Check `shared/tasks/failed/` for issues
+These reducers shrink the evidence surface before an LLM reads it. They do not
+replace review or make fix decisions.
 
 ---
 
@@ -219,10 +111,8 @@ Batch IDs are timestamp-based (`YYYYMMDD_HHMMSS`). The `{BATCH_PATH}` variable i
 
 | Doc | Purpose |
 |-----|---------|
-| [PLAN_FORMAT.md](PLAN_FORMAT.md) | **Authoritative plan format specification** |
-| [architecture.md](architecture.md) | System overview and file structure |
-| [brain-behavior.md](brain-behavior.md) | Brain loop and task handling details |
-
----
-
-*Last Updated: February 2026*
+| [quickstart.md](quickstart.md) | operator commands and recovery flow |
+| [PLAN_FORMAT.md](PLAN_FORMAT.md) | authoritative plan format |
+| [architecture.md](architecture.md) | system layout and authority boundary |
+| [brain-behavior.md](brain-behavior.md) | runtime coordinator behavior |
+| [history_summary_tools.md](history_summary_tools.md) | one-run and many-run reducers |

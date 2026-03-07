@@ -283,7 +283,7 @@ llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
 
 ```
 1. Claude writes plan.md with tasks and dependencies
-2. User submits: python scripts/submit.py <plan_name> --config '{...}'
+2. User submits through `scripts/submit.py` or the dashboard controls
 3. Brain parses plan.md directly (no LLM needed for parsing)
 4. Brain creates all tasks, stores in private_tasks/
 5. Brain releases tasks with no dependencies to queue/

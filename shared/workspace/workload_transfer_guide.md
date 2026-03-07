@@ -100,7 +100,7 @@ Minimum handoff from external team:
 
 Recommended:
 1. `--dry-run` proof output from submit parser
-2. one successful batch `EXECUTION_SUMMARY.md`
+2. one successful batch `RUN_SUMMARY.md` or `RUN_SUMMARY.json`
 3. runtime estimate by phase
 
 ---

@@ -13,6 +13,8 @@ It has four jobs:
 - Current procedure: [CURRENT_BENCHMARK_PROCEDURE.md](CURRENT_BENCHMARK_PROCEDURE.md)
 - History and lessons learned: [BENCHMARK_HISTORY.md](BENCHMARK_HISTORY.md)
 - Plan integration: [PLAN_FORMAT_INTEGRATION.md](PLAN_FORMAT_INTEGRATION.md)
+- Worker strategy notes: [llm_benchmark_plan.md](llm_benchmark_plan.md)
+- Session report archive: [benchmark_run_report_20260305.md](benchmark_run_report_20260305.md)
 - Local custom-task notes: [custom_tasks/README.md](custom_tasks/README.md)
 
 ## Canonical Result Stores
@@ -42,14 +44,107 @@ The benchmark system should stay simple:
 
 No separate manual-Ollama benchmark path should exist for normal runs.
 
+## Runtime Environments
+
+Different tests require different inference backends. Ollama does not support all evaluation modes (notably: logprobs for MC/loglikelihood scoring). Run each test in the environment it was designed for.
+
+### Environment Map
+
+| Environment | What It Runs | Status |
+|-------------|-------------|--------|
+| **Ollama** (chat completions, templated) | Generation lm_eval tasks (gsm8k, bbh, drop, math_500, aime_2024) + all custom tests | Working |
+| **vLLM** | MC/loglikelihood lm_eval tasks (mmlu, arc_challenge, hellaswag, boolq, piqa, winogrande, truthfulqa_mc2, gpqa_diamond, mmmlu, musr) | Needs setup |
+| **evalplus** | HumanEval+, MBPP+ | Needs setup |
+| **lighteval** | mmlu_pro, ifeval | Partially installed |
+| **swebench** | swe_bench_verified (Docker) | Needs setup (defer) |
+| **livecodebench** | livecodebench | Needs setup (defer) |
+| **bfcl** | bfcl_v4 (function calling) | Needs setup |
+| **harbor** | terminal_bench_2 (Docker) | Needs setup (defer) |
+
+### Why Not Just Ollama?
+
+Ollama is our production runtime and is good at serving models. But its OpenAI-compatible API is incomplete:
+- `/v1/completions` does not return logprobs (required for MC/loglikelihood evaluation)
+- `/v1/completions` rejects array-shaped prompts that lm_eval sends
+- These are Ollama limitations, not model limitations
+
+vLLM, llama.cpp server, and other inference backends implement the full OpenAI completions API including logprobs. Benchmark results from these backends are valid for ranking models that run on Ollama in production, because the model weights and quantization are identical.
+
+### Chat Template Standardization
+
+All benchmark runs must use the correct chat template for the model family. The template is determined by the HuggingFace tokenizer, not the backend.
+
+| Model Family | HF Tokenizer | Template Format |
+|-------------|-------------|-----------------|
+| qwen2.5-coder | `Qwen/Qwen2.5-Coder-7B-Instruct` (or 14B/32B) | ChatML (`<\|im_start\|>...<\|im_end\|>`) |
+| qwen2.5 | `Qwen/Qwen2.5-7B-Instruct` (or 32B) | ChatML |
+| qwen3.5 | TBD — verify after load issues resolved | TBD |
+| mistral | `mistralai/Mistral-7B-Instruct-v0.2` | Mistral `[INST]...[/INST]` |
+| deepseek-r1 | TBD — verify on first benchmark run | TBD |
+| phi4 | TBD — verify on first benchmark run | TBD |
+| gemma3 | TBD — verify on first benchmark run | TBD |
+
+Rules:
+- Always pass `--apply_chat_template` for lm_eval runs on Ollama
+- For vLLM, the tokenizer auto-applies the template — verify it matches
+- Record the tokenizer used in every benchmark run
+- If two backends produce different scores for the same model+test, check template application first
+
+### Model Weight Consistency
+
+All environments load from the same physical model files in `/media/bryan/shared/models/`. This standardizes quantization levels automatically. There is no quant mismatch risk as long as every backend loads from the shared archive.
+
+### Suite-to-Environment Mapping
+
+Each suite spans one or more environments:
+
+**baseline_core** (3 environments):
+- Ollama: gsm8k
+- vLLM: mmlu, arc_challenge, hellaswag, winogrande, truthfulqa_mc2
+- evalplus: humaneval_plus
+
+**fast_smoke** (2 environments):
+- Ollama: gsm8k
+- vLLM: boolq, piqa, hellaswag
+
+**reasoning_heavy** (3 environments):
+- Ollama: gsm8k, bbh, drop
+- vLLM: arc_challenge, truthfulqa_mc2
+- lighteval: mmlu_pro
+
+**coding_heavy** (3 environments):
+- evalplus: humaneval_plus, mbpp_plus
+- livecodebench: livecodebench
+- swebench: swe_bench_verified
+
+**agent_reliability** (1 environment):
+- Ollama: all 6 custom tests
+
+### Environment Setup Priority
+
+1. **vLLM** — unblocks baseline_core, fast_smoke, reasoning_heavy
+2. **evalplus** — unblocks coding_heavy partially, completes baseline_core
+3. **lighteval** — completes reasoning_heavy
+4. **Remaining 3 custom tests** — completes agent_reliability
+5. **swebench, livecodebench, bfcl, harbor** — defer until core suites work
+
+### Deferred Environment Details (for future setup)
+
+**swe_bench_verified** (swebench, Docker):
+Takes ~500 verified GitHub issues from popular Python repos (Django, Flask, scikit-learn, etc.). Gives the model the issue description + the repo code. The model must write a patch that passes the repo's test suite. Runs in Docker because each issue needs its own clean repo clone + test runner. Tests agentic coding ability — reading large codebases, understanding issues, writing correct patches. Metric: `resolved_rate`.
+
+**livecodebench** (livecodebench harness):
+Uses competition-style coding problems published after model training cutoffs. Guards against benchmark leakage (models memorizing HumanEval answers). Tests genuine code generation without training contamination. Metric: `pass@1`.
+
+**terminal_bench_2** (harbor, Docker):
+89 curated tasks: protein assembly, async debugging, security vulnerability analysis, system admin ops. Each task runs in its own Docker container. The model gets a terminal and has to complete the task. Tests agentic terminal competence — exactly what our orchestrator workers do. Metric: `task_success_rate`.
+
+**bfcl_v4** (bfcl harness):
+Tests function/tool calling accuracy: simple calls, parallel calls, multi-turn, multi-step. V4 adds web search, memory management, format sensitivity. Tests tool use reliability — directly relevant to the rig's task execution model. Metrics: `ast_accuracy`, `exec_accuracy`.
+
 ## Backend Certification Rule
 
-Do not assume every catalog test is runnable on the current Ollama stack.
-
-Current policy:
-- certify backend/test combinations first
-- leave uncertified tests blank until probed
-- only treat model behavior as model-specific when the failure is clearly not backend-wide
+Certify backend/test combinations before assuming a suite is runnable.
 
 Certification command:
 
@@ -73,14 +168,6 @@ This writes a machine-readable coverage summary showing which catalog tests are:
 - missing_task
 - missing_runner
 - not_audited
-
-Current backend-profile lessons:
-- `local-chat-completions` is not one thing
-- raw chat-completions and templated chat-completions must be tracked as separate profiles
-- current working standardized lane is:
-  - `ollama_chat_completions_templated`
-- current broken standardized lane is:
-  - `ollama_completions` for MC/loglikelihood-style tasks
 
 ## Model Library
 

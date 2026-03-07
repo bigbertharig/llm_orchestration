@@ -98,9 +98,33 @@ HTTP server and handler:
 - `/api/control/kill_plan` - Kill a batch
 - `/api/control/kill_all_active` - Kill all batches
 - `/api/control/return_default` - Reset to startup defaults
+- `/api/control/reset_gpu` - Targeted hard reset for one GPU worker
 - `/api/control/resume_plan` - Resume a batch
 - `/api/control/start_plan` - Submit a new plan
 - `/api/control/batch_outputs` - Get batch output files
+
+Operator-facing control labels match the workspace docs:
+- `Start Plan`
+- `Kill Plan`
+- `Return To Default`
+- `Reset selected GPU`
+
+Reset/kill endpoints run stale-artifact cleanup hooks (orphan task locks, stale processing heartbeats, system meta cleanup) before reporting completion.
+
+## Reset Semantics
+
+- `/api/control/reset_gpu`:
+  - operator-targeted hard reset for one GPU worker
+  - requeues that worker's in-flight processing tasks
+  - kills the selected `gpu.py` worker process
+  - kills listeners on that worker runtime port
+  - clears split artifacts for split groups involving that GPU
+  - restarts only that worker
+- `/api/control/return_default`:
+  - full operator reset back to startup defaults for the rig
+
+This is intentionally different from the internal agent `reset_gpu_runtime` meta task used for thermal recovery logic.
+For normal operator recovery, prefer the dashboard control endpoints.
 
 ## Templates
 
