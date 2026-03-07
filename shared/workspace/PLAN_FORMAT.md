@@ -151,18 +151,43 @@ Use:
 - `unload_llm`
 - `load_split_llm`
 - `unload_split_llm`
-- `force_unload_llm`
-- `force_unload_split_llm`
+- `cleanup_split_runtime`
 - `reset_gpu_runtime`
 - `reset_split_runtime`
+
+Important rules:
+- Plans and shared scripts must use only commands implemented in `/mnt/shared/agents/gpu_tasks.py`.
+- Do not invent new meta command names in plan files or helper scripts.
+- If you need new runtime-control behavior, land the agent support first, then use it from plans or shared helpers.
+
+Required payload shape by command:
+- `load_llm`: optional `target_model`; may include `candidate_workers`
+- `unload_llm`: optional `candidate_workers`
+- `load_split_llm`: requires `target_model` and `candidate_groups`
+- `unload_split_llm`: should include `group_id` when unloading a specific split runtime
+- `cleanup_split_runtime`: should include `group_id`; may include `target_workers`
+- `reset_gpu_runtime`: should include `target_worker`
+- `reset_split_runtime`: should include `target_worker`; include `group_id` when known
+
+`candidate_groups` for `load_split_llm` must be full group objects, not bare ids:
+
+```json
+[
+  {
+    "id": "pair_4_5",
+    "members": ["gpu-4", "gpu-5"],
+    "port": 11441
+  }
+]
+```
 
 Example:
 
 ```markdown
-### force_cleanup_pair_4_5
+### load_pair_4_5
 - **executor**: worker
 - **task_class**: meta
-- **command**: `force_unload_split_llm`
+- **command**: `load_split_llm`
 - **depends_on**: none
 ```
 

@@ -280,6 +280,11 @@ def main():
     parser.add_argument("--keep-models", action="store_true", help="Don't unload models")
     parser.add_argument("--no-default-warm", action="store_true",
                         help="Don't queue default load_llm warmup tasks after cleanup")
+    parser.add_argument(
+        "--clean-reset",
+        action="store_true",
+        help="After kill cleanup, run return_default.py for full runtime reset/restart.",
+    )
     args = parser.parse_args()
     config = load_config()
 
@@ -310,10 +315,28 @@ def main():
     if not args.keep_models:
         unload_worker_models()
 
-    # Step 6: Restore default resting state (brain + configured warm workers) unless disabled
-    if not args.no_default_warm:
+    # Step 6: Restore default resting state (brain + configured warm workers) unless disabled.
+    # A full clean reset handles its own restart/default path, so do not enqueue
+    # extra warm tasks first.
+    if not args.no_default_warm and not args.clean_reset:
         warm_count = int(config.get("initial_hot_workers", 3))
         queue_default_warm_workers(max(0, warm_count))
+
+    # Step 7: Optional full clean reset via shared default reset flow
+    if args.clean_reset:
+        print("Running full clean reset via return_default.py ...")
+        reset_script = BASE_DIR / "scripts" / "return_default.py"
+        proc = subprocess.run(
+            [sys.executable, str(reset_script), "--json"],
+            capture_output=True,
+            text=True,
+        )
+        if proc.stdout:
+            print(proc.stdout.strip())
+        if proc.returncode != 0:
+            if proc.stderr:
+                print(proc.stderr.strip())
+            print("Warning: clean reset failed")
 
     print("=" * 50)
     print("Done. System should return to idle state.")
