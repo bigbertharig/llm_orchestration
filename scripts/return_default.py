@@ -16,10 +16,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 SHARED_DIR = BASE_DIR / "shared"
 CONFIG_PATH = SHARED_DIR / "agents" / "config.json"
+
+sys.path.insert(0, str(SHARED_DIR / "agents"))
+from brain_core import resolve_auto_default_target
 
 
 def _load_json(path: Path) -> dict:
@@ -79,6 +81,87 @@ def _wait_for_heartbeats(shared_dir: Path, gpu_ids: list[int], timeout_s: int, s
         "missing": last_missing,
         "stale": last_stale,
     }
+
+
+def _read_gpu_heartbeat(shared_dir: Path, gpu_name: str) -> dict | None:
+    try:
+        gpu_id = int(str(gpu_name).replace("gpu-", ""))
+    except Exception:
+        return None
+    hb_path = shared_dir / "gpus" / f"gpu_{gpu_id}" / "heartbeat.json"
+    if not hb_path.exists():
+        return None
+    try:
+        with open(hb_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _wait_for_default_state(shared_dir: Path, config: dict, timeout_s: int, stale_seconds: int) -> dict:
+    deadline = time.time() + max(1, timeout_s)
+    auto_default_gpu, auto_default_model = resolve_auto_default_target(config)
+    initial_hot_workers = max(0, int(config.get("initial_hot_workers", 0) or 0))
+    last_result = {
+        "ok": False,
+        "reason": "timeout",
+        "default_gpu": auto_default_gpu,
+        "default_model": auto_default_model,
+        "split_loaded": [],
+        "hot_workers": [],
+    }
+
+    gpu_names = []
+    for gpu in config.get("gpus", []) or []:
+        if not isinstance(gpu, dict):
+            continue
+        gpu_name = str(gpu.get("name") or f"gpu-{gpu.get('id')}").strip()
+        if gpu_name:
+            gpu_names.append(gpu_name)
+
+    while time.time() < deadline:
+        now = time.time()
+        split_loaded: list[str] = []
+        hot_workers: list[str] = []
+        default_ready = initial_hot_workers == 0
+        stale_default = False
+
+        for gpu_name in gpu_names:
+            hb = _read_gpu_heartbeat(shared_dir, gpu_name)
+            if not hb:
+                if gpu_name == auto_default_gpu:
+                    stale_default = True
+                continue
+            runtime_updated = _heartbeat_time_seconds(hb, now - stale_seconds - 1)
+            if now - runtime_updated > stale_seconds:
+                if gpu_name == auto_default_gpu:
+                    stale_default = True
+                continue
+            placement = str(hb.get("runtime_placement", "")).strip()
+            loaded_model = str(hb.get("loaded_model", "")).strip()
+            model_loaded = bool(hb.get("model_loaded", False))
+            if placement == "split_gpu":
+                split_loaded.append(gpu_name)
+            if model_loaded:
+                hot_workers.append(gpu_name)
+            if gpu_name == auto_default_gpu and initial_hot_workers > 0:
+                default_ready = model_loaded and loaded_model == auto_default_model and placement != "split_gpu"
+
+        ok = not split_loaded and not stale_default and default_ready
+        last_result = {
+            "ok": ok,
+            "reason": "" if ok else ("default_gpu_stale" if stale_default else "not_default_ready"),
+            "default_gpu": auto_default_gpu,
+            "default_model": auto_default_model,
+            "split_loaded": split_loaded,
+            "hot_workers": hot_workers,
+        }
+        if ok:
+            return last_result
+        time.sleep(2)
+
+    return last_result
 
 
 def _run_clear_ollama(timeout_s: int) -> tuple[bool, dict]:
@@ -179,14 +262,26 @@ def main() -> int:
         if attempt < max(1, args.max_restarts):
             time.sleep(max(0, args.rescan_interval))
 
+    default_summary = _wait_for_default_state(
+        SHARED_DIR,
+        config,
+        timeout_s=max(1, args.wait),
+        stale_seconds=args.heartbeat_stale_seconds,
+    )
     final_attempt = attempt_summaries[-1] if attempt_summaries else {"restart": {"ok": False}, "heartbeats": {"ok": False}}
-    ok = clear_ok and bool(final_attempt.get("restart", {}).get("ok")) and bool(final_attempt.get("heartbeats", {}).get("ok"))
+    ok = (
+        clear_ok
+        and bool(final_attempt.get("restart", {}).get("ok"))
+        and bool(final_attempt.get("heartbeats", {}).get("ok"))
+        and bool(default_summary.get("ok"))
+    )
     result = {
         "ok": ok,
         "message": "Returned system to default startup state" if ok else "Failed to return system to default startup state",
         "clear_ollama": clear_summary,
         "restart": final_attempt.get("restart"),
         "heartbeats": final_attempt.get("heartbeats"),
+        "default_state": default_summary,
         "restart_attempts": attempt_summaries,
     }
 

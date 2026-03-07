@@ -21,6 +21,45 @@ import requests
 from brain_constants import DEFAULT_LLM_MIN_TIER
 
 
+def resolve_auto_default_target(config: dict) -> tuple[str, str]:
+    """Resolve the default idle target from config instead of stale literals."""
+    raw_gpus = config.get("gpus", []) or []
+    gpu_entries: list[dict[str, Any]] = []
+    for gpu in raw_gpus:
+        if not isinstance(gpu, dict):
+            continue
+        gpu_id = gpu.get("id")
+        gpu_name = str(gpu.get("name") or (f"gpu-{gpu_id}" if gpu_id is not None else "")).strip()
+        model = str(gpu.get("model") or "").strip()
+        if gpu_name:
+            gpu_entries.append({"name": gpu_name, "model": model})
+
+    explicit_gpu = str(config.get("auto_default_gpu", "") or "").strip()
+    explicit_model = str(config.get("auto_default_model", "") or "").strip()
+
+    selected_gpu = explicit_gpu
+    if not selected_gpu:
+        if any(entry["name"] == "gpu-2" for entry in gpu_entries):
+            selected_gpu = "gpu-2"
+        elif gpu_entries:
+            selected_gpu = str(gpu_entries[0]["name"]).strip()
+        else:
+            selected_gpu = "gpu-2"
+
+    selected_model = explicit_model
+    if not selected_model:
+        for entry in gpu_entries:
+            if entry["name"] == selected_gpu and entry["model"]:
+                selected_model = str(entry["model"]).strip()
+                break
+        if not selected_model and gpu_entries:
+            selected_model = str(gpu_entries[0]["model"] or "").strip()
+        if not selected_model:
+            selected_model = "qwen2.5:7b"
+
+    return selected_gpu, selected_model
+
+
 class BrainCoreMixin:
     def _load_config(self, config_path: str) -> dict:
         if not Path(config_path).exists():

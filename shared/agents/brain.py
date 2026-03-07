@@ -35,7 +35,7 @@ from filelock import FileLock, Timeout
 
 from brain_goal import BrainGoalMixin
 from brain_constants import DEFAULT_LLM_MIN_TIER
-from brain_core import BrainCoreMixin
+from brain_core import BrainCoreMixin, resolve_auto_default_target
 from brain_dispatch import BrainDispatchMixin
 from brain_plan import BrainPlanMixin
 from brain_failures import BrainFailureMixin
@@ -248,8 +248,7 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
         self.auto_default_started_at: Optional[datetime] = None
 
         # Default target (gpu and model to load when idle)
-        self.auto_default_gpu = str(self.config.get("auto_default_gpu", "gpu-2")).strip()
-        self.auto_default_model = str(self.config.get("auto_default_model", "qwen2.5:7b")).strip()
+        self.auto_default_gpu, self.auto_default_model = resolve_auto_default_target(self.config)
 
         # Verify core/ security before starting
         self._verify_core_security()
