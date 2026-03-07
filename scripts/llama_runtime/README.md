@@ -19,6 +19,8 @@ agent-side plumbing should call the same commands instead of embedding ad hoc
 - `run_runtime.sh`: start one runtime container
 - `stop_runtime.sh`: stop one runtime container
 - `probe_runtime.sh`: readiness probe via `/v1/models`
+- `smoke_test.sh`: readiness + chat/completions smoke test
+- `build_and_smoke_test.sh`: build image, run one runtime, smoke test, then stop
 
 ## Default Image Name
 

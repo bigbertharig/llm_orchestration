@@ -60,6 +60,8 @@ Current implementation artifacts:
 - run helper: [scripts/llama_runtime/run_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh)
 - stop helper: [scripts/llama_runtime/stop_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/stop_runtime.sh)
 - probe helper: [scripts/llama_runtime/probe_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/probe_runtime.sh)
+- smoke-test helper: [scripts/llama_runtime/smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/smoke_test.sh)
+- build-and-smoke helper: [scripts/llama_runtime/build_and_smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/build_and_smoke_test.sh)
 
 Locked choices for the first implementation pass:
 

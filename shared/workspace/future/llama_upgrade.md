@@ -111,6 +111,8 @@ Current implementation artifacts:
 - [run_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh)
 - [stop_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/stop_runtime.sh)
 - [probe_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/probe_runtime.sh)
+- [smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/smoke_test.sh)
+- [build_and_smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/build_and_smoke_test.sh)
 
 ## Constraints
 
@@ -398,6 +400,16 @@ Build the dedicated image:
 
 ```bash
 /home/bryan/llm_orchestration/scripts/llama_runtime/build_image.sh
+```
+
+Build and prove one worker runtime in one command:
+
+```bash
+/home/bryan/llm_orchestration/scripts/llama_runtime/build_and_smoke_test.sh \
+  --name llama-worker-gpu1 \
+  --model /mnt/shared/models/qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
+  --port 11436 \
+  --gpus device=1
 ```
 
 Start one worker runtime:
