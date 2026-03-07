@@ -14,12 +14,12 @@ Determine whether to run 5x 7B workers, or split into 2x paired 14B + 1x 7B (or 
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/worker-benchmark.py` | Tests 7B model on individual GPUs for worker role |
-| `scripts/gpu-pair-benchmark.py` | Tests GPU pairs for multi-GPU LLM inference (brain model splitting) |
+| `shared/scripts/benchmarks/worker-benchmark.py` | Tests 7B model on individual GPUs for worker role |
+| `shared/scripts/benchmarks/gpu-pair-benchmark.py` | Tests GPU pairs for multi-GPU LLM inference (brain model splitting) |
 | `scripts/gpu-stress.py` | Runs all GPUs at max load for thermal/stability testing |
 | `scripts/gpu-monitor.py` | Logs temps, power, clocks, throttle status |
 | `scripts/embedding-stress.py` | GPU stress simulating embedding workloads |
-| `shared/scripts/context_window_benchmark.py` | Measures practical context capacity per worker GPU via Ollama |
+| `shared/scripts/benchmarks/context_window_benchmark.py` | Measures practical context capacity per worker GPU via Ollama |
 
 Previous results archived at:
 - `workspace/archive/worker_benchmark_results.json`
@@ -27,7 +27,9 @@ Previous results archived at:
 - `shared/logs/context_window_benchmark_*.json` (multiple runs from Feb 13)
 - `shared/logs/brain_context_benchmark_*.json`
 
-Also see: `workspace/llm_benchmark_testing_guide.md` for the existing testing guide.
+Also see:
+- `shared/scripts/benchmarks/README.md`
+- `shared/scripts/benchmarks/CURRENT_BENCHMARK_PROCEDURE.md`
 
 ## Benchmark Tests
 
