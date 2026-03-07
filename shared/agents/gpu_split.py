@@ -399,6 +399,53 @@ class GPUSplitMixin:
 
         return result
 
+    def _ensure_local_split_member_clean_precondition(
+        self,
+        group_id: str,
+        *,
+        allow_rejoin_group: bool = False,
+        reset_reason_prefix: str = "pre_split_join",
+    ) -> Dict[str, Any]:
+        """Verify split-member cleanliness, performing one local reset if needed.
+
+        Split loads should be self-contained. If a member is not clean enough to
+        join, do one authoritative local reset and re-verify before rejecting
+        the split reservation join.
+        """
+        precond = self._verify_local_split_member_clean_precondition(
+            group_id=group_id,
+            allow_rejoin_group=allow_rejoin_group,
+        )
+        if precond["ok"]:
+            precond["details"]["reset_performed"] = False
+            return precond
+
+        reset_reason = f"{reset_reason_prefix}:{precond['reason_code']}"
+        self.logger.warning(
+            f"SPLIT_MEMBER_PRECONDITION_RESET group={group_id} member={self.name} "
+            f"reason={precond['reason_code']}"
+        )
+        self._full_local_reset(reset_reason)
+
+        rechecked = self._verify_local_split_member_clean_precondition(
+            group_id=group_id,
+            allow_rejoin_group=allow_rejoin_group,
+        )
+        rechecked["details"]["reset_performed"] = True
+        rechecked["details"]["initial_reason_code"] = precond["reason_code"]
+        if not rechecked["ok"]:
+            rechecked["reason_code"] = f"reset_failed:{rechecked['reason_code']}"
+            self.logger.warning(
+                f"SPLIT_MEMBER_PRECONDITION_RESET_FAIL group={group_id} member={self.name} "
+                f"initial_reason={precond['reason_code']} final_reason={rechecked['reason_code']}"
+            )
+        else:
+            self.logger.info(
+                f"SPLIT_MEMBER_PRECONDITION_RESET_OK group={group_id} member={self.name} "
+                f"initial_reason={precond['reason_code']}"
+            )
+        return rechecked
+
     def _get_active_split_reservation_group_id(self) -> Optional[str]:
         """Get the group_id of any active split reservation this worker is part of.
 
@@ -2088,9 +2135,10 @@ class GPUSplitMixin:
             self.logger.info(
                 f"SPLIT_MEMBER_CLEAN_BACKFILL_START group={group_id} member={self.name}"
             )
-            precond = self._verify_local_split_member_clean_precondition(
+            precond = self._ensure_local_split_member_clean_precondition(
                 group_id=group_id,
                 allow_rejoin_group=False,
+                reset_reason_prefix="split_member_clean_backfill",
             )
             if not precond["ok"]:
                 # Backfill failed - remove stale join entry
@@ -2116,9 +2164,10 @@ class GPUSplitMixin:
 
         # Fresh join: verify precondition first (unless skip_precondition)
         if not skip_precondition:
-            precond = self._verify_local_split_member_clean_precondition(
+            precond = self._ensure_local_split_member_clean_precondition(
                 group_id=group_id,
                 allow_rejoin_group=False,
+                reset_reason_prefix="split_member_join",
             )
             if not precond["ok"]:
                 self.logger.warning(

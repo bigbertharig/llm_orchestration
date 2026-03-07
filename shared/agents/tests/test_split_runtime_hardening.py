@@ -56,6 +56,7 @@ class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
         self.active_workers = []
         self.cleanup_calls = []
         self.reported_issues = []
+        self.reset_calls = []
         self.reservation_path = self._split_reservation_path("pair_3_4")
         self._service_calls = 0
 
@@ -64,6 +65,14 @@ class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
 
     def _touch_meta_task(self, phase="", force=False):
         return None
+
+    def _full_local_reset(self, reason: str) -> None:
+        self.reset_calls.append(reason)
+        self.runtime_state = gpu_split.RUNTIME_STATE_COLD
+        self.model_loaded = False
+        self.loaded_model = None
+        self.runtime_placement = "single_gpu"
+        self.runtime_group_id = None
 
     def _atomic_join_split_reservation(self, reservation, _group_id):
         return reservation, True, ""
@@ -238,6 +247,57 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
             gpu_split.time.time = original_time
             gpu_split.time.sleep = original_sleep
             gpu_split.requests = original_requests
+
+    def test_split_join_resets_dirty_member_before_join(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = MockSplitGpu(Path(tmp))
+            gpu.runtime_state = "ready_single"
+            gpu.model_loaded = True
+            gpu.loaded_model = "qwen2.5:7b"
+            original_requests = gpu_split.requests
+            gpu_split.requests = types.SimpleNamespace(
+                get=lambda _url, timeout=2: types.SimpleNamespace(
+                    status_code=200,
+                    json=lambda: {"models": []},
+                ),
+                exceptions=types.SimpleNamespace(ConnectionError=Exception),
+            )
+
+            try:
+                precond = gpu._ensure_local_split_member_clean_precondition(
+                    "pair_3_4",
+                    allow_rejoin_group=False,
+                )
+            finally:
+                gpu_split.requests = original_requests
+
+            self.assertTrue(precond["ok"])
+            self.assertEqual(len(gpu.reset_calls), 1)
+            self.assertTrue(precond["details"]["reset_performed"])
+            self.assertEqual(precond["details"]["initial_reason_code"], "runtime_not_cold:ready_single")
+
+    def test_split_join_fails_when_reset_does_not_restore_clean_state(self):
+        class StubbornSplitGpu(MockSplitGpu):
+            def _full_local_reset(self, reason: str) -> None:
+                self.reset_calls.append(reason)
+                self.runtime_state = "ready_single"
+                self.model_loaded = True
+                self.loaded_model = "still-dirty"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = StubbornSplitGpu(Path(tmp))
+            gpu.runtime_state = "ready_single"
+            gpu.model_loaded = True
+            gpu.loaded_model = "qwen2.5:7b"
+
+            precond = gpu._ensure_local_split_member_clean_precondition(
+                "pair_3_4",
+                allow_rejoin_group=False,
+            )
+
+            self.assertFalse(precond["ok"])
+            self.assertTrue(precond["reason_code"].startswith("reset_failed:"))
+            self.assertEqual(len(gpu.reset_calls), 1)
 
 
 if __name__ == "__main__":
