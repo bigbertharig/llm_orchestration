@@ -211,6 +211,13 @@ function taskType(clsOrTask, taskObj = null) {
   if (norm === 'meta') return 'meta';
   return norm || '-';
 }
+
+function defaultLaneSort(lane) {
+  if (lane === 'complete') return 'completed_desc';
+  if (lane === 'failed') return 'failedtime_desc';
+  return 'task_asc';
+}
+
 function classBadge(cls, executor = '', task = null) {
   if (String(executor || '').toLowerCase() === 'brain') {
     return `<span class="pill brain">BRAIN</span>`;
@@ -408,6 +415,128 @@ function renderAlerts(alerts) {
     });
   });
   bindCopyables('#alerts');
+
+  // Render dismissed alerts section
+  renderDismissedAlerts();
+}
+
+function renderDismissedAlerts() {
+  const dismissedStickyMap = loadDismissedStickyAlerts();
+  const dismissedAlertMap = loadDismissedAlerts();
+  const stickyMap = loadStickyAlerts();
+  const seenMap = loadAlertSeenMap();
+
+  const ageText = (ts) => {
+    const d = new Date(ts || '');
+    if (Number.isNaN(d.getTime())) return '-';
+    const sec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (h > 0) return `${h}h ${m}m ago`;
+    if (m > 0) return `${m}m ago`;
+    return 'just now';
+  };
+
+  const dismissedItems = [];
+
+  // Collect dismissed sticky alerts
+  Object.entries(dismissedStickyMap).forEach(([stickyId, info]) => {
+    const dismissedAt = info.dismissed_at;
+    // Try to get original alert info from seenMap
+    const key = `sticky:${stickyId}`;
+    const seen = seenMap[key] || {};
+    dismissedItems.push({
+      key: key,
+      stickyId: stickyId,
+      severity: 'bad',
+      worker: stickyId.split(':')[1] || '-',
+      message: `Sticky alert: ${stickyId}`,
+      dismissed_at: dismissedAt,
+    });
+  });
+
+  // Collect dismissed non-sticky alerts
+  Object.entries(dismissedAlertMap).forEach(([key, info]) => {
+    if (key.startsWith('sticky:')) return; // Skip sticky duplicates
+    const dismissedAt = info.dismissed_at;
+    // Parse key format: live:severity|worker|message
+    const parts = key.replace(/^live:/, '').split('|');
+    const severity = parts[0] || 'warn';
+    const worker = parts[1] || '-';
+    const message = parts.slice(2).join('|') || key;
+    dismissedItems.push({
+      key: key,
+      stickyId: null,
+      severity: severity,
+      worker: worker,
+      message: message,
+      dismissed_at: dismissedAt,
+    });
+  });
+
+  // Update count
+  const countEl = document.getElementById('dismissedCount');
+  if (countEl) countEl.textContent = dismissedItems.length;
+
+  const dismissedEl = document.getElementById('dismissedAlerts');
+  if (!dismissedEl) return;
+
+  if (!dismissedItems.length) {
+    dismissedEl.innerHTML = '<div class="k" style="color: var(--muted);">(no dismissed alerts)</div>';
+    return;
+  }
+
+  // Sort by dismissed_at descending (most recent first)
+  dismissedItems.sort((a, b) => new Date(b.dismissed_at) - new Date(a.dismissed_at));
+
+  const rows = dismissedItems.slice(0, 30).map(d => {
+    const sevClass = d.severity === 'bad' ? 'bad' : (d.severity === 'ok' ? 'ok' : 'warn');
+    const restoreBtn = `<button class="small-btn" data-restore-alert="${esc(d.key)}" data-restore-sticky="${esc(d.stickyId || '')}">Restore</button>`;
+    return [
+      `<span class="${sevClass}">${esc(d.severity)}</span>`,
+      fmt(d.worker),
+      truncCell(d.message, 80, false),
+      ageText(d.dismissed_at),
+      restoreBtn,
+    ];
+  });
+
+  dismissedEl.innerHTML = table(['Severity', 'Worker', 'Message', 'Dismissed', 'Action'], rows);
+
+  // Bind restore buttons
+  document.querySelectorAll('#dismissedAlerts button[data-restore-alert]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.getAttribute('data-restore-alert');
+      const stickyId = btn.getAttribute('data-restore-sticky');
+
+      // Remove from dismissed maps
+      if (stickyId) {
+        const dismissedSticky = loadDismissedStickyAlerts();
+        delete dismissedSticky[stickyId];
+        saveDismissedStickyAlerts(dismissedSticky);
+      }
+      const dismissedAlerts = loadDismissedAlerts();
+      delete dismissedAlerts[key];
+      saveDismissedAlerts(dismissedAlerts);
+
+      // Re-render
+      renderAlerts((latestStatus && latestStatus.alerts) || []);
+    });
+  });
+
+  // Bind clear all button
+  const clearAllBtn = document.getElementById('clearAllDismissed');
+  if (clearAllBtn) {
+    clearAllBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      saveDismissedStickyAlerts({});
+      saveDismissedAlerts({});
+      renderAlerts((latestStatus && latestStatus.alerts) || []);
+    };
+  }
+
+  bindCopyables('#dismissedAlerts');
 }
 
 function isSystemMetaTaskName(taskName) {
@@ -418,7 +547,7 @@ function isSystemMetaTaskName(taskName) {
 function renderTaskLane(targetId, items) {
   const classes = [...new Set(items.map(t => taskType(t)).filter(Boolean))].sort();
   const executors = [...new Set(items.map(t => (t.executor || 'worker').toLowerCase()).filter(Boolean))].sort();
-  const sort = laneState.sort || 'task_asc';
+  const sort = laneState.sort || defaultLaneSort(activeLane);
   const showRuntime = activeLane === 'processing';
   const showCompletedAt = activeLane === 'complete';
   const showTimeTaken = activeLane === 'complete';
@@ -874,6 +1003,7 @@ function renderLaneTabs(counts, lanes) {
   tabs.querySelectorAll('button[data-lane]').forEach(btn => {
     btn.addEventListener('click', () => {
       activeLane = btn.getAttribute('data-lane');
+      laneState.sort = defaultLaneSort(activeLane);
       renderLaneTabs(counts, lanes);
       renderTaskLane('laneTable', lanes[activeLane] || []);
     });
