@@ -24,7 +24,13 @@ class BrainFailureMixin:
         reset_attempts: bool = False,
         drop_incident: bool = False,
     ) -> None:
-        """Normalize a task before writing it back to the public queue."""
+        """Normalize a task before writing it back to the public queue.
+
+        Incident policy:
+        - preserve `incident_id` across retries/requeues for the same work item
+        - drop it only when the brain rewrites task definition semantics enough
+          that the task should start a new incident lineage
+        """
         now = datetime.now().isoformat()
         task["status"] = "pending"
         task["requeued_at"] = now
@@ -359,7 +365,6 @@ JSON only:"""
             task,
             reason,
             reset_attempts=True,
-            drop_incident=True,
         )
 
     def _abort_batch(self, batch_id: str, reason: str, source_task: Dict[str, Any]):
@@ -1045,7 +1050,12 @@ JSON only:"""
 
             # Apply the fix
             task["task_class"] = inferred_class
-            self._prepare_task_for_requeue(task, "definition_fix", reset_attempts=True)
+            self._prepare_task_for_requeue(
+                task,
+                "definition_fix",
+                reset_attempts=True,
+                drop_incident=True,
+            )
             task["fix_applied"] = f"inferred task_class='{inferred_class}' from command"
             del task["definition_error"]
             if "error_type" in task:

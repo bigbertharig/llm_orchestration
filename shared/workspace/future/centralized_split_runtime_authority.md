@@ -145,7 +145,10 @@ This plan covers five centralization tracks:
 Remaining work for Track 5:
 - no known queue re-entry paths remain outside the shared helper after routing
   `brain_failures.py` and `brain_monitor.py` through it
-- decide final policy for preserving vs resetting `incident_id`
+- `incident_id` policy is now explicit:
+  - preserve across retries/requeues for the same work item
+  - drop only when the brain rewrites task definition semantics enough to
+    start a new incident lineage
 - consider enforcing queue-write invariants at a lower shared brain queue layer if more paths appear
 
 Remaining work for Track 1:
@@ -244,6 +247,8 @@ Landed:
 - automatic `batch_summary` task insertion removed from `brain_plan.py`
 - monitor-driven force-kill timeout and orphan recovery requeues now also use
   the shared requeue helper and emit the same batch retry/release events
+- recoverable retries now preserve `incident_id`; definition rewrites are the
+  only requeue path that intentionally drop it
 
 Not landed yet:
 - manual-stop summary refresh
