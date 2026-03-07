@@ -181,6 +181,51 @@ class BrainSummaryMixin:
         )
         return True
 
+    def _record_batch_interrupted(
+        self,
+        batch_id: str,
+        *,
+        reason: str,
+        batch_meta: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        wrote = self._append_batch_event(
+            batch_id,
+            "batch_interrupted",
+            {
+                "batch_status": "interrupted",
+                "reason": reason,
+            },
+            dedupe=False,
+            batch_meta=batch_meta,
+        )
+        refreshed = self._refresh_batch_summary(
+            batch_id,
+            status="partial",
+            failure_reason=reason,
+            batch_meta=batch_meta,
+        )
+        return wrote or refreshed
+
+    def _record_resume_handoff(
+        self,
+        batch_id: str,
+        *,
+        requested_batch_id: str,
+        batch_meta: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        wrote = self._append_batch_event(
+            batch_id,
+            "resume_handoff",
+            {
+                "batch_status": "resumed",
+                "requested_batch_id": requested_batch_id,
+            },
+            dedupe=False,
+            batch_meta=batch_meta,
+        )
+        refreshed = self._refresh_batch_summary(batch_id, batch_meta=batch_meta)
+        return wrote or refreshed
+
     def _reconcile_batch_history(self, batch_id: str, batch_meta: Optional[Dict[str, Any]] = None) -> bool:
         roots = (
             self.queue_path,

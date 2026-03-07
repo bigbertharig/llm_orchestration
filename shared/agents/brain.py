@@ -425,6 +425,12 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
         except KeyboardInterrupt:
             self.logger.info("Shutting down...")
         finally:
+            for _batch_id in list(self.active_batches.keys()):
+                self._record_batch_interrupted(
+                    _batch_id,
+                    reason="brain_shutdown",
+                    batch_meta=self.active_batches.get(_batch_id, {}),
+                )
             self._save_brain_state()
             self._write_brain_heartbeat()
             self.stop_ollama()

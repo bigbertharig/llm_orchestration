@@ -610,6 +610,11 @@ Required JSON format:
                 existing_data_batch = str(existing_cfg.get("BATCH_ID", "")).strip()
 
                 if existing_plan_dir == plan_dir_resolved and existing_data_batch == resume_batch_id:
+                    self._record_resume_handoff(
+                        existing_batch_id,
+                        requested_batch_id=resume_batch_id,
+                        batch_meta=batch_meta,
+                    )
                     self.log_decision(
                         "PLAN_RESUME_REUSE",
                         f"Resume requested for already-active batch {existing_batch_id}; reusing existing orchestration state",
