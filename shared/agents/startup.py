@@ -46,22 +46,114 @@ processes = []
 # =============================================================================
 # Singleton lock (from launch.py)
 # =============================================================================
-def check_existing_launch():
-    """Check if another launcher is already running. Exit if so."""
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _heartbeat_timestamp(data: dict, fallback_mtime: float) -> float:
+    raw = data.get("last_updated")
+    if raw:
+        try:
+            return datetime.fromisoformat(str(raw)).timestamp()
+        except Exception:
+            pass
+    return fallback_mtime
+
+
+def _orchestrator_is_healthy(
+    shared_path: Path,
+    *,
+    expected_gpu_ids: list[int],
+    brain_only: bool,
+    stale_seconds: int = 120,
+) -> bool:
+    now = time.time()
+    brain_hb = shared_path / "brain" / "heartbeat.json"
+    if not brain_hb.exists():
+        return False
+
+    try:
+        with open(brain_hb, "r", encoding="utf-8") as f:
+            brain_data = json.load(f)
+    except Exception:
+        return False
+
+    if not isinstance(brain_data, dict):
+        return False
+
+    brain_pid = int((brain_data.get("brain_pids") or {}).get("pid") or 0)
+    if brain_pid <= 0 or not _pid_is_alive(brain_pid):
+        return False
+
+    brain_age = now - _heartbeat_timestamp(brain_data, brain_hb.stat().st_mtime)
+    if brain_age > stale_seconds:
+        return False
+
+    if brain_only:
+        return True
+
+    for gpu_id in expected_gpu_ids:
+        hb_path = shared_path / "gpus" / f"gpu_{gpu_id}" / "heartbeat.json"
+        if not hb_path.exists():
+            return False
+        try:
+            with open(hb_path, "r", encoding="utf-8") as f:
+                gpu_data = json.load(f)
+        except Exception:
+            return False
+        if not isinstance(gpu_data, dict):
+            return False
+        gpu_age = now - _heartbeat_timestamp(gpu_data, hb_path.stat().st_mtime)
+        if gpu_age > stale_seconds:
+            return False
+
+    return True
+
+
+def check_existing_launch(
+    shared_path: Path,
+    *,
+    expected_gpu_ids: list[int],
+    brain_only: bool,
+):
+    """Check if another launcher or healthy orchestrator is already running."""
     if LAUNCH_LOCK.exists():
         try:
             pid = int(LAUNCH_LOCK.read_text().strip())
-            os.kill(pid, 0)
-            print(f"ERROR: Another instance is already running (PID {pid})")
-            print(f"Kill it first: kill {pid}")
-            print(f"Or remove stale lock: rm {LAUNCH_LOCK}")
-            sys.exit(1)
+            if _pid_is_alive(pid):
+                if _orchestrator_is_healthy(
+                    shared_path,
+                    expected_gpu_ids=expected_gpu_ids,
+                    brain_only=brain_only,
+                ):
+                    print(
+                        f"Orchestrator already healthy (launcher PID {pid}); "
+                        "skipping duplicate startup."
+                    )
+                else:
+                    print(
+                        f"Another startup instance is already running (PID {pid}); "
+                        "skipping duplicate startup."
+                    )
+                sys.exit(0)
         except (ProcessLookupError, ValueError):
             print(
                 f"Removing stale lock file "
                 f"(old PID: {LAUNCH_LOCK.read_text().strip()})"
             )
             LAUNCH_LOCK.unlink()
+
+    if _orchestrator_is_healthy(
+        shared_path,
+        expected_gpu_ids=expected_gpu_ids,
+        brain_only=brain_only,
+    ):
+        print("Orchestrator already healthy; skipping duplicate startup.")
+        sys.exit(0)
 
     READY_FLAG_DIR.mkdir(parents=True, exist_ok=True)
     LAUNCH_LOCK.write_text(str(os.getpid()))
@@ -732,8 +824,6 @@ def main():
     with open(config_path) as f:
         config = json.load(f)
 
-    check_existing_launch()
-
     # Resolve relative paths
     agents_dir = Path(__file__).parent
     if not Path(config["shared_path"]).is_absolute():
@@ -744,6 +834,18 @@ def main():
         config["permissions_path"] = str(
             (agents_dir / config["permissions_path"]).resolve()
         )
+
+    expected_gpu_ids = []
+    if not args.brain_only:
+        for gpu_cfg in config.get("gpus", []) or []:
+            if isinstance(gpu_cfg, dict) and gpu_cfg.get("id") is not None:
+                expected_gpu_ids.append(int(gpu_cfg["id"]))
+
+    check_existing_launch(
+        Path(config["shared_path"]),
+        expected_gpu_ids=expected_gpu_ids,
+        brain_only=args.brain_only,
+    )
 
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
