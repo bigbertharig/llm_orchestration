@@ -50,6 +50,7 @@ from gpu_constants import (
 )
 
 SPLIT_WARMUP_REQUEST_TIMEOUT_SECONDS = 25
+SPLIT_WARMUP_MAX_ATTEMPTS = 2
 SPLIT_WARMUP_NUM_PREDICT = 1
 SPLIT_WARMUP_NUM_CTX = 512
 SPLIT_WARMUP_PS_STABLE_PROBES = 2
@@ -1679,6 +1680,31 @@ class GPUSplitMixin:
         remaining_budget = max(1, int(warmup_deadline - time.time()))
         return max(1, min(SPLIT_WARMUP_REQUEST_TIMEOUT_SECONDS, remaining_budget))
 
+    def _split_warmup_failure_is_terminal(
+        self,
+        *,
+        status_code: Optional[int] = None,
+        error_text: str = "",
+        exc: Optional[Exception] = None,
+    ) -> bool:
+        if status_code == 499:
+            return True
+        text = " ".join(
+            part for part in [str(error_text or ""), str(exc or "")] if str(part or "").strip()
+        ).lower()
+        terminal_markers = (
+            "context canceled",
+            "client connection closed",
+            "timed out waiting for llama runner",
+            "read timed out",
+        )
+        if any(marker in text for marker in terminal_markers):
+            return True
+        timeout_type = getattr(getattr(requests, "exceptions", None), "Timeout", None)
+        if timeout_type and exc is not None and isinstance(exc, timeout_type):
+            return True
+        return False
+
     def _is_launcher_for_reservation(self, reservation: Dict[str, Any]) -> bool:
         """Check if this worker is the launcher for the given reservation."""
         launcher = str(reservation.get("launcher", "")).strip()
@@ -1921,6 +1947,14 @@ class GPUSplitMixin:
                                     f"model={model_id} attempts={attempts} mode=error_fallback"
                                 )
                                 return True
+                            if self._split_warmup_failure_is_terminal(
+                                error_text=str(req_result["error"]),
+                                exc=req_result["error"],
+                            ):
+                                raise RuntimeError(
+                                    f"terminal warmup failure for model {model_id} on port {port}: "
+                                    f"{req_result['error']}"
+                                )
                             raise req_result["error"]
                         r = req_result["response"]
                         if r is None:
@@ -1944,8 +1978,23 @@ class GPUSplitMixin:
                         last_warmup_error = (
                             f"warmup HTTP {r.status_code} for model {model_id} on port {port}: {response_excerpt}"
                         )
+                        if self._split_warmup_failure_is_terminal(
+                            status_code=r.status_code,
+                            error_text=last_warmup_error,
+                        ):
+                            raise RuntimeError(f"terminal {last_warmup_error}")
                     except Exception as exc:
                         last_warmup_error = str(exc)
+                        if self._split_warmup_failure_is_terminal(
+                            error_text=last_warmup_error,
+                            exc=exc,
+                        ):
+                            raise RuntimeError(f"terminal {last_warmup_error}") from exc
+                    if attempts >= SPLIT_WARMUP_MAX_ATTEMPTS:
+                        raise RuntimeError(
+                            f"warmup attempt limit reached for model {model_id} on port {port}: "
+                            f"{last_warmup_error or 'no response'}"
+                        )
                     time.sleep(2)
                 raise RuntimeError(
                     f"warmup timeout for model {model_id} on port {port}: {last_warmup_error or 'no response'}"

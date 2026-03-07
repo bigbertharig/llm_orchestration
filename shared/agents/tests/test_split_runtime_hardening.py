@@ -235,6 +235,27 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
         finally:
             gpu_split.time.time = original_time
 
+    def test_split_warmup_failure_classifier_marks_terminal_failures(self):
+        gpu = MockSplitGpu(Path(tempfile.mkdtemp()))
+
+        self.assertTrue(gpu._split_warmup_failure_is_terminal(status_code=499))
+        self.assertTrue(
+            gpu._split_warmup_failure_is_terminal(
+                error_text="timed out waiting for llama runner to start: context canceled"
+            )
+        )
+        self.assertTrue(
+            gpu._split_warmup_failure_is_terminal(
+                error_text="HTTP 500 read timed out while warming model"
+            )
+        )
+        self.assertFalse(
+            gpu._split_warmup_failure_is_terminal(
+                status_code=500,
+                error_text="temporary warmup http 500",
+            )
+        )
+
     def test_split_runtime_stable_model_presence_accepts_loaded_model(self):
         gpu = MockSplitGpu(Path(tempfile.mkdtemp()))
         original_time = gpu_split.time.time
