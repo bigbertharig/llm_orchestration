@@ -439,12 +439,30 @@ class BrainResourceMixin:
         BRAIN_SYSTEM_COMMANDS = {"orchestrator_full_reset"}
 
         is_brain_command = command in BRAIN_SYSTEM_COMMANDS
+        task_meta = dict(meta) if isinstance(meta, dict) else {}
+
+        explicit_source_batch_id = str(
+            task_meta.get("source_batch_id")
+            or task_meta.get("origin_batch_id")
+            or task_meta.get("parent_batch_id")
+            or task_meta.get("task_batch_id")
+            or ""
+        ).strip()
+        if explicit_source_batch_id.lower() == "system":
+            explicit_source_batch_id = ""
+
+        inferred_source_batch_id = ""
+        if not explicit_source_batch_id and len(self.active_batches) == 1:
+            inferred_source_batch_id = next(iter(self.active_batches.keys()))
+
+        effective_source_batch_id = explicit_source_batch_id or inferred_source_batch_id
+        task_batch_id = effective_source_batch_id or "system"
 
         task = {
             "task_id": str(uuid.uuid4()),
             "type": "system" if is_brain_command else "meta",
             "command": command,
-            "batch_id": "system",
+            "batch_id": task_batch_id,
             "name": command,
             "priority": 10,  # High priority
             "task_class": "brain" if is_brain_command else "meta",
@@ -455,8 +473,10 @@ class BrainResourceMixin:
             "created_by": self.name,
             "retry_count": 0
         }
-        if isinstance(meta, dict):
-            for k, v in meta.items():
+        if effective_source_batch_id and task_batch_id == effective_source_batch_id:
+            task["source_batch_id"] = effective_source_batch_id
+        if task_meta:
+            for k, v in task_meta.items():
                 task[k] = v
         queued = self.save_to_public(task)
         if not queued:
