@@ -269,14 +269,8 @@ class BrainMonitorMixin:
             if current.get("task_id") != task_id:
                 continue
 
-            self._prepare_task_for_requeue(current, "force_kill_timeout")
             current["stuck_requeue_count"] = int(current.get("stuck_requeue_count", 0)) + 1
-            self._assert_queue_requeue_invariants(current)
-
-            queue_file = self.queue_path / task_file.name
-            with open(queue_file, 'w') as f:
-                json.dump(current, f, indent=2)
-            task_file.unlink()
+            self._save_requeued_task(task_file, current, "force_kill_timeout")
 
             hb_file = self.processing_path / f"{task_id}.heartbeat.json"
             if hb_file.exists():
@@ -389,16 +383,9 @@ class BrainMonitorMixin:
                 if elapsed < orphan_threshold_seconds:
                     continue
 
-                self._prepare_task_for_requeue(task, "orphan_recovered")
                 task["orphan_recovered_at"] = datetime.now().isoformat()
                 task["orphan_recovered_from"] = assigned_to
-                self._assert_queue_requeue_invariants(task)
-
-                # Move back to queue for reclaim
-                new_path = self.queue_path / task_file.name
-                with open(new_path, 'w') as f:
-                    json.dump(task, f, indent=2)
-                task_file.unlink()
+                self._save_requeued_task(task_file, task, "orphan_recovered")
                 recovered += 1
 
                 self.log_decision(
