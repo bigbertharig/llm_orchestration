@@ -1308,7 +1308,7 @@ class BrainResourceMixin:
                     signal = json.load(f)
 
                 signal_type = signal.get("type", "")
-                if signal_type not in {"split_recovery_fallback", "split_recovery_observation"}:
+                if signal_type != "split_recovery_observation":
                     continue
 
                 group_id = signal.get("group_id", "")
