@@ -159,7 +159,7 @@ Remaining work for Track 1:
 
 Remaining work for Track 2:
 - decide whether non-cleanup failure signals should also increment brain-side pair failure counts
-- expose brain-owned quarantine state in a more explicit observable surface if needed
+- brain-owned quarantine state is now exposed in brain heartbeat/state output
 
 Remaining work for Track 3:
 - legacy compatibility handling for old `split_recovery_fallback` signal
@@ -254,6 +254,8 @@ Landed:
 - recovery fallback processing now accepts only observation-only
   `split_recovery_observation` payloads; legacy worker-authored fallback signal
   types are no longer honored
+- brain heartbeat/state now expose brain-owned split quarantine state so the
+  authoritative quarantine view is externally observable
 
 Not landed yet:
 - manual-stop summary refresh
