@@ -142,14 +142,16 @@ This plan covers five centralization tracks:
 - Brain and workers now use the same stale-owner timeout constant
 - Workers clear stale owner-issue state on successful lease acquire/release
 
-Remaining work for Track 5:
+Track 5 status:
+- core requeue centralization is landed
 - no known queue re-entry paths remain outside the shared helper after routing
   `brain_failures.py` and `brain_monitor.py` through it
-- `incident_id` policy is now explicit:
+- `incident_id` policy is explicit:
   - preserve across retries/requeues for the same work item
   - drop only when the brain rewrites task definition semantics enough to
     start a new incident lineage
-- consider enforcing queue-write invariants at a lower shared brain queue layer if more paths appear
+- future hardening only:
+  - enforce queue-write invariants at a lower shared brain queue layer if more paths appear
 
 Remaining work for Track 1:
 - brain-issued fenced `cleanup_split_runtime` commands are active
@@ -157,13 +159,15 @@ Remaining work for Track 1:
 - audit remaining split cleanup call sites outside owner-local startup failure handling
 - replace scaffolded reservation-epoch derivation with an explicit durable epoch field if needed
 
-Remaining work for Track 2:
-- non-cleanup recovery observations already increment brain-side pair failure counts
-- brain-owned quarantine state is now exposed in brain heartbeat/state output
+Track 2 status:
+- landed
+- non-cleanup recovery observations increment brain-side pair failure counts
+- brain-owned quarantine state is exposed in brain heartbeat/state output
 
-Remaining work for Track 3:
-- observation-only recovery signaling is now the only accepted path
-- fallback observations now carry verification-check detail from the failed
+Track 3 status:
+- landed
+- observation-only recovery signaling is the only accepted path
+- fallback observations carry verification-check detail from the failed
   verified-cold stage so brain policy can reason over the observation without
   workers prescribing a remedy
 
@@ -259,7 +263,8 @@ Landed:
 - Stage D recovery observations now include failed verified-cold check detail
   for richer brain-side recovery policy inputs
 
-Not landed yet:
+Track 6 status:
+- landed
 - manual-stop summary refresh is landed
 - resume-handoff summary refresh is landed
 - cross-run rollup ledgers under `history/_summary/` are landed
