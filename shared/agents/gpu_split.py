@@ -835,7 +835,12 @@ class GPUSplitMixin:
 
         return result
 
-    def _auto_recovery_stage_d_fallback_tasks(self, group_id: str) -> Dict[str, Any]:
+    def _auto_recovery_stage_d_fallback_tasks(
+        self,
+        group_id: str,
+        split_port: Optional[int],
+        verify_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Stage D: Recovery task fallback.
 
         Emit targeted meta tasks if direct cleanup failed to achieve verified cold.
@@ -879,6 +884,8 @@ class GPUSplitMixin:
                 "split_runtime_owner": self.split_runtime_owner,
                 "split_port": split_port,
                 "verified_cold": False,
+                "verification_checks": dict((verify_result or {}).get("checks", {})),
+                "verification_duration_ms": (verify_result or {}).get("duration_ms"),
             },
             "requested_at": datetime.now().isoformat(),
         }
@@ -970,7 +977,11 @@ class GPUSplitMixin:
 
             if not result["stages"]["C_retry"].get("verified"):
                 # Stage D: Fallback to targeted meta tasks
-                result["stages"]["D"] = self._auto_recovery_stage_d_fallback_tasks(group_id)
+                result["stages"]["D"] = self._auto_recovery_stage_d_fallback_tasks(
+                    group_id,
+                    split_port,
+                    verify_result=result["stages"]["C_retry"],
+                )
                 result["final_state"] = "fallback_requested"
 
                 # CRITICAL: Must exit recovery state to avoid deadlock
