@@ -347,3 +347,163 @@ def write_run_summary(history_dir: Path, summary: Dict[str, Any]) -> Dict[str, s
     with open(summary_md, "w", encoding="utf-8") as f:
         f.write(render_run_summary_markdown(summary))
     return {"json": str(summary_json), "markdown": str(summary_md)}
+
+
+def iter_history_dirs(history_root: Path) -> list[Path]:
+    history_root = history_root.resolve()
+    if not history_root.exists() or not history_root.is_dir():
+        return []
+    dirs = []
+    for child in sorted(history_root.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith("_"):
+            continue
+        dirs.append(child)
+    return dirs
+
+
+def _load_or_build_run_summary(history_dir: Path, refresh: bool) -> Dict[str, Any]:
+    summary_path = history_dir / "RUN_SUMMARY.json"
+    if not refresh and summary_path.exists():
+        cached = _load_json(summary_path)
+        if cached:
+            return cached
+    summary = summarize_history_dir(history_dir)
+    write_run_summary(history_dir, summary)
+    return summary
+
+
+def _rollup_failure_record(summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    failure = summary.get("failure")
+    if not isinstance(failure, dict) or not failure:
+        return None
+    return {
+        "batch_id": summary.get("batch_id", ""),
+        "plan_name": summary.get("plan_name", ""),
+        "status": summary.get("status", ""),
+        "history_dir": summary.get("history_dir", ""),
+        "reason": failure.get("reason", ""),
+        "source_task": failure.get("source_task", ""),
+        "source_task_id": failure.get("source_task_id", ""),
+        "abandoned_tasks": failure.get("abandoned_tasks", 0),
+        "refreshed_at": summary.get("refreshed_at", ""),
+    }
+
+
+def summarize_history_root(history_root: Path, *, refresh_runs: bool = True) -> Dict[str, Any]:
+    history_root = history_root.resolve()
+    run_summaries = []
+    failures = []
+    status_counts = Counter()
+    plan_counts = Counter()
+    artifact_presence_counts = Counter()
+    event_counts = Counter()
+    failure_source_counts = Counter()
+
+    for history_dir in iter_history_dirs(history_root):
+        summary = _load_or_build_run_summary(history_dir, refresh=refresh_runs)
+        run_summaries.append(summary)
+        status_counts[str(summary.get("status", "unknown")).strip() or "unknown"] += 1
+        plan_counts[str(summary.get("plan_name", "unknown")).strip() or "unknown"] += 1
+        for key, value in (summary.get("artifact_presence") or {}).items():
+            if value:
+                artifact_presence_counts[str(key)] += 1
+        for key, value in (summary.get("event_counts") or {}).items():
+            try:
+                event_counts[str(key)] += int(value)
+            except Exception:
+                continue
+        failure_record = _rollup_failure_record(summary)
+        if failure_record:
+            failures.append(failure_record)
+            failure_source = str(failure_record.get("source_task", "")).strip() or "unknown"
+            failure_source_counts[failure_source] += 1
+
+    rollup = {
+        "history_root": str(history_root),
+        "generated_at": datetime.now().isoformat(),
+        "run_count": len(run_summaries),
+        "status_counts": dict(status_counts),
+        "plan_counts": dict(plan_counts),
+        "artifact_presence_counts": dict(artifact_presence_counts),
+        "event_counts": dict(event_counts),
+        "failure_source_counts": dict(failure_source_counts),
+        "runs": run_summaries,
+        "failures": failures,
+    }
+    return rollup
+
+
+def render_history_rollup_markdown(rollup: Dict[str, Any]) -> str:
+    lines = [
+        "# History Rollup Summary",
+        "",
+        f"- History Root: {rollup.get('history_root')}",
+        f"- Generated At: {rollup.get('generated_at')}",
+        f"- Run Count: {rollup.get('run_count')}",
+    ]
+
+    if rollup.get("status_counts"):
+        lines.extend(["", "## Status Counts", ""])
+        for key, value in sorted((rollup.get("status_counts") or {}).items()):
+            lines.append(f"- {key}: {value}")
+
+    if rollup.get("plan_counts"):
+        lines.extend(["", "## Plan Counts", ""])
+        for key, value in sorted((rollup.get("plan_counts") or {}).items()):
+            lines.append(f"- {key}: {value}")
+
+    if rollup.get("artifact_presence_counts"):
+        lines.extend(["", "## Artifact Presence Counts", ""])
+        for key, value in sorted((rollup.get("artifact_presence_counts") or {}).items()):
+            lines.append(f"- {key}: {value}")
+
+    if rollup.get("failure_source_counts"):
+        lines.extend(["", "## Failure Source Counts", ""])
+        for key, value in sorted((rollup.get("failure_source_counts") or {}).items()):
+            lines.append(f"- {key}: {value}")
+
+    if rollup.get("failures"):
+        lines.extend(["", "## Failures", ""])
+        for failure in rollup.get("failures", [])[:20]:
+            lines.append(
+                f"- {failure.get('batch_id')} [{failure.get('status')}] "
+                f"{_snippet_from_text(failure.get('reason', ''), max_chars=200)}"
+            )
+            if failure.get("source_task"):
+                lines.append(f"- source_task: {failure.get('source_task')}")
+
+    return "\n".join(lines) + "\n"
+
+
+def write_history_rollup(history_root: Path, rollup: Dict[str, Any]) -> Dict[str, str]:
+    history_root = history_root.resolve()
+    summary_dir = history_root / "_summary"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+
+    rollup_json = summary_dir / "ROLLUP_SUMMARY.json"
+    rollup_md = summary_dir / "ROLLUP_SUMMARY.md"
+    runs_jsonl = summary_dir / "runs.jsonl"
+    failures_jsonl = summary_dir / "failures.jsonl"
+
+    with open(rollup_json, "w", encoding="utf-8") as f:
+        json.dump({k: v for k, v in rollup.items() if k not in {"runs", "failures"}}, f, indent=2)
+
+    with open(rollup_md, "w", encoding="utf-8") as f:
+        f.write(render_history_rollup_markdown(rollup))
+
+    with open(runs_jsonl, "w", encoding="utf-8") as f:
+        for run in rollup.get("runs", []):
+            f.write(json.dumps(run) + "\n")
+
+    with open(failures_jsonl, "w", encoding="utf-8") as f:
+        for failure in rollup.get("failures", []):
+            f.write(json.dumps(failure) + "\n")
+
+    return {
+        "rollup_json": str(rollup_json),
+        "rollup_markdown": str(rollup_md),
+        "runs_jsonl": str(runs_jsonl),
+        "failures_jsonl": str(failures_jsonl),
+    }
