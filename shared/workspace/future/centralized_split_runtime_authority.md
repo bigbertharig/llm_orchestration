@@ -152,19 +152,17 @@ Remaining work for Track 5:
 - consider enforcing queue-write invariants at a lower shared brain queue layer if more paths appear
 
 Remaining work for Track 1:
-- start issuing fenced `cleanup_split_runtime` commands from brain decisions instead of observe-only logging
+- brain-issued fenced `cleanup_split_runtime` commands are active
 - expand brain cleanup decision rules beyond first-pass critical/all-member-error handling
 - audit remaining split cleanup call sites outside owner-local startup failure handling
 - replace scaffolded reservation-epoch derivation with an explicit durable epoch field if needed
 
 Remaining work for Track 2:
-- decide whether non-cleanup failure signals should also increment brain-side pair failure counts
+- non-cleanup recovery observations already increment brain-side pair failure counts
 - brain-owned quarantine state is now exposed in brain heartbeat/state output
 
 Remaining work for Track 3:
-- legacy compatibility handling for old `split_recovery_fallback` signal
-  payloads has been removed; the brain now accepts observation-only
-  `split_recovery_observation` signals
+- observation-only recovery signaling is now the only accepted path
 - fallback observations now carry verification-check detail from the failed
   verified-cold stage so brain policy can reason over the observation without
   workers prescribing a remedy
@@ -262,9 +260,9 @@ Landed:
   for richer brain-side recovery policy inputs
 
 Not landed yet:
-- manual-stop summary refresh
-- resume-handoff summary refresh
-- cross-run rollup ledgers under `history/_summary/`
+- manual-stop summary refresh is landed
+- resume-handoff summary refresh is landed
+- cross-run rollup ledgers under `history/_summary/` are landed
 
 ### Why This Matters
 
