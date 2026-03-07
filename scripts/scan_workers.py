@@ -140,7 +140,11 @@ def _fetch_live_port_models(ports: list[int], timeout_s: int) -> tuple[dict[int,
 def _processing_task_count() -> int:
     processing_dir = SHARED_DIR / "tasks" / "processing"
     try:
-        return sum(1 for path in processing_dir.glob("*.json") if path.is_file())
+        return sum(
+            1
+            for path in processing_dir.glob("*.json")
+            if path.is_file() and not path.name.endswith(".heartbeat.json")
+        )
     except Exception:
         return 0
 
