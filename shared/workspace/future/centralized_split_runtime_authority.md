@@ -162,7 +162,9 @@ Remaining work for Track 2:
 - expose brain-owned quarantine state in a more explicit observable surface if needed
 
 Remaining work for Track 3:
-- remove legacy compatibility handling for old `split_recovery_fallback` signal payloads after rollout
+- legacy compatibility handling for old `split_recovery_fallback` signal
+  payloads has been removed; the brain now accepts observation-only
+  `split_recovery_observation` signals
 - decide whether fallback observations should carry richer verified-cold failure details for brain policy
 
 Remaining work for Track 4:
@@ -249,6 +251,9 @@ Landed:
   the shared requeue helper and emit the same batch retry/release events
 - recoverable retries now preserve `incident_id`; definition rewrites are the
   only requeue path that intentionally drop it
+- recovery fallback processing now accepts only observation-only
+  `split_recovery_observation` payloads; legacy worker-authored fallback signal
+  types are no longer honored
 
 Not landed yet:
 - manual-stop summary refresh
