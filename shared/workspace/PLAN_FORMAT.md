@@ -113,6 +113,12 @@ Fields valid only for `llm` tasks:
 - `llm_model`
 - `llm_placement`
 
+Brain-owned LLM tasks:
+- A task may be `executor: brain` with `task_class: llm` when it requires the brain model.
+- Do not add `llm_model` to brain-owned tasks.
+- Do not pass fixed brain model ids or fixed brain Ollama URLs in the task command.
+- The shared runtime is the source of truth for brain model selection and endpoint binding.
+
 Fields valid only for `script` tasks:
 - `vram_policy`
 - `vram_estimate_mb`
@@ -126,6 +132,12 @@ Valid values:
 Use:
 - `worker` for parallel or throughput-oriented execution
 - `brain` for orchestration-heavy, centralized, or synthesis steps
+
+Important boundary:
+- `executor: brain` means "run this with the active brain runtime."
+- Plans must not choose the concrete brain model or brain endpoint.
+- Brain tasks should consume runtime-injected `BRAIN_MODEL` and `BRAIN_OLLAMA_URL`.
+- Plans may still choose worker-side model demand when that is part of the workflow contract.
 
 ### Task Class Values
 

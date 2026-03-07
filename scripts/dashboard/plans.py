@@ -367,7 +367,6 @@ def default_plan_config(shared_path: Path, plan_name: str) -> dict[str, Any]:
             "WORKER_SHARDS": "5",
             "WORKER_CONTEXT_TOKENS": "8192",
             "WORKER_CONTEXT_UTILIZATION": "0.75",
-            "BRAIN_MODEL": "qwen2.5-coder:32b",
             "MAX_REPORT_ATTEMPTS": "3",
             "RUN_MODE": "fresh",
             "PRIORITY": "normal",
