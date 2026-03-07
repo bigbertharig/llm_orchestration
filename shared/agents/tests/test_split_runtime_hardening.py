@@ -15,6 +15,7 @@ if "requests" not in sys.modules:
     sys.modules["requests"] = types.SimpleNamespace()
 
 import gpu_tasks
+import gpu_split
 from gpu import GPUAgent
 from gpu_split import GPUSplitMixin
 from gpu_tasks import GPUTaskMixin
@@ -199,6 +200,44 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
 
         agent._has_pending_split_coordination = lambda: False
         self.assertEqual(agent._loop_sleep_seconds(), 5)
+
+    def test_split_warmup_request_budget_is_bounded(self):
+        gpu = MockSplitGpu(Path(tempfile.mkdtemp()))
+        original_time = gpu_split.time.time
+        try:
+            gpu_split.time.time = lambda: 100.0
+            self.assertEqual(gpu._split_warmup_request_budget_seconds(500.0), 25)
+            self.assertEqual(gpu._split_warmup_request_budget_seconds(110.0), 10)
+        finally:
+            gpu_split.time.time = original_time
+
+    def test_split_runtime_stable_model_presence_accepts_loaded_model(self):
+        gpu = MockSplitGpu(Path(tempfile.mkdtemp()))
+        original_time = gpu_split.time.time
+        original_sleep = gpu_split.time.sleep
+        original_requests = gpu_split.requests
+
+        class Response:
+            def __init__(self, models):
+                self.status_code = 200
+                self._models = models
+
+            def json(self):
+                return {"models": [{"name": name} for name in self._models]}
+
+        ticks = iter([0, 1, 2, 3, 4, 5])
+        gpu_split.time.time = lambda: next(ticks, 999)
+        gpu_split.time.sleep = lambda _s: None
+        gpu_split.requests = types.SimpleNamespace(
+            get=lambda _url, timeout=5: Response(["qwen2.5-coder:14b"])
+        )
+        try:
+            ok = gpu._split_runtime_has_stable_model_presence(11440, "qwen2.5-coder:14b")
+            self.assertTrue(ok)
+        finally:
+            gpu_split.time.time = original_time
+            gpu_split.time.sleep = original_sleep
+            gpu_split.requests = original_requests
 
 
 if __name__ == "__main__":

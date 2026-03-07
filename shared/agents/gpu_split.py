@@ -49,6 +49,12 @@ from gpu_constants import (
     SPLIT_RESERVATION_LOADING_STATES,
 )
 
+SPLIT_WARMUP_REQUEST_TIMEOUT_SECONDS = 25
+SPLIT_WARMUP_NUM_PREDICT = 1
+SPLIT_WARMUP_NUM_CTX = 512
+SPLIT_WARMUP_PS_STABLE_PROBES = 2
+SPLIT_WARMUP_PS_POLL_INTERVAL_SECONDS = 2
+
 
 class GPUSplitMixin:
     """Mixin providing split GPU runtime coordination methods."""
@@ -1583,6 +1589,52 @@ class GPUSplitMixin:
 
         return False, reservation
 
+    def _split_runtime_loaded_models(self, port: int) -> list[str]:
+        try:
+            r = requests.get(f"http://127.0.0.1:{port}/api/ps", timeout=5)
+            if r.status_code != 200:
+                return []
+            models = r.json().get("models", [])
+        except Exception:
+            return []
+
+        loaded = []
+        for item in models if isinstance(models, list) else []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if name:
+                loaded.append(name)
+        return loaded
+
+    def _split_runtime_has_stable_model_presence(
+        self,
+        port: int,
+        model_id: str,
+        *,
+        required_probes: int = SPLIT_WARMUP_PS_STABLE_PROBES,
+        max_wait_seconds: int = SPLIT_WARMUP_REQUEST_TIMEOUT_SECONDS,
+    ) -> bool:
+        deadline = time.time() + max_wait_seconds
+        stable_probes = 0
+        wanted = str(model_id or "").strip()
+
+        while time.time() < deadline:
+            loaded = self._split_runtime_loaded_models(port)
+            if wanted and wanted in loaded:
+                stable_probes += 1
+                if stable_probes >= required_probes:
+                    return True
+            else:
+                stable_probes = 0
+            time.sleep(SPLIT_WARMUP_PS_POLL_INTERVAL_SECONDS)
+
+        return False
+
+    def _split_warmup_request_budget_seconds(self, warmup_deadline: float) -> int:
+        remaining_budget = max(1, int(warmup_deadline - time.time()))
+        return max(1, min(SPLIT_WARMUP_REQUEST_TIMEOUT_SECONDS, remaining_budget))
+
     def _is_launcher_for_reservation(self, reservation: Dict[str, Any]) -> bool:
         """Check if this worker is the launcher for the given reservation."""
         launcher = str(reservation.get("launcher", "")).strip()
@@ -1776,20 +1828,20 @@ class GPUSplitMixin:
 
                         def _warmup_request():
                             try:
-                                remaining_budget = max(1, int(warmup_deadline - time.time()))
                                 req_result["response"] = requests.post(
                                     f"http://127.0.0.1:{port}/api/generate",
                                     json={
                                         "model": model_id,
-                                        "prompt": "Hello",
+                                        "prompt": "READY?",
                                         "stream": False,
                                         "keep_alive": self._effective_keep_alive(),
                                         "options": {
                                             "num_gpu": 999,
-                                            "num_ctx": self.worker_num_ctx,
+                                            "num_ctx": min(self.worker_num_ctx, SPLIT_WARMUP_NUM_CTX),
+                                            "num_predict": SPLIT_WARMUP_NUM_PREDICT,
                                         }
                                     },
-                                    timeout=remaining_budget
+                                    timeout=self._split_warmup_request_budget_seconds(warmup_deadline),
                                 )
                             except Exception as exc:
                                 req_result["error"] = exc
@@ -1819,6 +1871,12 @@ class GPUSplitMixin:
                             time.sleep(1)
 
                         if req_result["error"] is not None:
+                            if self._split_runtime_has_stable_model_presence(port, model_id):
+                                self.logger.info(
+                                    f"SPLIT_RUNTIME_WARMUP_PS_READY group={group.get('id')} port={port} "
+                                    f"model={model_id} attempts={attempts} mode=error_fallback"
+                                )
+                                return True
                             raise req_result["error"]
                         r = req_result["response"]
                         if r is None:
@@ -1828,6 +1886,12 @@ class GPUSplitMixin:
                                 f"SPLIT_RUNTIME_WARMUP_OK group={group.get('id')} port={port} "
                                 f"model={model_id} attempts={attempts} "
                                 f"warmup_ms={int((time.time() - warmup_started) * 1000)}"
+                            )
+                            return True
+                        if self._split_runtime_has_stable_model_presence(port, model_id):
+                            self.logger.info(
+                                f"SPLIT_RUNTIME_WARMUP_PS_READY group={group.get('id')} port={port} "
+                                f"model={model_id} attempts={attempts} status={r.status_code}"
                             )
                             return True
                         response_excerpt = (r.text or "").strip().replace("\n", " ")

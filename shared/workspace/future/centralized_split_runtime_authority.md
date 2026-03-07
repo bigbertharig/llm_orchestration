@@ -145,6 +145,7 @@ This plan covers five centralization tracks:
 - Split reservation creation now writes a partner nudge so the other member stays on a fast coordination loop
 - `load_split_llm` now force-cleans local split state if the reservation disappears mid-load
 - Split workers now force a local reset when shared owner metadata is missing, instead of lingering in `has_model=True, has_owner=False`
+- Split warmup now uses bounded generate probes and can accept stable `/api/ps` model presence as readiness, avoiding multi-minute warmup hangs on the shared port
 
 Track 5 status:
 - core requeue centralization is landed
