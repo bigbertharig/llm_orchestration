@@ -10,14 +10,81 @@ from typing import Any, Dict, List
 
 
 class BrainTaskQueueMixin:
+    _SUPPORTED_META_COMMANDS = {
+        "load_llm",
+        "unload_llm",
+        "load_split_llm",
+        "unload_split_llm",
+        "cleanup_split_runtime",
+        "reset_gpu_runtime",
+        "reset_split_runtime",
+    }
+
+    def _validate_meta_task_contract(self, task: Dict[str, Any]) -> str:
+        command = str(task.get("command", "")).strip()
+        if command not in self._SUPPORTED_META_COMMANDS:
+            return f"unsupported_meta_command:{command or 'missing'}"
+
+        if command == "load_split_llm":
+            target_model = str(task.get("target_model", "")).strip()
+            if not target_model:
+                return "load_split_llm:missing_target_model"
+            groups = task.get("candidate_groups")
+            if not isinstance(groups, list) or not groups:
+                return "load_split_llm:missing_candidate_groups"
+            for group in groups:
+                if not isinstance(group, dict):
+                    return "load_split_llm:invalid_candidate_group"
+                group_id = str(group.get("id", "")).strip()
+                members = group.get("members")
+                port = group.get("port")
+                if not group_id:
+                    return "load_split_llm:group_missing_id"
+                if not isinstance(members, list) or not all(str(member).strip() for member in members):
+                    return "load_split_llm:group_missing_members"
+                try:
+                    int(port)
+                except Exception:
+                    return "load_split_llm:group_missing_port"
+
+        if command in {"reset_gpu_runtime", "reset_split_runtime"}:
+            target_worker = str(task.get("target_worker") or task.get("target_gpu") or "").strip()
+            if not target_worker:
+                return f"{command}:missing_target_worker"
+
+        if command == "cleanup_split_runtime":
+            target_workers = task.get("target_workers", [])
+            group_id = str(task.get("group_id", "")).strip()
+            if not group_id and not (isinstance(target_workers, list) and any(str(w).strip() for w in target_workers)):
+                return "cleanup_split_runtime:missing_group_or_targets"
+
+        return ""
+
     def save_to_private(self, task: Dict[str, Any]):
         """Save a task to the private list (not visible to workers)."""
         task_file = self.private_tasks_path / f"{task['task_id']}.json"
         with open(task_file, 'w') as f:
             json.dump(task, f, indent=2)
 
-    def save_to_public(self, task: Dict[str, Any]):
+    def save_to_public(self, task: Dict[str, Any]) -> bool:
         """Save a task to the public queue (workers can claim it)."""
+        if task.get("task_class") == "meta":
+            reason = self._validate_meta_task_contract(task)
+            if reason:
+                failed_task = dict(task)
+                failed_task["status"] = "failed"
+                failed_task["result"] = {
+                    "success": False,
+                    "error": reason,
+                    "error_type": "meta_task_contract_error",
+                }
+                self.save_to_failed(failed_task)
+                self.log_decision(
+                    "META_TASK_INVALID",
+                    f"Rejected meta task before queue release: {task.get('command', task.get('name', task['task_id'][:8]))}",
+                    {"task_id": task["task_id"][:8], "reason": reason},
+                )
+                return False
         task_file = self.queue_path / f"{task['task_id']}.json"
         with open(task_file, 'w') as f:
             json.dump(task, f, indent=2)
@@ -28,6 +95,7 @@ class BrainTaskQueueMixin:
 
         self.log_decision("TASK_RELEASED", f"Released task to queue: {task.get('name', task['task_id'][:8])}",
                           {"task_id": task['task_id'][:8], "depends_on": task.get('depends_on', [])})
+        return True
 
     def save_to_failed(self, task: Dict[str, Any]):
         """Save a task directly to failed (for definition errors)."""

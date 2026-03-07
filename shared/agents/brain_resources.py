@@ -458,7 +458,14 @@ class BrainResourceMixin:
         if isinstance(meta, dict):
             for k, v in meta.items():
                 task[k] = v
-        self.save_to_public(task)
+        queued = self.save_to_public(task)
+        if not queued:
+            self.log_decision(
+                "RESOURCE_TASK_REJECTED",
+                f"Rejected {command} task before queue release",
+                {"task_id": task["task_id"][:8]},
+            )
+            return
         self.log_decision("RESOURCE_TASK", f"Inserted {command} task", {"task_id": task["task_id"][:8]})
         self.last_resource_task_at[dedup_key] = datetime.now()
 
