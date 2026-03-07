@@ -232,7 +232,9 @@ First useful slice:
 
 Landed:
 - reusable reducer in `shared/agents/run_summary.py`
-- tracked CLI in `scripts/summarize_history_run.py`
+- tracked CLIs in:
+  - `scripts/summarize_history_run.py`
+  - `scripts/rollup_history.py`
 - brain-owned `batch_events.jsonl` writing via `brain_summary.py`
 - automatic `RUN_SUMMARY.json` / `RUN_SUMMARY.md` refresh on:
   - terminal task events observed by the brain
