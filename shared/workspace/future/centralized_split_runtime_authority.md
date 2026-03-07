@@ -165,7 +165,9 @@ Remaining work for Track 3:
 - legacy compatibility handling for old `split_recovery_fallback` signal
   payloads has been removed; the brain now accepts observation-only
   `split_recovery_observation` signals
-- decide whether fallback observations should carry richer verified-cold failure details for brain policy
+- fallback observations now carry verification-check detail from the failed
+  verified-cold stage so brain policy can reason over the observation without
+  workers prescribing a remedy
 
 Remaining work for Track 4:
 - consider replacing brain-side unlink reclaim with a fully explicit superseding lease model
@@ -256,6 +258,8 @@ Landed:
   types are no longer honored
 - brain heartbeat/state now expose brain-owned split quarantine state so the
   authoritative quarantine view is externally observable
+- Stage D recovery observations now include failed verified-cold check detail
+  for richer brain-side recovery policy inputs
 
 Not landed yet:
 - manual-stop summary refresh
