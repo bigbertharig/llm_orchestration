@@ -141,6 +141,10 @@ This plan covers five centralization tracks:
 - Brain now reclaims stale global load-owner leases after verifying the observed lease still matches disk state
 - Brain and workers now use the same stale-owner timeout constant
 - Workers clear stale owner-issue state on successful lease acquire/release
+- Idle workers now claim from queue on the fast internal cadence instead of waiting for the idle external heartbeat
+- Split reservation creation now writes a partner nudge so the other member stays on a fast coordination loop
+- `load_split_llm` now force-cleans local split state if the reservation disappears mid-load
+- Split workers now force a local reset when shared owner metadata is missing, instead of lingering in `has_model=True, has_owner=False`
 
 Track 5 status:
 - core requeue centralization is landed
@@ -156,7 +160,7 @@ Track 5 status:
 Remaining work for Track 1:
 - brain-issued fenced `cleanup_split_runtime` commands are active
 - expand brain cleanup decision rules beyond first-pass critical/all-member-error handling
-- audit remaining split cleanup call sites outside owner-local startup failure handling
+- audit remaining split cleanup call sites outside the narrow dead-state local reset paths
 - replace scaffolded reservation-epoch derivation with an explicit durable epoch field if needed
 
 Track 2 status:

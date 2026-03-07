@@ -2,8 +2,8 @@
 """
 GPU Agent - Owns a single physical GPU and manages worker subprocesses.
 
-The GPU is the agent, not the worker. It visits the task queue on a 30-second
-heartbeat cycle, claims tasks within its VRAM budget, spawns worker subprocesses,
+The GPU is the agent, not the worker. It heartbeats on a coarse external cycle,
+claims tasks on a faster internal cadence, spawns worker subprocesses,
 collects results, and reports back. Workers are short-lived children that execute
 a single task and exit.
 
@@ -376,7 +376,7 @@ class GPUAgent(
     def run(self):
         """Main GPU agent loop.
 
-        External cycle (30s): filesystem I/O - heartbeat, flush outbox, claim tasks
+        External cycle (30s idle / 5s active): filesystem I/O - heartbeat, flush outbox
         Internal cycle (5s): check worker status, update VRAM, check signals
         """
         self.logger.info(f"GPU agent {self.name} starting")
@@ -394,6 +394,7 @@ class GPUAgent(
             self.logger.info("GPU agent ready")
 
             last_external = 0
+            last_claim = 0
 
             while self.running:
                 now = time.time()
@@ -434,7 +435,19 @@ class GPUAgent(
                 # Update VRAM tracking for running workers
                 self._update_worker_vram()
 
-                # --- External tick (every 30s OR all workers done with pending outbox) ---
+                claimed = []
+                claim_interval = (
+                    ACTIVE_WORK_HEARTBEAT_INTERVAL
+                    if self._has_active_work()
+                    else INTERNAL_POLL_INTERVAL
+                )
+                claim_due = (now - last_claim) >= claim_interval
+                if claim_due:
+                    claimed = self.claim_tasks()
+                    self._drain_claimed_tasks(claimed)
+                    last_claim = time.time()
+
+                # --- External tick (every 30s idle / 5s active OR all workers done with pending outbox) ---
                 all_done = len(self.active_workers) == 0 and len(self.outbox) > 0
                 heartbeat_interval = (
                     ACTIVE_WORK_HEARTBEAT_INTERVAL
@@ -444,43 +457,8 @@ class GPUAgent(
                 external_due = (now - last_external) >= heartbeat_interval
 
                 if external_due or all_done:
-                    # 1. Flush completed results to filesystem
                     flushed = self._flush_outbox()
-
-                    # 2. Write heartbeat
                     self._write_heartbeat()
-
-                    # 3. Claim new tasks
-                    claimed = self.claim_tasks()
-
-                    # 4. Handle meta tasks directly, spawn workers for the rest
-                    # Dedup: only handle one meta task per command per cycle
-                    handled_meta_commands = set()
-                    for task in claimed:
-                        if task.get("task_class") == "meta":
-                            cmd = str(task.get("command", ""))
-                            dedup_key = json.dumps({
-                                "command": cmd,
-                                "target_model": task.get("target_model"),
-                                "group_id": task.get("group_id"),
-                            }, sort_keys=True)
-                            if dedup_key in handled_meta_commands:
-                                self.logger.info(
-                                    f"Dedup: skipping duplicate {cmd} meta task "
-                                    f"{task['task_id'][:8]}")
-                                # Complete it as no-op success
-                                self.outbox.append(WorkerResult(
-                                    task_id=task["task_id"], task=task,
-                                    result={"success": True,
-                                            "output": f"Dedup: {cmd} already handled this cycle",
-                                            "worker": self.name, "max_vram_used_mb": 0},
-                                    peak_vram_mb=0))
-                            else:
-                                handled_meta_commands.add(dedup_key)
-                                self._handle_meta_task(task)
-                        else:
-                            self._spawn_worker(task)
-
                     last_external = time.time()
 
                     if flushed > 0 or claimed:
@@ -490,7 +468,7 @@ class GPUAgent(
                             f"budget {self._get_vram_budget()}MB"
                         )
 
-                time.sleep(INTERNAL_POLL_INTERVAL)
+                time.sleep(self._loop_sleep_seconds())
 
         except KeyboardInterrupt:
             self.logger.info("Received shutdown signal")
@@ -502,6 +480,41 @@ class GPUAgent(
             self.cleanup()
             if crash_exception:
                 raise crash_exception  # Re-raise so supervisor sees non-zero exit
+
+    def _drain_claimed_tasks(self, claimed: List[Dict[str, Any]]) -> None:
+        if not claimed:
+            return
+
+        handled_meta_commands = set()
+        for task in claimed:
+            if task.get("task_class") == "meta":
+                cmd = str(task.get("command", ""))
+                dedup_key = json.dumps({
+                    "command": cmd,
+                    "target_model": task.get("target_model"),
+                    "group_id": task.get("group_id"),
+                }, sort_keys=True)
+                if dedup_key in handled_meta_commands:
+                    self.logger.info(
+                        f"Dedup: skipping duplicate {cmd} meta task "
+                        f"{task['task_id'][:8]}")
+                    self.outbox.append(WorkerResult(
+                        task_id=task["task_id"], task=task,
+                        result={"success": True,
+                                "output": f"Dedup: {cmd} already handled this cycle",
+                                "worker": self.name, "max_vram_used_mb": 0},
+                        peak_vram_mb=0))
+                    continue
+                handled_meta_commands.add(dedup_key)
+                self._handle_meta_task(task)
+                continue
+
+            self._spawn_worker(task)
+
+    def _loop_sleep_seconds(self) -> float:
+        if self._has_pending_split_coordination():
+            return 0.5
+        return INTERNAL_POLL_INTERVAL
 
     def cleanup(self):
         """Clean up all resources on shutdown."""

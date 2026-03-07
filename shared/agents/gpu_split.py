@@ -53,6 +53,79 @@ from gpu_constants import (
 class GPUSplitMixin:
     """Mixin providing split GPU runtime coordination methods."""
 
+    def _split_partner_nudge_path(self, group_id: str) -> Path:
+        safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(group_id))
+        return self.split_state_dir / f"{safe}.partner_nudge.json"
+
+    def _write_split_partner_nudge(
+        self,
+        group_id: str,
+        members: list[str],
+        launcher: str,
+        reason: str = "reservation_created",
+    ) -> None:
+        if not group_id:
+            return
+        payload = {
+            "group_id": group_id,
+            "members": [str(m).strip() for m in members if str(m).strip()],
+            "launcher": str(launcher or "").strip(),
+            "reason": reason,
+            "created_at": datetime.now().isoformat(),
+            "expires_at": datetime.fromtimestamp(time.time() + 15).isoformat(),
+        }
+        try:
+            with open(self._split_partner_nudge_path(group_id), "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            self.logger.debug(f"Failed to write split partner nudge for {group_id}: {e}")
+
+    def _clear_split_partner_nudge(self, group_id: str) -> None:
+        if not group_id:
+            return
+        try:
+            self._split_partner_nudge_path(group_id).unlink(missing_ok=True)
+        except Exception as e:
+            self.logger.debug(f"Failed to clear split partner nudge for {group_id}: {e}")
+
+    def _has_pending_split_coordination(self) -> bool:
+        """Return True when this worker should stay on a fast coordination loop."""
+        for res_file in self.split_state_dir.glob("*.json"):
+            if str(res_file).endswith(".lock") or str(res_file).endswith(".partner_nudge.json"):
+                continue
+            try:
+                with open(res_file, "r", encoding="utf-8") as f:
+                    reservation = json.load(f)
+            except Exception:
+                continue
+            members = [str(m).strip() for m in reservation.get("members", []) if str(m).strip()]
+            if self.name not in members:
+                continue
+            status = str(reservation.get("status", "")).strip()
+            if status in {"waiting_partner", "joining", "loading", "warming", "ready_stabilizing"}:
+                return True
+
+        for nudge_file in self.split_state_dir.glob("*.partner_nudge.json"):
+            try:
+                with open(nudge_file, "r", encoding="utf-8") as f:
+                    nudge = json.load(f)
+            except Exception:
+                continue
+            members = [str(m).strip() for m in nudge.get("members", []) if str(m).strip()]
+            if self.name not in members:
+                continue
+            expires_at_raw = str(nudge.get("expires_at", "")).strip()
+            if expires_at_raw:
+                try:
+                    if datetime.now() > datetime.fromisoformat(expires_at_raw):
+                        nudge_file.unlink(missing_ok=True)
+                        continue
+                except Exception:
+                    pass
+            return True
+
+        return False
+
     def _get_split_health_issue_heartbeat(self) -> Dict[str, Any]:
         issue = getattr(self, "pending_split_health_issue", None)
         if not isinstance(issue, dict):
@@ -361,6 +434,32 @@ class GPUSplitMixin:
             RUNTIME_STATE_READY_SPLIT,
             task_id=task_id,
             phase="split_load_complete",
+        )
+
+    def _reset_dead_split_runtime(
+        self,
+        reason: str,
+        *,
+        group_id: Optional[str] = None,
+        split_port: Optional[int] = None,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Force a local split cleanup when shared ownership is no longer trustworthy."""
+        current_group_id = str(group_id or self.runtime_group_id or "").strip()
+        current_port = split_port if split_port is not None else self.runtime_port
+        if not current_group_id and not current_port:
+            return self._runtime_reset_port_and_state(
+                ports_to_clean=[self.port] if self.port else [],
+                reason=f"dead_split_state:{reason}",
+                task_id=task_id,
+                stop_split_runtime=False,
+                stop_local_ollama=False,
+            )
+        return self._coordinated_split_failure_cleanup(
+            current_group_id,
+            current_port,
+            reason=f"dead_split_state:{reason}",
+            task_id=task_id,
         )
 
     def _runtime_reset_port_and_state(
@@ -2462,7 +2561,8 @@ class GPUSplitMixin:
 
         # owner_meta_mismatch: always check, immediate clear
         if not reason and not self._split_runtime_has_expected_owner(port, model_id, group_id):
-            reason = "owner_meta_mismatch"
+            self._reset_dead_split_runtime("owner_meta_mismatch", group_id=group_id, split_port=port)
+            return
 
         # port_model_missing: grace window + consecutive threshold
         port_has_listener = self._split_runtime_has_any_listener(port)
@@ -2571,7 +2671,7 @@ class GPUSplitMixin:
     def _service_split_reservations(self):
         """Background sync so non-claiming partner can join and mirror split state."""
         for res_file in self.split_state_dir.glob("*.json"):
-            if str(res_file).endswith(".lock"):
+            if str(res_file).endswith(".lock") or str(res_file).endswith(".partner_nudge.json"):
                 continue
             lock = FileLock(str(res_file) + ".lock", timeout=1)
             start_runtime = None
@@ -2784,6 +2884,7 @@ class GPUSplitMixin:
                             continue
 
                     if status == "ready":
+                        self._clear_split_partner_nudge(str(group.get("id") or ""))
                         # Do not mirror ready state unless the shared split port actually
                         # reports the target model loaded. Otherwise we can oscillate between
                         # wedged<->ready_split on stale reservations.
@@ -2820,21 +2921,17 @@ class GPUSplitMixin:
                                 f"has_model={ready_has_model} has_owner={ready_has_owner}"
                             )
                             if self.runtime_group_id == reservation.get("group_id"):
-                                # Keep local state conservative until reservation becomes valid again.
-                                self._set_runtime_state(
-                                    RUNTIME_STATE_COLD,
-                                    phase="split_ready_rejected",
-                                    error_code="split_ready_invalid",
-                                    error_detail=f"has_model={ready_has_model},has_owner={ready_has_owner}",
+                                cleanup_reason = (
+                                    "ready_owner_missing"
+                                    if not ready_has_owner
+                                    else "ready_invalid"
                                 )
-                                self.runtime_placement = "single_gpu"
-                                self.runtime_group_id = None
-                                self.runtime_port = self.port
-                                self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
-                                self.split_runtime_owner = False
-                                self.model_loaded = False
-                                self.loaded_model = None
-                                self.loaded_tier = 0
+                                self._reset_dead_split_runtime(
+                                    cleanup_reason,
+                                    group_id=str(group.get("id") or ""),
+                                    split_port=port,
+                                    task_id=self.active_meta_task.get("task_id") if self.active_meta_task else None,
+                                )
                             return
 
                         # Both members mirror ready state; launcher is authoritative owner.
@@ -2849,6 +2946,7 @@ class GPUSplitMixin:
                         return
 
                     if status in {"unloaded", "failed", "expired"}:
+                        self._clear_split_partner_nudge(str(group.get("id") or ""))
                         if self.runtime_group_id == reservation.get("group_id"):
                             reservation_epoch = self._split_reservation_epoch_from_dict(reservation)
                             # Narrow local exception: owner can clean up if it can prove

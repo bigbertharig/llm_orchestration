@@ -1282,6 +1282,7 @@ class GPUTaskMixin:
 
                                 with open(reservation_path, "w", encoding="utf-8") as f:
                                     json.dump(reservation, f, indent=2)
+                                self._write_split_partner_nudge(group_id, members, launcher)
                             reservation_written = True
                             break
                         except Timeout:
@@ -1360,6 +1361,19 @@ class GPUTaskMixin:
                         except Exception:
                             pass
 
+                    cleanup_result = None
+                    if not success and failure_reason == "reservation disappeared":
+                        try:
+                            split_port = int(chosen.get("port")) if chosen.get("port") else None
+                        except Exception:
+                            split_port = None
+                        cleanup_result = self._reset_dead_split_runtime(
+                            "reservation_disappeared",
+                            group_id=group_id,
+                            split_port=split_port,
+                            task_id=task.get("task_id"),
+                        )
+
                     result = {
                         "success": success,
                         "output": (
@@ -1372,6 +1386,8 @@ class GPUTaskMixin:
                         "worker": self.name,
                         "max_vram_used_mb": 0,
                     }
+                    if cleanup_result:
+                        result["cleanup"] = cleanup_result
         elif command == "unload_split_llm":
             task_id = task.get("task_id")
             group_id = str(task.get("group_id", "")).strip() or str(self.runtime_group_id or "")
