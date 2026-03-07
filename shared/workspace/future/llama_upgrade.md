@@ -103,6 +103,15 @@ Companion build/runtime spec:
 
 - [llama_runtime_image_spec.md](/home/bryan/llm_orchestration/shared/workspace/future/llama_runtime_image_spec.md)
 
+Current implementation artifacts:
+
+- [Dockerfile](/home/bryan/llm_orchestration/scripts/llama_runtime/Dockerfile)
+- [entrypoint.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/entrypoint.sh)
+- [build_image.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/build_image.sh)
+- [run_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh)
+- [stop_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/stop_runtime.sh)
+- [probe_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/probe_runtime.sh)
+
 ## Constraints
 
 - Shared GGUF files under `/mnt/shared/models/` remain the source of truth.
@@ -341,12 +350,23 @@ Rollback:
 
 ## Phase 1: New Runtime Mixin For Single-GPU Serving
 
+Phase 1 implementation status now:
+
+- [x] dedicated runtime image directory created
+- [x] host-side build helper created
+- [x] host-side run/stop/probe helpers created
+- [ ] dedicated image built locally on the rig
+- [ ] dedicated image proven with one real single-worker model
+- [ ] agent runtime mixin added
+- [ ] agent path switched from Ollama to llama
+
 Primary files:
 - [gpu_ollama.py](/home/bryan/llm_orchestration/shared/agents/gpu_ollama.py)
 - [gpu.py](/home/bryan/llm_orchestration/shared/agents/gpu.py)
 - [gpu_core.py](/home/bryan/llm_orchestration/shared/agents/gpu_core.py)
 
 Plan:
+- [x] create dedicated image and launcher helpers under `scripts/llama_runtime/`
 - [ ] add `gpu_llama.py`
 - [ ] implement server start
 - [ ] implement server stop
@@ -361,6 +381,7 @@ Notes:
 - Server stop becomes the unload operation.
 - Keep the external orchestration contract stable where possible.
 - Keep service ownership unchanged. Phase 1 swaps the backend under the existing service/supervisor model; it does not introduce a parallel launcher.
+- Use the new wrapper scripts as the canonical command source instead of embedding raw `docker run` strings in multiple places.
 
 Exit criteria:
 - [ ] one worker can start a model-backed runtime on demand
@@ -370,6 +391,36 @@ Exit criteria:
 Rollback:
 - [ ] keep `gpu_ollama.py` intact until Phase 6
 - [ ] allow worker path to switch back to Ollama during transition
+
+### Phase 1 Canonical Commands
+
+Build the dedicated image:
+
+```bash
+/home/bryan/llm_orchestration/scripts/llama_runtime/build_image.sh
+```
+
+Start one worker runtime:
+
+```bash
+/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh \
+  --name llama-worker-gpu1 \
+  --model /mnt/shared/models/qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
+  --port 11436 \
+  --gpus device=1
+```
+
+Probe readiness:
+
+```bash
+/home/bryan/llm_orchestration/scripts/llama_runtime/probe_runtime.sh 11436
+```
+
+Stop the runtime:
+
+```bash
+/home/bryan/llm_orchestration/scripts/llama_runtime/stop_runtime.sh llama-worker-gpu1
+```
 
 ## Phase 2: Wire Single-GPU Agent Path
 

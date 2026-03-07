@@ -52,13 +52,30 @@ Recommendation:
 - compile `llama-server` in the image
 - keep the binary path explicit and stable
 
-Open implementation choices to lock during build:
+Current implementation artifacts:
 
-- image name
-- image tag format
-- base CUDA image
-- exact compile flags
-- exact binary install path
+- Dockerfile: [scripts/llama_runtime/Dockerfile](/home/bryan/llm_orchestration/scripts/llama_runtime/Dockerfile)
+- entrypoint: [scripts/llama_runtime/entrypoint.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/entrypoint.sh)
+- build helper: [scripts/llama_runtime/build_image.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/build_image.sh)
+- run helper: [scripts/llama_runtime/run_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh)
+- stop helper: [scripts/llama_runtime/stop_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/stop_runtime.sh)
+- probe helper: [scripts/llama_runtime/probe_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/probe_runtime.sh)
+
+Locked choices for the first implementation pass:
+
+- image name: `llama-runtime:sm61-sm86`
+- base CUDA images:
+  - build: `nvidia/cuda:12.6.3-devel-ubuntu24.04`
+  - runtime: `nvidia/cuda:12.6.3-runtime-ubuntu24.04`
+- binary path: `/opt/llama/bin/llama-server`
+- compile target: native `llama-server`
+- CUDA architectures: `61;86`
+
+Still open while proving the image:
+
+- exact `llama.cpp` ref to standardize on long-term
+- whether any extra runtime libraries are needed on the rig beyond the current image
+- final default values for `--ctx-size`, `--batch-size`, and `--parallel`
 
 ## Expected Runtime Contract
 
@@ -76,44 +93,32 @@ That means:
 Single worker:
 
 ```bash
-docker run --rm --name llama-worker-gpu2 \
-  --gpus "device=2" \
-  --network host \
-  -v /mnt/shared/models:/mnt/shared/models \
-  <llama-runtime-image> \
-  llama-server \
+/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh \
+  --name llama-worker-gpu2 \
   --model <gguf-path> \
-  --host 127.0.0.1 \
-  --port 11436
+  --port 11436 \
+  --gpus device=2
 ```
 
 Brain:
 
 ```bash
-docker run --rm --name llama-brain \
-  --gpus <brain-gpu-selection> \
-  --network host \
-  -v /mnt/shared/models:/mnt/shared/models \
-  <llama-runtime-image> \
-  llama-server \
+/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh \
+  --name llama-brain \
   --model <gguf-path> \
-  --host 127.0.0.1 \
-  --port 11434
+  --port 11434 \
+  --gpus <brain-gpu-selection>
 ```
 
 Split:
 
 ```bash
-docker run --rm --name llama-split-pair-1-3 \
-  --gpus all \
-  --network host \
-  -v /mnt/shared/models:/mnt/shared/models \
-  <llama-runtime-image> \
-  llama-server \
+/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh \
+  --name llama-split-pair-1-3 \
   --model <gguf-path> \
-  --host 127.0.0.1 \
   --port 11440 \
-  --tensor-split 0 1 0 1 0 0
+  --gpus all \
+  --tensor-split 0,1,0,1,0,0
 ```
 
 ## Runtime Flags To Standardize
@@ -142,7 +147,7 @@ It is not a Phase 1 coding blocker.
 
 Before Phase 1 is considered implemented enough to move on:
 
-- one image is chosen and named
-- build source is recorded
-- one single-worker container command works end-to-end
-- the runtime can be started, probed, and stopped deterministically
+- [x] one image is chosen and named
+- [x] build source is recorded
+- [ ] one single-worker container command works end-to-end from the dedicated image
+- [ ] the runtime can be started, probed, and stopped deterministically from the dedicated image
