@@ -33,9 +33,17 @@ def default_benchmark_python() -> str:
     configured = os.environ.get("BENCHMARK_PYTHON", "").strip()
     if configured:
         return configured
-    candidate = Path.home() / "ml-env" / "bin" / "python"
-    if candidate.exists():
-        return str(candidate)
+    candidates = [
+        Path.home() / "llm-orchestration-venv" / "bin" / "python",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and python_has_module(str(candidate), "lm_eval"):
+            return str(candidate)
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    if python_has_module(sys.executable, "lm_eval"):
+        return sys.executable
     return sys.executable
 
 
@@ -86,6 +94,16 @@ def lm_eval_task_set(python_bin: str) -> set[str]:
             if name and " " not in name:
                 tasks.add(name)
     return tasks
+
+
+def python_has_module(python_bin: str, module_name: str) -> bool:
+    proc = subprocess.run(
+        [python_bin, "-c", f"import {module_name}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.returncode == 0
 
 
 def resolve_task_name(task_name: str, available_tasks: set[str]) -> str | None:
@@ -213,6 +231,12 @@ def main() -> int:
         help="Bypass compatibility status gating. Intended for certification probes.",
     )
     args = ap.parse_args()
+
+    if not python_has_module(args.python, "lm_eval"):
+        raise SystemExit(
+            f"Selected python does not have lm_eval installed: {args.python}. "
+            "Set --python or BENCHMARK_PYTHON to an environment with lm_eval."
+        )
 
     this_dir = Path(__file__).resolve().parent
     catalog_path = (this_dir / args.catalog).resolve() if not Path(args.catalog).is_absolute() else Path(args.catalog)

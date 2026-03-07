@@ -36,10 +36,10 @@ def _normalize_batch_summary_command(command: str) -> str:
     marker = "/scripts/generate_batch_summary.py"
     if marker not in command:
         return command
-    if "source ~/ml-env/bin/activate" in command and "python3 " in command:
+    if "source ~/llm-orchestration-venv/bin/activate" in command and "python3 " in command:
         return command
     return (
-        "source ~/ml-env/bin/activate && "
+        "source ~/llm-orchestration-venv/bin/activate && "
         + command.replace("python ", "python3 ", 1)
     )
 

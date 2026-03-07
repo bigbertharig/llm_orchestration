@@ -110,3 +110,30 @@ class BrainSummaryTests(unittest.TestCase):
             self.assertTrue(first)
             self.assertFalse(second)
 
+    def test_task_payload_preserves_diagnostic_summary_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            brain = MockBrainSummary(root)
+
+            payload = brain._task_payload(
+                {
+                    "task_id": "task-1",
+                    "name": "load_llm",
+                    "status": "failed",
+                    "result": {
+                        "success": False,
+                        "error": "",
+                        "diagnostic": "target_model=qwen runtime_error_code=load_failed",
+                        "output": "Model failed to load",
+                        "error_code": "load_failed",
+                        "runtime_error_code": "load_exception",
+                        "runtime_error_detail": "model readiness probe timed out",
+                    },
+                }
+            )
+
+            self.assertEqual(payload["error"], "")
+            self.assertEqual(payload["diagnostic"], "target_model=qwen runtime_error_code=load_failed")
+            self.assertEqual(payload["summary"], "target_model=qwen runtime_error_code=load_failed")
+            self.assertEqual(payload["error_code"], "load_failed")
+            self.assertEqual(payload["runtime_error_code"], "load_exception")

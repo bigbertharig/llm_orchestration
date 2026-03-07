@@ -191,14 +191,14 @@ def _run_clear_ollama(timeout_s: int) -> tuple[bool, dict]:
 def _run_remote_restart(timeout_s: int) -> tuple[bool, dict]:
     remote_script = (
         "set -e\n"
+        "sudo systemctl stop llm-orchestrator.service\n"
         "pkill -f /mnt/shared/agents/brain.py || true\n"
         "pkill -f /mnt/shared/agents/gpu.py || true\n"
         "pkill -f /mnt/shared/agents/startup.py || true\n"
         "sleep 2\n"
-        "nohup /home/bryan/ml-env/bin/python /mnt/shared/agents/startup.py "
-        "--config /mnt/shared/agents/config.json "
-        ">> /mnt/shared/logs/startup-manual.log 2>&1 < /dev/null &\n"
+        "sudo systemctl start llm-orchestrator.service\n"
         "sleep 4\n"
+        "systemctl is-active llm-orchestrator.service || true\n"
         "pgrep -af startup.py || true\n"
         "pgrep -af brain.py || true\n"
         "pgrep -af gpu.py || true\n"
@@ -217,7 +217,7 @@ def _run_remote_restart(timeout_s: int) -> tuple[bool, dict]:
             "returncode": proc.returncode,
             "stdout": (proc.stdout or "").strip(),
             "stderr": (proc.stderr or "").strip(),
-            "cmd": "ssh gpu bash -s (stdin: kill agents, restart startup.py)",
+            "cmd": "ssh gpu bash -s (stdin: restart llm-orchestrator.service)",
         },
     )
 

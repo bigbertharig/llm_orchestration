@@ -116,7 +116,7 @@ class CpuAgent:
 
     def _pick_default_venv_activate(self) -> str | None:
         candidates = [
-            "/home/bryan/ml-env/bin/activate",
+            "/home/bryan/llm-orchestration-venv/bin/activate",
             "/opt/worker-env/bin/activate",   # fallback when user env is absent
         ]
         for p in candidates:

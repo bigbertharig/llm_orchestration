@@ -204,7 +204,7 @@ code on terminal task events and terminal batch transitions.
   "batch_id": "abc123",
   "name": "process",
   "type": "shell",
-  "command": "source ~/ml-env/bin/activate && python ...",
+  "command": "source ~/llm-orchestration-venv/bin/activate && python ...",
   "priority": 5,
   "status": "pending",
   "executor": "worker",

@@ -20,6 +20,17 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 
+def _default_agent_python() -> str:
+    candidates = [
+        "/home/bryan/llm-orchestration-venv/bin/python",
+        "python3",
+    ]
+    for candidate in candidates:
+        if candidate == "python3" or Path(candidate).exists():
+            return candidate
+    return "python3"
+
+
 def _iter_pids_for_port(port: int) -> List[int]:
     try:
         proc = subprocess.run(
@@ -120,7 +131,7 @@ def hard_reset_gpu_runtime(
     split_ids: Iterable[str] | None = None,
     config_path: str = "/mnt/shared/agents/config.json",
     signals_path: str = "/mnt/shared/signals",
-    agent_python: str = "/home/bryan/ml-env/bin/python",
+    agent_python: str = _default_agent_python(),
     gpu_agent_path: str = "/mnt/shared/agents/gpu.py",
     clear_global_load_owner: bool = True,
     spawn_replacement: bool = False,
@@ -224,7 +235,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--split-id", action="append", default=[])
     parser.add_argument("--config-path", default="/mnt/shared/agents/config.json")
     parser.add_argument("--signals-path", default="/mnt/shared/signals")
-    parser.add_argument("--agent-python", default="/home/bryan/ml-env/bin/python")
+    parser.add_argument("--agent-python", default=_default_agent_python())
     parser.add_argument("--gpu-agent-path", default="/mnt/shared/agents/gpu.py")
     parser.add_argument("--spawn", action="store_true")
     return parser.parse_args()

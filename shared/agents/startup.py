@@ -354,6 +354,39 @@ def _count_existing_meta_tasks(shared_path: Path, command: str) -> int:
     return count
 
 
+def _purge_stale_startup_load_tasks(shared_path: Path) -> int:
+    """Remove startup-created load_llm tasks left behind from prior runs."""
+    removed = 0
+    for folder in ("queue", "processing"):
+        path = shared_path / "tasks" / folder
+        if not path.exists():
+            continue
+        for task_file in path.glob("*.json"):
+            if str(task_file).endswith(".lock"):
+                continue
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+            except Exception:
+                continue
+            if task.get("task_class") != "meta" or task.get("command") != "load_llm":
+                continue
+            created_by = str(task.get("created_by", "")).strip()
+            batch_id = str(task.get("batch_id", "")).strip()
+            name = str(task.get("name", "")).strip()
+            if (
+                created_by == "startup"
+                or batch_id == "system"
+                or name.startswith("load_llm_startup_")
+            ):
+                try:
+                    task_file.unlink()
+                    removed += 1
+                except Exception:
+                    continue
+    return removed
+
+
 def _get_split_member_gpus(agents_dir: Path) -> set[str]:
     """Read model catalog and return set of GPU names that are split pair members.
 
@@ -404,6 +437,10 @@ def _enqueue_startup_load_llm(
     queue_path = shared_path / "tasks" / "queue"
     queue_path.mkdir(parents=True, exist_ok=True)
 
+    removed = _purge_stale_startup_load_tasks(shared_path)
+    if removed:
+        print(f"Removed {removed} stale startup load_llm task(s) before enqueue.")
+
     existing = _count_existing_meta_tasks(shared_path, "load_llm")
     to_add = max(0, count - existing)
     if to_add == 0:
@@ -420,8 +457,16 @@ def _enqueue_startup_load_llm(
         split_members = _get_split_member_gpus(agents_dir)
 
     all_workers = []
+    worker_models_by_name: dict[str, str] = {}
     if available_workers:
-        all_workers = [str(w.get("name", "")).strip() for w in available_workers if str(w.get("name", "")).strip()]
+        for worker in available_workers:
+            name = str(worker.get("name", "")).strip()
+            if not name:
+                continue
+            all_workers.append(name)
+            model_id = str(worker.get("model", "")).strip()
+            if model_id:
+                worker_models_by_name[name] = model_id
 
     non_split_workers = [w for w in all_workers if w not in split_members]
     split_workers = [w for w in all_workers if w in split_members]
@@ -450,7 +495,11 @@ def _enqueue_startup_load_llm(
             "retry_count": 0,
         }
         if idx < len(preferred_order):
-            task["candidate_workers"] = [preferred_order[idx]]
+            worker_name = preferred_order[idx]
+            task["candidate_workers"] = [worker_name]
+            target_model = worker_models_by_name.get(worker_name, "").strip()
+            if target_model:
+                task["target_model"] = target_model
         task_file = queue_path / f"{task['task_id']}.json"
         with open(task_file, "w") as f:
             json.dump(task, f, indent=2)

@@ -39,6 +39,85 @@ from gpu_workers import WorkerResult
 class GPUTaskMixin:
     """Mixin providing task claiming and meta task handling methods."""
 
+    def _safe_meta_detail(self, value: Any, limit: int = 400) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return text[:limit]
+
+    def _meta_runtime_diagnostics(self, command: str, task: Dict[str, Any]) -> Dict[str, Any]:
+        target_model = str(task.get("target_model", "") or "").strip()
+        candidate_groups = task.get("candidate_groups", [])
+        details: Dict[str, Any] = {
+            "command": command,
+            "worker": self.name,
+            "runtime_state": self.runtime_state,
+            "runtime_error_code": self.runtime_error_code,
+            "runtime_error_detail": self._safe_meta_detail(self.runtime_error_detail),
+            "model_loaded": self.model_loaded,
+            "loaded_model": self.loaded_model,
+            "runtime_placement": getattr(self, "runtime_placement", None),
+            "runtime_group_id": getattr(self, "runtime_group_id", None),
+            "runtime_port": getattr(self, "runtime_port", None),
+            "last_split_runtime_error": self._safe_meta_detail(
+                getattr(self, "last_split_runtime_error", "")
+            ),
+        }
+        if target_model:
+            details["target_model"] = target_model
+        if command == "load_split_llm" and isinstance(candidate_groups, list):
+            details["candidate_group_ids"] = [
+                str(group.get("id", "")).strip()
+                for group in candidate_groups
+                if isinstance(group, dict) and str(group.get("id", "")).strip()
+            ]
+        return details
+
+    def _build_meta_result(
+        self,
+        command: str,
+        task: Dict[str, Any],
+        *,
+        success: bool,
+        output: str = "",
+        error: str = "",
+        error_type: str = "",
+        error_code: str = "",
+        diagnostic: str = "",
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        details = self._meta_runtime_diagnostics(command, task)
+        result: Dict[str, Any] = {
+            "success": success,
+            "output": output,
+            "worker": self.name,
+            "max_vram_used_mb": 0,
+            "model_loaded": self.model_loaded,
+            "loaded_model": self.loaded_model,
+            "runtime_state": self.runtime_state,
+            "runtime_placement": details.get("runtime_placement"),
+            "runtime_group_id": details.get("runtime_group_id"),
+            "runtime_port": details.get("runtime_port"),
+            "runtime_error_code": details.get("runtime_error_code"),
+            "runtime_error_detail": details.get("runtime_error_detail"),
+            "details": details,
+        }
+        if error_code:
+            result["error_code"] = error_code
+        if diagnostic:
+            result["diagnostic"] = self._safe_meta_detail(diagnostic)
+        if success:
+            result["error"] = ""
+            result["error_type"] = ""
+        else:
+            final_error = self._safe_meta_detail(error or output or diagnostic or "meta task failed")
+            result["error"] = final_error
+            result["error_type"] = error_type or "meta_runtime_failure"
+            if not result.get("diagnostic"):
+                result["diagnostic"] = final_error
+        result.update(extra)
+        return result
+
     def _task_required_llm_model(self, task: Dict[str, Any]) -> str:
         for key in ("llm_model", "worker_model", "target_model"):
             value = str(task.get(key, "") or "").strip()
@@ -1151,12 +1230,15 @@ class GPUTaskMixin:
             result = self._execute_meta_command(task, command)
         except Exception as e:
             self.logger.error(f"Meta task {command} failed with exception: {e}", exc_info=True)
-            result = {
-                "success": False,
-                "error": f"Meta task exception: {e}",
-                "worker": self.name,
-                "max_vram_used_mb": 0,
-            }
+            result = self._build_meta_result(
+                command,
+                task,
+                success=False,
+                error=f"Meta task exception: {e}",
+                error_type="meta_task_exception",
+                error_code=type(e).__name__,
+                diagnostic=f"exception={type(e).__name__}: {e}",
+            )
         finally:
             self._end_meta_task()
             if result is not None:
@@ -1174,39 +1256,59 @@ class GPUTaskMixin:
             target_model = str(task.get("target_model", "")).strip() or None
             self._touch_meta_task(phase="load_llm")
             self._full_local_reset(f"pre_load_llm:{target_model or 'unknown'}")
+            if self.port:
+                self._touch_meta_task(phase="restart_ollama_after_reset")
+                self.start_ollama()
             self.load_model(model_id=target_model, task_id=task_id)
-            result = {
-                "success": self.model_loaded,
-                "output": f"Model {'loaded' if self.model_loaded else 'failed to load'}",
-                "model_loaded": self.model_loaded,
-                "loaded_model": self.loaded_model,
-                "runtime_state": self.runtime_state,
-                "worker": self.name,
-                "max_vram_used_mb": 0,
-            }
+            load_success = bool(self.model_loaded)
+            result = self._build_meta_result(
+                command,
+                task,
+                success=load_success,
+                output=f"Model {'loaded' if load_success else 'failed to load'}",
+                error=(
+                    f"Model failed to load: "
+                    f"{self._safe_meta_detail(self.runtime_error_detail or self.runtime_error_code or 'unknown')}"
+                ) if not load_success else "",
+                error_code=str(self.runtime_error_code or "load_failed"),
+                diagnostic=(
+                    f"target_model={target_model or ''} "
+                    f"runtime_error_code={self.runtime_error_code or ''} "
+                    f"runtime_error_detail={self._safe_meta_detail(self.runtime_error_detail)}"
+                ),
+            )
         elif command == "unload_llm":
             task_id = task.get("task_id")
             self._touch_meta_task(phase="unload_llm")
             self.unload_model(task_id=task_id)
-            result = {
-                "success": not self.model_loaded and self.runtime_state == RUNTIME_STATE_COLD,
-                "output": f"Model {'unloaded' if not self.model_loaded else 'failed to unload'}",
-                "model_loaded": self.model_loaded,
-                "loaded_model": self.loaded_model,
-                "runtime_state": self.runtime_state,
-                "worker": self.name,
-                "max_vram_used_mb": 0,
-            }
+            unload_success = not self.model_loaded and self.runtime_state == RUNTIME_STATE_COLD
+            result = self._build_meta_result(
+                command,
+                task,
+                success=unload_success,
+                output=f"Model {'unloaded' if unload_success else 'failed to unload'}",
+                error=(
+                    f"Model failed to unload: "
+                    f"{self._safe_meta_detail(self.runtime_error_detail or self.runtime_error_code or self.loaded_model or 'unknown')}"
+                ) if not unload_success else "",
+                error_code=str(self.runtime_error_code or "unload_failed"),
+                diagnostic=(
+                    f"runtime_state={self.runtime_state} "
+                    f"model_loaded={self.model_loaded} loaded_model={self.loaded_model or ''}"
+                ),
+            )
         elif command == "load_split_llm":
             target_model = str(task.get("target_model", "")).strip()
             groups = task.get("candidate_groups", [])
             if not target_model or not isinstance(groups, list):
-                result = {
-                    "success": False,
-                    "error": "load_split_llm missing target_model/candidate_groups",
-                    "worker": self.name,
-                    "max_vram_used_mb": 0,
-                }
+                result = self._build_meta_result(
+                    command,
+                    task,
+                    success=False,
+                    error="load_split_llm missing target_model/candidate_groups",
+                    error_type="meta_task_contract_error",
+                    error_code="missing_split_inputs",
+                )
             else:
                 chosen = None
                 for g in groups:
@@ -1214,12 +1316,13 @@ class GPUTaskMixin:
                         chosen = g
                         break
                 if not chosen:
-                    result = {
-                        "success": False,
-                        "error": "worker not eligible for any candidate split group",
-                        "worker": self.name,
-                        "max_vram_used_mb": 0,
-                    }
+                    result = self._build_meta_result(
+                        command,
+                        task,
+                        success=False,
+                        error="worker not eligible for any candidate split group",
+                        error_code="split_group_not_eligible",
+                    )
                 else:
                     group_id = str(chosen.get("id", "")).strip()
                     members = [str(m).strip() for m in chosen.get("members", []) if str(m).strip()]
@@ -1296,31 +1399,37 @@ class GPUTaskMixin:
                             self._service_split_reservations()
                             time.sleep(0.5)
                     if join_blocked_reason:
-                        return {
-                            "success": False,
-                            "output": (
+                        return self._build_meta_result(
+                            command,
+                            task,
+                            success=False,
+                            output=(
                                 f"Split load failed: launcher join blocked for {group_id}: "
                                 f"{join_blocked_reason}"
                             ),
-                            "model_loaded": self.model_loaded,
-                            "loaded_model": self.loaded_model,
-                            "runtime_group_id": self.runtime_group_id,
-                            "worker": self.name,
-                            "max_vram_used_mb": 0,
-                        }
+                            error=(
+                                f"Split load failed: launcher join blocked for {group_id}: "
+                                f"{join_blocked_reason}"
+                            ),
+                            error_code="split_join_blocked",
+                            diagnostic=f"group_id={group_id} join_blocked_reason={join_blocked_reason}",
+                        )
                     if not reservation_written:
-                        return {
-                            "success": False,
-                            "output": (
+                        return self._build_meta_result(
+                            command,
+                            task,
+                            success=False,
+                            output=(
                                 f"Split load failed: unable to acquire reservation lock for {group_id} "
                                 "after 30s"
                             ),
-                            "model_loaded": self.model_loaded,
-                            "loaded_model": self.loaded_model,
-                            "runtime_group_id": self.runtime_group_id,
-                            "worker": self.name,
-                            "max_vram_used_mb": 0,
-                        }
+                            error=(
+                                f"Split load failed: unable to acquire reservation lock for {group_id} "
+                                "after 30s"
+                            ),
+                            error_code="split_reservation_lock_timeout",
+                            diagnostic=f"group_id={group_id} reservation_lock_timeout=30s",
+                        )
 
                     deadline = time.time() + SPLIT_META_TIMEOUT_SECONDS
                     success = False
@@ -1378,18 +1487,23 @@ class GPUTaskMixin:
                             task_id=task.get("task_id"),
                         )
 
-                    result = {
-                        "success": success,
-                        "output": (
+                    result = self._build_meta_result(
+                        command,
+                        task,
+                        success=success,
+                        output=(
                             f"Split model loaded: {target_model} group={group_id}"
                             if success else f"Split load failed: {failure_reason}"
                         ),
-                        "model_loaded": self.model_loaded,
-                        "loaded_model": self.loaded_model,
-                        "runtime_group_id": self.runtime_group_id,
-                        "worker": self.name,
-                        "max_vram_used_mb": 0,
-                    }
+                        error=f"Split load failed: {failure_reason}" if not success else "",
+                        error_code="split_load_failed" if not success else "",
+                        diagnostic=(
+                            f"group_id={group_id} target_model={target_model} "
+                            f"failure_reason={failure_reason or ''} "
+                            "last_split_runtime_error="
+                            f"{self._safe_meta_detail(getattr(self, 'last_split_runtime_error', ''))}"
+                        ),
+                    )
                     if cleanup_result:
                         result["cleanup"] = cleanup_result
         elif command == "unload_split_llm":
@@ -1509,24 +1623,29 @@ class GPUTaskMixin:
                     self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
                     self.split_runtime_owner = False
 
-            result = {
-                "success": unload_ok,
-                "output": (
+            result = self._build_meta_result(
+                command,
+                task,
+                success=unload_ok,
+                output=(
                     f"Split runtime unloaded for group {group_id or '-'}"
                     if unload_ok else
                     f"Split unload incomplete for group {group_id or '-'}: "
                     f"listener_up={split_listener_still_up} model_still_loaded={split_model_still_loaded}"
                 ),
-                "model_loaded": self.model_loaded,
-                "loaded_model": self.loaded_model,
-                "runtime_group_id": self.runtime_group_id,
-                "runtime_state": self.runtime_state,
-                "worker": self.name,
-                "split_port": split_port,
-                "reclaimed_listeners": reclaimed_listeners,
-                "orphan_runners_killed": orphan_runners_killed,
-                "max_vram_used_mb": 0,
-            }
+                error=(
+                    f"Split unload incomplete for group {group_id or '-'}: "
+                    f"listener_up={split_listener_still_up} model_still_loaded={split_model_still_loaded}"
+                ) if not unload_ok else "",
+                error_code="split_unload_failed" if not unload_ok else "",
+                diagnostic=(
+                    f"group_id={group_id or ''} split_port={split_port} "
+                    f"listener_up={split_listener_still_up} model_still_loaded={split_model_still_loaded}"
+                ),
+                split_port=split_port,
+                reclaimed_listeners=reclaimed_listeners,
+                orphan_runners_killed=orphan_runners_killed,
+            )
         elif command == "cleanup_split_runtime":
             task_id = task.get("task_id")
             group_id = str(task.get("group_id", "")).strip() or str(self.runtime_group_id or "")
@@ -1536,28 +1655,28 @@ class GPUTaskMixin:
             actual_reservation_epoch = self._read_split_reservation_epoch(group_id)
             actual_generation = str(getattr(self, "split_runtime_generation", "") or "").strip() or None
             if expected_reservation_epoch and actual_reservation_epoch and expected_reservation_epoch != actual_reservation_epoch:
-                result = {
-                    "success": True,
-                    "output": (
+                result = self._build_meta_result(
+                    command,
+                    task,
+                    success=True,
+                    output=(
                         f"Skipped stale split cleanup for {group_id or '-'}: "
                         f"expected_reservation_epoch={expected_reservation_epoch} "
                         f"actual_reservation_epoch={actual_reservation_epoch}"
                     ),
-                    "stale_command": True,
-                    "worker": self.name,
-                    "max_vram_used_mb": 0,
-                }
+                    stale_command=True,
+                )
             elif expected_generation and actual_generation and expected_generation != actual_generation:
-                result = {
-                    "success": True,
-                    "output": (
+                result = self._build_meta_result(
+                    command,
+                    task,
+                    success=True,
+                    output=(
                         f"Skipped stale split cleanup for {group_id or '-'}: "
                         f"expected_generation={expected_generation} actual_generation={actual_generation}"
                     ),
-                    "stale_command": True,
-                    "worker": self.name,
-                    "max_vram_used_mb": 0,
-                }
+                    stale_command=True,
+                )
             else:
                 self._touch_meta_task(phase="cleanup_split_runtime")
                 split_port = task.get("split_port", self.runtime_port)
@@ -1571,13 +1690,13 @@ class GPUTaskMixin:
                     reason=f"brain_command:{cleanup_reason}",
                     task_id=task_id,
                 )
-                result = {
-                    "success": True,
-                    "output": f"Split runtime cleanup executed for {group_id or '-'}",
-                    "cleanup": cleanup,
-                    "worker": self.name,
-                    "max_vram_used_mb": 0,
-                }
+                result = self._build_meta_result(
+                    command,
+                    task,
+                    success=True,
+                    output=f"Split runtime cleanup executed for {group_id or '-'}",
+                    cleanup=cleanup,
+                )
         elif command == "reset_gpu_runtime":
             # Emergency thermal recovery: full local reset
             # Called by brain's thermal recovery controller during sustained overheat
@@ -1611,16 +1730,14 @@ class GPUTaskMixin:
             self.thermal_recovery_reset_count = getattr(self, 'thermal_recovery_reset_count', 0) + 1
             self.thermal_recovery_last_reset_at = time.time()
 
-            result = {
-                "success": True,
-                "output": f"GPU runtime reset complete for thermal recovery incident={incident_id}",
-                "runtime_state": self.runtime_state,
-                "previous_state": prev_state,
-                "model_loaded": self.model_loaded,
-                "thermal_recovery_reset_count": self.thermal_recovery_reset_count,
-                "worker": self.name,
-                "max_vram_used_mb": 0,
-            }
+            result = self._build_meta_result(
+                command,
+                task,
+                success=True,
+                output=f"GPU runtime reset complete for thermal recovery incident={incident_id}",
+                previous_state=prev_state,
+                thermal_recovery_reset_count=self.thermal_recovery_reset_count,
+            )
 
             # Log telemetry event for thermal reset result
             self.logger.info(
@@ -1665,17 +1782,14 @@ class GPUTaskMixin:
             self.thermal_recovery_reset_count = getattr(self, 'thermal_recovery_reset_count', 0) + 1
             self.thermal_recovery_last_reset_at = time.time()
 
-            result = {
-                "success": True,
-                "output": f"Split runtime reset complete for thermal recovery incident={incident_id} group={group_id}",
-                "runtime_state": self.runtime_state,
-                "previous_state": prev_state,
-                "model_loaded": self.model_loaded,
-                "runtime_group_id": self.runtime_group_id,
-                "thermal_recovery_reset_count": self.thermal_recovery_reset_count,
-                "worker": self.name,
-                "max_vram_used_mb": 0,
-            }
+            result = self._build_meta_result(
+                command,
+                task,
+                success=True,
+                output=f"Split runtime reset complete for thermal recovery incident={incident_id} group={group_id}",
+                previous_state=prev_state,
+                thermal_recovery_reset_count=self.thermal_recovery_reset_count,
+            )
 
             # Log telemetry event for thermal reset result
             self.logger.info(
@@ -1685,11 +1799,13 @@ class GPUTaskMixin:
                 f"reset_count={self.thermal_recovery_reset_count}"
             )
         else:
-            return {
-                "success": False,
-                "error": f"Unknown meta command: {command}",
-                "worker": self.name,
-                "max_vram_used_mb": 0,
-            }
+            return self._build_meta_result(
+                command,
+                task,
+                success=False,
+                error=f"Unknown meta command: {command}",
+                error_type="meta_task_contract_error",
+                error_code="unknown_meta_command",
+            )
 
         return result

@@ -105,6 +105,10 @@ class BrainSummaryMixin:
 
     def _task_payload(self, task: Dict[str, Any]) -> Dict[str, Any]:
         result = task.get("result", {}) if isinstance(task.get("result"), dict) else {}
+        error_text = str(result.get("error", "") or "").strip()
+        diagnostic_text = str(result.get("diagnostic", "") or "").strip()
+        output_text = str(result.get("output", "") or "").strip()
+        summary_text = error_text or diagnostic_text or output_text
         return {
             "task_id": task.get("task_id", ""),
             "task_name": task.get("name", ""),
@@ -118,7 +122,12 @@ class BrainSummaryMixin:
             "requeued_at": task.get("requeued_at", ""),
             "success": bool(result.get("success", False)),
             "error_type": result.get("error_type", ""),
-            "error": str(result.get("error", "") or "")[:400],
+            "error": error_text[:400],
+            "diagnostic": diagnostic_text[:400],
+            "summary": summary_text[:400],
+            "error_code": str(result.get("error_code", "") or "")[:120],
+            "runtime_error_code": str(result.get("runtime_error_code", "") or "")[:120],
+            "runtime_error_detail": str(result.get("runtime_error_detail", "") or "")[:400],
         }
 
     def _iter_batch_tasks(self, batch_id: str, roots: Iterable[Path]) -> Iterable[Dict[str, Any]]:

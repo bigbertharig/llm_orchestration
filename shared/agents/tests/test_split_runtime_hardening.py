@@ -46,6 +46,9 @@ class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
         self.loaded_model = "model-a"
         self.model_loaded = True
         self.loaded_tier = 2
+        self.runtime_state = "ready_split"
+        self.runtime_error_code = None
+        self.runtime_error_detail = None
         self.model_tier_by_id = {"model-a": 2}
         self.split_runtime_owner = False
         self.split_runtime_generation = "gen-a"
@@ -58,6 +61,7 @@ class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
         self.reported_issues = []
         self.reset_calls = []
         self.load_model_calls = []
+        self.start_ollama_calls = 0
         self.runtime_attestation = {
             "ok": True,
             "mismatch_reason": "",
@@ -85,6 +89,9 @@ class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
         self.model_loaded = True
         self.loaded_model = model_id
         self.runtime_state = "ready_single"
+
+    def start_ollama(self):
+        self.start_ollama_calls += 1
 
     def _atomic_join_split_reservation(self, reservation, _group_id):
         return reservation, True, ""
@@ -177,6 +184,8 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
             result = gpu._execute_meta_command(task, "load_split_llm")
 
             self.assertFalse(result["success"])
+            self.assertEqual(result["error"], "Split load failed: reservation disappeared")
+            self.assertIn("failure_reason=reservation disappeared", result["diagnostic"])
             self.assertIn("reservation disappeared", result["output"])
             self.assertEqual(len(gpu.cleanup_calls), 1)
             self.assertEqual(
@@ -380,6 +389,7 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertEqual(len(gpu.reset_calls), 1)
             self.assertEqual(gpu.reset_calls[0], "pre_load_llm:new-model")
+            self.assertEqual(gpu.start_ollama_calls, 1)
             self.assertEqual(len(gpu.load_model_calls), 1)
             self.assertEqual(gpu.load_model_calls[0]["model_id"], "new-model")
             self.assertEqual(gpu.loaded_model, "new-model")

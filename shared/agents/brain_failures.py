@@ -7,12 +7,23 @@ auto-fixes, and cloud escalation gating.
 import json
 import os
 import re
+import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
 from runtime_reset import hard_reset_gpu_runtime
+
+
+def _preferred_activate_command() -> str | None:
+    candidates = [
+        "/home/bryan/llm-orchestration-venv/bin/activate",
+    ]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return f"source {candidate}"
+    return None
 
 
 class BrainFailureMixin:
@@ -963,9 +974,17 @@ JSON only:"""
                 packages.append(p)
 
         install_errors = []
+        activate_cmd = _preferred_activate_command()
+        if not activate_cmd:
+            self.dependency_fix_attempts[module] = {
+                "success": False,
+                "error": "no orchestration venv found",
+                "at": datetime.now().isoformat(),
+            }
+            return False
         for pkg in packages:
             install_cmd = (
-                "source ~/ml-env/bin/activate && "
+                f"{activate_cmd} && "
                 "python -m pip install --disable-pip-version-check "
                 f"{pkg}"
             )
@@ -988,7 +1007,7 @@ JSON only:"""
                     continue
 
                 verify_cmd = (
-                    "source ~/ml-env/bin/activate && "
+                    f"{activate_cmd} && "
                     f"python -c \"import importlib; importlib.import_module('{module}')\""
                 )
                 ver = subprocess.run(
