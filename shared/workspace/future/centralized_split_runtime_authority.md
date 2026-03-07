@@ -143,7 +143,8 @@ This plan covers five centralization tracks:
 - Workers clear stale owner-issue state on successful lease acquire/release
 
 Remaining work for Track 5:
-- audit any additional queue re-entry paths outside `brain_failures.py` and `brain_monitor.py`
+- no known queue re-entry paths remain outside the shared helper after routing
+  `brain_failures.py` and `brain_monitor.py` through it
 - decide final policy for preserving vs resetting `incident_id`
 - consider enforcing queue-write invariants at a lower shared brain queue layer if more paths appear
 
@@ -241,6 +242,8 @@ Landed:
   - fatal batch abort
   - normal batch completion
 - automatic `batch_summary` task insertion removed from `brain_plan.py`
+- monitor-driven force-kill timeout and orphan recovery requeues now also use
+  the shared requeue helper and emit the same batch retry/release events
 
 Not landed yet:
 - manual-stop summary refresh
