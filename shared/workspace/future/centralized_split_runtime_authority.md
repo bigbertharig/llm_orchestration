@@ -143,6 +143,9 @@ This plan covers five centralization tracks:
 - Workers clear stale owner-issue state on successful lease acquire/release
 - Idle workers now claim from queue on the fast internal cadence instead of waiting for the idle external heartbeat
 - Split reservation creation now writes a partner nudge so the other member stays on a fast coordination loop
+- `load_llm` now always performs a full local reset before loading, so single-worker warm tasks do not depend on inferred cold state
+- Split members now always perform a full local reset before pair join, even when preflight probes look clean
+- Claim-time runtime mismatches on `load_llm` and `load_split_llm` now continue into the load path so the task can self-clean instead of bouncing back to queue
 - `load_split_llm` now force-cleans local split state if the reservation disappears mid-load
 - Split workers now force a local reset when shared owner metadata is missing, instead of lingering in `has_model=True, has_owner=False`
 - Split warmup now uses bounded generate probes and can accept stable `/api/ps` model presence as readiness, avoiding multi-minute warmup hangs on the shared port

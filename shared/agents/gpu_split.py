@@ -406,24 +406,20 @@ class GPUSplitMixin:
         allow_rejoin_group: bool = False,
         reset_reason_prefix: str = "pre_split_join",
     ) -> Dict[str, Any]:
-        """Verify split-member cleanliness, performing one local reset if needed.
+        """Hard-reset before split join, then verify member cleanliness.
 
-        Split loads should be self-contained. If a member is not clean enough to
-        join, do one authoritative local reset and re-verify before rejecting
-        the split reservation join.
+        Split loads are expensive and sensitive to stale local state. Always
+        reset participating members before join so split startup does not depend
+        on inferred cleanliness from prior lifecycle paths.
         """
-        precond = self._verify_local_split_member_clean_precondition(
+        pre_reset = self._verify_local_split_member_clean_precondition(
             group_id=group_id,
             allow_rejoin_group=allow_rejoin_group,
         )
-        if precond["ok"]:
-            precond["details"]["reset_performed"] = False
-            return precond
-
-        reset_reason = f"{reset_reason_prefix}:{precond['reason_code']}"
-        self.logger.warning(
+        reset_reason = f"{reset_reason_prefix}:{pre_reset['reason_code'] or 'always_reset'}"
+        self.logger.info(
             f"SPLIT_MEMBER_PRECONDITION_RESET group={group_id} member={self.name} "
-            f"reason={precond['reason_code']}"
+            f"reason={pre_reset['reason_code'] or 'always_reset'}"
         )
         self._full_local_reset(reset_reason)
 
@@ -432,17 +428,18 @@ class GPUSplitMixin:
             allow_rejoin_group=allow_rejoin_group,
         )
         rechecked["details"]["reset_performed"] = True
-        rechecked["details"]["initial_reason_code"] = precond["reason_code"]
+        rechecked["details"]["initial_reason_code"] = pre_reset["reason_code"]
         if not rechecked["ok"]:
             rechecked["reason_code"] = f"reset_failed:{rechecked['reason_code']}"
             self.logger.warning(
                 f"SPLIT_MEMBER_PRECONDITION_RESET_FAIL group={group_id} member={self.name} "
-                f"initial_reason={precond['reason_code']} final_reason={rechecked['reason_code']}"
+                f"initial_reason={pre_reset['reason_code'] or 'always_reset'} "
+                f"final_reason={rechecked['reason_code']}"
             )
         else:
             self.logger.info(
                 f"SPLIT_MEMBER_PRECONDITION_RESET_OK group={group_id} member={self.name} "
-                f"initial_reason={precond['reason_code']}"
+                f"initial_reason={pre_reset['reason_code'] or 'always_reset'}"
             )
         return rechecked
 

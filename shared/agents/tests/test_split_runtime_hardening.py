@@ -57,6 +57,12 @@ class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
         self.cleanup_calls = []
         self.reported_issues = []
         self.reset_calls = []
+        self.load_model_calls = []
+        self.runtime_attestation = {
+            "ok": True,
+            "mismatch_reason": "",
+            "details": {"actual_port_models": []},
+        }
         self.reservation_path = self._split_reservation_path("pair_3_4")
         self._service_calls = 0
 
@@ -73,6 +79,12 @@ class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
         self.loaded_model = None
         self.runtime_placement = "single_gpu"
         self.runtime_group_id = None
+
+    def load_model(self, model_id=None, task_id=None):
+        self.load_model_calls.append({"model_id": model_id, "task_id": task_id})
+        self.model_loaded = True
+        self.loaded_model = model_id
+        self.runtime_state = "ready_single"
 
     def _atomic_join_split_reservation(self, reservation, _group_id):
         return reservation, True, ""
@@ -138,6 +150,9 @@ class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
 
     def _clear_split_health_issue(self):
         return None
+
+    def _attest_runtime_reality(self):
+        return self.runtime_attestation
 
 
 class SplitRuntimeHardeningTests(unittest.TestCase):
@@ -276,6 +291,36 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
             self.assertTrue(precond["details"]["reset_performed"])
             self.assertEqual(precond["details"]["initial_reason_code"], "runtime_not_cold:ready_single")
 
+    def test_split_join_resets_even_clean_member_before_join(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = MockSplitGpu(Path(tmp))
+            gpu.runtime_state = gpu_split.RUNTIME_STATE_COLD
+            gpu.model_loaded = False
+            gpu.loaded_model = None
+            gpu.runtime_placement = "single_gpu"
+            gpu.runtime_group_id = None
+            original_requests = gpu_split.requests
+            gpu_split.requests = types.SimpleNamespace(
+                get=lambda _url, timeout=2: types.SimpleNamespace(
+                    status_code=200,
+                    json=lambda: {"models": []},
+                ),
+                exceptions=types.SimpleNamespace(ConnectionError=Exception),
+            )
+
+            try:
+                precond = gpu._ensure_local_split_member_clean_precondition(
+                    "pair_3_4",
+                    allow_rejoin_group=False,
+                )
+            finally:
+                gpu_split.requests = original_requests
+
+            self.assertTrue(precond["ok"])
+            self.assertEqual(len(gpu.reset_calls), 1)
+            self.assertEqual(precond["details"]["initial_reason_code"], "")
+            self.assertTrue(precond["details"]["reset_performed"])
+
     def test_split_join_fails_when_reset_does_not_restore_clean_state(self):
         class StubbornSplitGpu(MockSplitGpu):
             def _full_local_reset(self, reason: str) -> None:
@@ -298,6 +343,44 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
             self.assertFalse(precond["ok"])
             self.assertTrue(precond["reason_code"].startswith("reset_failed:"))
             self.assertEqual(len(gpu.reset_calls), 1)
+
+    def test_load_llm_always_resets_before_loading(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = MockSplitGpu(Path(tmp))
+            gpu.runtime_state = "ready_single"
+            gpu.model_loaded = True
+            gpu.loaded_model = "old-model"
+
+            result = gpu._execute_meta_command(
+                {"task_id": "task-2", "target_model": "new-model"},
+                "load_llm",
+            )
+
+            self.assertTrue(result["success"])
+            self.assertEqual(len(gpu.reset_calls), 1)
+            self.assertEqual(gpu.reset_calls[0], "pre_load_llm:new-model")
+            self.assertEqual(len(gpu.load_model_calls), 1)
+            self.assertEqual(gpu.load_model_calls[0]["model_id"], "new-model")
+            self.assertEqual(gpu.loaded_model, "new-model")
+
+    def test_load_meta_attestation_mismatch_allows_execution_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = MockSplitGpu(Path(tmp))
+            gpu.runtime_attestation = {
+                "ok": False,
+                "mismatch_reason": "port_probe:model_present",
+                "details": {"actual_port_models": ["qwen2.5:7b"]},
+            }
+
+            load_llm = gpu._attest_meta_task_precondition({"command": "load_llm"})
+            load_split = gpu._attest_meta_task_precondition({"command": "load_split_llm"})
+
+            self.assertFalse(load_llm["ok"])
+            self.assertTrue(load_llm["allow_continue"])
+            self.assertEqual(load_llm["mismatch_reason"], "port_probe:model_present")
+            self.assertFalse(load_split["ok"])
+            self.assertTrue(load_split["allow_continue"])
+            self.assertEqual(load_split["mismatch_reason"], "port_probe:model_present")
 
 
 if __name__ == "__main__":

@@ -361,6 +361,7 @@ class GPUTaskMixin:
                 # State says cold but Ollama has models - mismatch
                 result["ok"] = False
                 result["mismatch_reason"] = f"load_llm:expected_cold_but_models_present:{actual_models}"
+                result["allow_continue"] = True
                 return result
 
         elif meta_cmd == "load_split_llm":
@@ -369,6 +370,7 @@ class GPUTaskMixin:
             if not self.model_loaded and actual_models:
                 result["ok"] = False
                 result["mismatch_reason"] = f"load_split_llm:expected_cold_but_models_present:{actual_models}"
+                result["allow_continue"] = True
                 return result
             # Split-specific checks are done in _verify_local_split_member_clean_precondition
 
@@ -391,6 +393,7 @@ class GPUTaskMixin:
         if meta_cmd in ("load_llm", "load_split_llm") and not attestation["ok"]:
             result["ok"] = False
             result["mismatch_reason"] = attestation["mismatch_reason"]
+            result["allow_continue"] = True
 
         return result
 
@@ -1170,6 +1173,7 @@ class GPUTaskMixin:
             task_id = task.get("task_id")
             target_model = str(task.get("target_model", "")).strip() or None
             self._touch_meta_task(phase="load_llm")
+            self._full_local_reset(f"pre_load_llm:{target_model or 'unknown'}")
             self.load_model(model_id=target_model, task_id=task_id)
             result = {
                 "success": self.model_loaded,
