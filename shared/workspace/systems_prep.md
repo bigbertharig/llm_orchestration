@@ -1,18 +1,162 @@
-# System Preparation for LLM Machine
+# System Preparation For The GPU Rig
 
-## Overview
-Optimizations performed 2026-02-05 to prepare the system as a dedicated LLM orchestration machine.
+Reference for host-level operating-system preparation on the GPU rig.
 
-This document serves as:
-1. **Recovery reference** - Undo changes if needed
-2. **Redo script** - Apply same config to fresh install
-3. **Change log** - Track what was modified
+This is a machine-prep and recovery document, not the normal orchestration
+runbook. Do not confuse these host changes with the supported daily operator
+workflow in [quickstart.md](quickstart.md).
 
 ---
 
-## Phase 1: Disabled Unnecessary Services
+## Purpose
 
-### DO (disable services)
+This document exists for three reasons:
+
+1. rebuild or recover a host after reinstall
+2. understand which host-level optimizations were applied
+3. distinguish machine setup from orchestration behavior
+
+The orchestration system should normally be started through:
+
+- `shared/agents/startup.py`
+- `scripts/start_default_mode.py`
+- `scripts/start_benchmark_mode.py`
+- `scripts/start_custom_mode.py`
+
+Not by redoing machine-prep steps during ordinary operation.
+
+---
+
+## Machine-Prep Themes
+
+The GPU rig was prepared as a dedicated orchestration host with these goals:
+
+- fewer unnecessary background services
+- explicit control over updates and power behavior
+- predictable boot behavior
+- compatible NVIDIA driver support for mixed-generation GPUs
+- explicit shared-drive / local-runtime split
+
+---
+
+## Applied Host Changes
+
+### 1. Disabled Unnecessary Services
+
+Intent:
+
+- reduce background noise
+- shorten boot path
+- avoid desktop/server services that do not help the rig
+
+Examples include printing, modem, WiFi, and desktop convenience services that
+are irrelevant to a fixed-function local orchestration host.
+
+### 2. Removed Snap And Desktop Bloat
+
+Intent:
+
+- avoid heavyweight default packages
+- keep disk usage and background churn lower
+- make the machine easier to reason about
+
+This is a host policy choice, not an orchestration requirement.
+
+### 3. Fixed Time Sync Behavior
+
+Intent:
+
+- make NTP recovery work even when the clock is already wrong
+
+Accurate time matters for:
+
+- task timestamps
+- heartbeat staleness
+- batch history ordering
+- summary/event timelines
+
+### 4. Enabled Passwordless Sudo For The Operator Account
+
+Intent:
+
+- make controlled local maintenance practical
+
+This is a host-management convenience decision and should be treated as part of
+the trusted operator environment, not something agents should modify.
+
+### 5. Applied Persistent GPU Power Limits
+
+Intent:
+
+- keep the worker GPUs within predictable thermal/power behavior
+
+### 6. Installed Driver Version Compatible With Both 3090 Ti And GTX 1060
+
+Intent:
+
+- keep mixed Ampere + Pascal support on one host
+
+This matters because newer driver tracks can break Pascal support.
+
+### 7. Reduced Boot Friction
+
+Examples:
+
+- auto-login
+- reduced wait behavior during boot
+- SSD boot migration
+
+These are operator convenience and startup-latency choices.
+
+---
+
+## Important Boundary
+
+Host prep is not the same thing as runtime orchestration.
+
+Current orchestration behavior should be understood as:
+
+- the brain and workers are started by orchestrator startup scripts
+- worker runtime ownership is coordinated by the orchestrator
+- worker model state is not supposed to be maintained primarily by ad hoc
+  always-on host services
+
+Historical host notes about fixed Ollama instances are useful context, but they
+do not define the normal operator path anymore.
+
+---
+
+## Recovery / Rebuild Checklist
+
+After a reinstall or major repair, verify at minimum:
+
+1. shared drive mounts correctly
+2. NVIDIA driver supports the full GPU set
+3. `nvidia-smi` sees all expected GPUs
+4. the operator Python environment exists
+5. orchestrator startup scripts run
+6. shared-model archive is reachable
+7. timestamps and time sync are sane
+
+Useful checks:
+
+```bash
+nvidia-smi -L
+mount | grep /mnt/shared
+timedatectl status
+chronyc tracking
+pgrep -af "brain.py|gpu.py"
+```
+
+---
+
+## Historical Command Record
+
+The following sections keep the original command-oriented prep history because
+they are useful during a rebuild. They should be read as host-recovery notes.
+
+### Disable Unneeded Services
+
 ```bash
 sudo systemctl disable --now cups cups-browsed avahi-daemon ModemManager \
     switcheroo-control power-profiles-daemon packagekit colord thermald \
@@ -21,37 +165,9 @@ sudo systemctl disable --now cups cups-browsed avahi-daemon ModemManager \
 sudo systemctl disable --now cups.socket cups.path avahi-daemon.socket anacron.timer
 ```
 
-### UNDO (re-enable services)
+### Remove Snap
+
 ```bash
-sudo systemctl enable --now cups cups-browsed avahi-daemon ModemManager \
-    switcheroo-control power-profiles-daemon packagekit colord thermald \
-    unattended-upgrades anacron wpa_supplicant
-
-sudo systemctl enable --now cups.socket cups.path avahi-daemon.socket anacron.timer
-```
-
-### What Each Service Does
-| Service | Purpose | Why Disabled |
-|---------|---------|--------------|
-| cups, cups-browsed | Printing | No printer |
-| avahi-daemon | mDNS/Bonjour discovery | Not needed |
-| ModemManager | Cellular modems | No modem |
-| switcheroo-control | Hybrid graphics switching | Single GPU type |
-| power-profiles-daemon | Power profiles | Fixed performance mode |
-| packagekit | GUI package management | Using apt directly |
-| colord | Color calibration | Not doing color work |
-| thermald | Intel thermal daemon | GPUs manage themselves |
-| unattended-upgrades | Auto updates | Manual control preferred |
-| anacron | Scheduled jobs | Not using anacron |
-| wpa_supplicant | WiFi | Using ethernet |
-
----
-
-## Phase 2: Removed Snap System
-
-### DO (remove snaps)
-```bash
-# Remove snaps in order (dependencies matter)
 sudo snap remove --purge firefox
 sudo snap remove --purge snapd-desktop-integration
 sudo snap remove --purge gnome-42-2204
@@ -59,11 +175,13 @@ sudo snap remove --purge gtk-common-themes
 sudo snap remove --purge bare
 sudo snap remove --purge core22
 
-# Remove snapd
 sudo systemctl disable --now snapd snapd.socket snapd.seeded.service
 sudo apt purge -y snapd
+```
 
-# Install Firefox from Mozilla PPA
+### Install Native Firefox
+
+```bash
 sudo add-apt-repository -y ppa:mozillateam/ppa
 echo 'Package: firefox*
 Pin: release o=LP-PPA-mozillateam
@@ -71,29 +189,8 @@ Pin-Priority: 1001' | sudo tee /etc/apt/preferences.d/mozilla-firefox
 sudo apt update && sudo apt install -y firefox
 ```
 
-### UNDO (restore snaps)
-```bash
-# Re-install snapd
-sudo apt install -y snapd
-sudo systemctl enable --now snapd snapd.socket
+### Remove GNOME Bloat
 
-# Wait for snapd to initialize
-sleep 10
-
-# Re-install Firefox snap
-sudo snap install firefox
-
-# Remove PPA Firefox
-sudo apt purge -y firefox
-sudo rm /etc/apt/preferences.d/mozilla-firefox
-sudo add-apt-repository --remove ppa:mozillateam/ppa
-```
-
----
-
-## Phase 3: Removed GNOME Bloatware
-
-### DO (remove bloatware)
 ```bash
 sudo apt purge -y \
     gnome-calculator gnome-characters gnome-clocks \
@@ -105,63 +202,29 @@ sudo apt purge -y \
 sudo apt autoremove -y
 ```
 
-### UNDO (restore apps)
-```bash
-sudo apt install -y \
-    gnome-calculator gnome-characters gnome-clocks \
-    gnome-font-viewer gnome-initial-setup gnome-bluetooth-sendto \
-    gnome-disk-utility cheese shotwell simple-scan deja-dup \
-    transmission-gtk yelp gnome-weather gnome-maps gnome-contacts \
-    gnome-calendar totem rhythmbox gnome-tour gnome-user-docs
-```
+### Fix NTP
 
----
-
-## Phase 4: Clock/NTP Fix
-
-### Problem
-Ubuntu 25.10 defaults to NTP-NTS (NTP with TLS) which fails when clock is already wrong.
-
-### DO (add regular NTP)
 ```bash
 echo "pool pool.ntp.org iburst" | sudo tee /etc/chrony/sources.d/pool-ntp.sources
 sudo systemctl restart chrony
 ```
 
-### UNDO (remove regular NTP)
-```bash
-sudo rm /etc/chrony/sources.d/pool-ntp.sources
-sudo systemctl restart chrony
-```
+Emergency clock set:
 
-### Emergency Clock Set
-If clock is way off and NTP can't sync:
 ```bash
-# Get time from HTTP header and set manually
 sudo date -s "$(curl -sI google.com | grep -i '^date:' | cut -d' ' -f3-6)"
 sudo chronyc -a makestep
 ```
 
----
+### Enable Passwordless Sudo
 
-## Phase 5: Sudo Configuration
-
-### DO (enable passwordless sudo)
 ```bash
 echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/nopasswd-$USER
 sudo chmod 440 /etc/sudoers.d/nopasswd-$USER
 ```
 
-### UNDO (require password again)
-```bash
-sudo rm /etc/sudoers.d/nopasswd-$USER
-```
+### Persistent GPU Power Limits
 
----
-
-## Phase 6: GPU Power Limits (Persistence)
-
-### DO (create systemd service)
 ```bash
 cat << 'EOF' | sudo tee /etc/systemd/system/nvidia-power.service
 [Unit]
@@ -182,133 +245,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now nvidia-power.service
 ```
 
-### UNDO (remove service)
-```bash
-sudo systemctl disable --now nvidia-power.service
-sudo rm /etc/systemd/system/nvidia-power.service
-sudo systemctl daemon-reload
-```
+### Install NVIDIA 580-Series Driver
 
----
-
-## Full Redo Script (Fresh Install)
-
-Copy this entire block to apply all changes to a new machine:
-
-```bash
-#!/bin/bash
-# LLM Machine Setup Script
-# Run after fresh Ubuntu 25.10 install
-
-set -e
-
-echo "=== Phase 1: Disable services ==="
-sudo systemctl disable --now cups cups-browsed avahi-daemon ModemManager \
-    switcheroo-control power-profiles-daemon packagekit colord thermald \
-    unattended-upgrades anacron wpa_supplicant
-sudo systemctl disable --now cups.socket cups.path avahi-daemon.socket anacron.timer
-
-echo "=== Phase 2: Remove snaps ==="
-sudo snap remove --purge firefox || true
-sudo snap remove --purge snapd-desktop-integration || true
-sudo snap remove --purge gnome-42-2204 || true
-sudo snap remove --purge gtk-common-themes || true
-sudo snap remove --purge bare || true
-sudo snap remove --purge core22 || true
-sudo systemctl disable --now snapd snapd.socket snapd.seeded.service || true
-sudo apt purge -y snapd
-
-echo "=== Phase 2b: Install Firefox from PPA ==="
-sudo add-apt-repository -y ppa:mozillateam/ppa
-echo 'Package: firefox*
-Pin: release o=LP-PPA-mozillateam
-Pin-Priority: 1001' | sudo tee /etc/apt/preferences.d/mozilla-firefox
-sudo apt update && sudo apt install -y firefox
-
-echo "=== Phase 3: Remove GNOME bloatware ==="
-sudo apt purge -y gnome-calculator gnome-characters gnome-clocks \
-    gnome-font-viewer gnome-initial-setup gnome-bluetooth-sendto \
-    gnome-disk-utility cheese shotwell simple-scan deja-dup \
-    transmission-gtk yelp gnome-weather gnome-maps gnome-contacts \
-    gnome-calendar totem rhythmbox gnome-tour gnome-user-docs || true
-sudo apt autoremove -y
-
-echo "=== Phase 4: Fix NTP ==="
-echo "pool pool.ntp.org iburst" | sudo tee /etc/chrony/sources.d/pool-ntp.sources
-sudo systemctl restart chrony
-
-echo "=== Phase 5: Passwordless sudo ==="
-echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/nopasswd-$USER
-sudo chmod 440 /etc/sudoers.d/nopasswd-$USER
-
-echo "=== Phase 6: GPU power limits service ==="
-cat << 'GPUEOF' | sudo tee /etc/systemd/system/nvidia-power.service
-[Unit]
-Description=Set NVIDIA GPU Power Limits
-After=nvidia-persistenced.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/nvidia-smi -pm 1
-ExecStart=/usr/bin/nvidia-smi -i 0,1,2,3,4 -pl 140
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-GPUEOF
-sudo systemctl daemon-reload
-sudo systemctl enable --now nvidia-power.service
-
-echo "=== Done! Reboot recommended ==="
-```
-
----
-
-## Verification Commands
-
-```bash
-# Check running services (should be ~20)
-systemctl list-units --type=service --state=running | wc -l
-
-# Check boot time
-systemd-analyze
-
-# Check GPU status
-nvidia-smi --query-gpu=index,temperature.gpu,power.draw,power.limit --format=csv
-
-# Check NTP sync
-chronyc tracking
-timedatectl status
-
-# Check snap is gone
-snap list  # should error
-```
-
----
-
-## Results Summary
-
-| Metric | Before | After |
-|--------|--------|-------|
-| Running services | 33 | ~20 |
-| Snaps installed | 7 | 0 |
-| GNOME apps | ~15 | 0 |
-| Firefox startup | ~5s (snap) | <1s (native) |
-
----
-
-## Phase 7: SSD Boot Drive (Applied 2026-02-11)
-
-Replaced HDD with 110GB SSD as boot drive. Removes ~32s spinup wait.
-
----
-
-## Phase 8: NVIDIA Driver 580 (Applied 2026-02-11)
-
-### Problem
-The rig now has an RTX 3090 Ti (Ampere) + 4x GTX 1060 6GB (Pascal). The 590 driver (and the open kernel driver) dropped Pascal support entirely. Only the 580.xx legacy driver supports both architectures.
-
-### DO (install 580 proprietary)
 ```bash
 sudo apt install -y nvidia-driver-580
 sudo dkms install --force nvidia/580.126.09 -k $(uname -r)
@@ -316,62 +254,19 @@ sudo update-initramfs -u
 sudo reboot
 ```
 
-### UNDO (revert to 590)
+### Auto-Login / Boot Friction Reduction
+
 ```bash
-sudo apt install -y nvidia-driver-590
-sudo reboot
-```
-Note: reverting to 590 will lose all 1060 support.
-
-### Verification
-```bash
-nvidia-smi -L
-# Should show: GPU 0 (RTX 3090 Ti) + GPU 1-4 (GTX 1060 6GB)
-```
-
----
-
-## Phase 9: Auto-Login & Boot Speed (Applied 2026-02-11)
-
-### DO (enable auto-login)
-```bash
-# GDM auto-login
 sudo sed -i '/^\[daemon\]/,/^\[/{s/#  AutomaticLoginEnable = true/AutomaticLoginEnable = true/; s/#  AutomaticLogin = user1/AutomaticLogin = bryan/}' /etc/gdm3/custom.conf
-
-# Disable network wait
 sudo systemctl disable NetworkManager-wait-online.service
 ```
 
-### UNDO
-```bash
-sudo sed -i '/^\[daemon\]/,/^\[/{s/AutomaticLoginEnable = true/#  AutomaticLoginEnable = true/; s/AutomaticLogin = bryan/#  AutomaticLogin = user1/}' /etc/gdm3/custom.conf
-sudo systemctl enable NetworkManager-wait-online.service
-```
-
-GRUB was already configured: `GRUB_TIMEOUT=0`, `GRUB_TIMEOUT_STYLE=hidden`.
-
 ---
 
-## Phase 10: Dual Ollama Instances (Applied 2026-02-11)
+## Notes To Keep Honest
 
-Two Ollama systemd services, each pinned to a specific GPU:
-
-| Service | Port | GPU | CUDA_VISIBLE_DEVICES |
-|---------|------|-----|---------------------|
-| `ollama.service` | 11434 | RTX 3090 Ti | 0 |
-| `ollama-1060.service` | 11435 | GTX 1060 #1 | 1 |
-
-Models are loaded from the shared drive (not stored on SSD image):
-```bash
-cd /mnt/shared/models/qwen2.5-coder-32b && ollama create qwen2.5-coder:32b -f Modelfile
-cd /mnt/shared/models/qwen2.5-coder-7b && OLLAMA_HOST=http://localhost:11435 ollama create qwen2.5-coder:7b -f Modelfile
-```
-
----
-
-## Future Optimizations (Not Yet Applied)
-
-1. **Disable Plymouth** - `sudo kernelstub -a "plymouth.enable=0"` (saves ~25s)
-2. **Reduce initrd modules** - Remove unused drivers
-3. **Switch to terminal login** - Replace GDM with getty for pure CLI
-4. **Utilize remaining 1060s** - GPUs 2-4 available for agents, embeddings, etc.
+- This doc records host choices, not universal requirements for every future rig.
+- If the rig architecture changes, update the high-level sections first and only
+  then decide which old command blocks are still worth keeping.
+- If a prep step is no longer desirable, archive it instead of silently leaving
+  it here as if it were still the recommended baseline.

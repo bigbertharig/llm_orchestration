@@ -1,120 +1,184 @@
-# CPU Worker Setup — Orange Pi Prime Cluster
+# CPU Worker Setup
+
+Reference for the Orange Pi CPU-worker cluster and the current CPU-worker
+operating model.
+
+Use this doc for CPU-worker provisioning and deployment details. For normal rig
+operation, use [quickstart.md](quickstart.md) and [CONTEXT.md](CONTEXT.md).
+
+---
+
+## Current Status
+
+- CPU workers are an auxiliary execution pool, not the primary orchestration path.
+- They are intended to claim `task_class: cpu` work only.
+- They use the same shared task lanes and heartbeat patterns as the rest of the
+  orchestration system.
+
+Current shared scripts:
+
+- CPU agent:
+  - `/media/bryan/shared/scripts/cpu_agent.py`
+- Restart helper:
+  - `/media/bryan/shared/scripts/restart_cpu_workers.sh`
+
+Normal behavior:
+
+- claim only `executor: worker` + `task_class: cpu`
+- write `queue -> processing -> complete/failed`
+- publish heartbeats under `shared/cpus/`
+
+This is separate from the local repo copy at
+`/home/bryan/llm_orchestration/scripts/cpu_agent.py`, which is useful for local
+development and diagnostics. The shared-script path is the cluster runtime path.
+
+---
 
 ## Hardware
-- 8x Orange Pi Prime (Allwinner H5, 4-core ARM64, 2GB RAM)
-- MicroSD boot (7-8GB cards)
-- Gigabit ethernet to dedicated router
-- Heatsinks recommended (SoC runs 70-77C idle, will climb under load)
 
-## Network
-- Subnet: 10.0.0.0/24
-- DHCP with static assignments: workers at 10.0.0.10 through 10.0.0.17
-- RPi control plane: 10.0.0.2
-- GPU rig: 10.0.0.3
+- 8x Orange Pi Prime
+- Allwinner H5, 4 cores, 2 GB RAM
+- microSD boot
+- gigabit ethernet
+- heatsinks strongly recommended
+
+These machines are for low-memory CPU work, not heavyweight local model
+inference.
+
+---
+
+## Network Assumptions
+
+- subnet: `10.0.0.0/24`
+- control plane: `10.0.0.2`
+- GPU rig: `10.0.0.3`
+- CPU workers: `10.0.0.10` through `10.0.0.17`
+
+The workers mount the shared drive from the control plane and execute directly
+against shared scripts, queues, and outputs.
+
+---
 
 ## Base Image
 
-Image file: `worker-image.img.xz` (~289MB compressed, 1.9GB raw)
-Path: `/media/bryan/shared/plans/shoulders/research_assistant/docs/worker-image.img.xz`
+Image path:
 
-### Burning
+- `/media/bryan/shared/plans/shoulders/research_assistant/docs/worker-image.img.xz`
+
+Burning:
+
 ```bash
-xzcat /media/bryan/shared/plans/shoulders/research_assistant/docs/worker-image.img.xz | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
+xzcat /media/bryan/shared/plans/shoulders/research_assistant/docs/worker-image.img.xz \
+  | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-### OS
-- Armbian Community 26.2.0-trunk.385 (Debian Trixie / Debian 13)
-- Kernel: 6.12.68-current-sunxi64
-- No desktop — terminal only
-- Source: https://dl.armbian.com/orangepiprime/Trixie_current_minimal
+Image assumptions:
 
-### System Config
-- Timezone: America/Vancouver (matches control plane)
-- Locale: en_US.UTF-8
-- Users: `root` (pw: cpuworker), `bryan` (no pw)
-- RPi SSH key (`pi-control-plane`) in authorized_keys for both root and bryan
-- Apt sources: standard Debian mirrors (Chinese mirror replaced)
+- Armbian / Debian minimal image
+- terminal-only
+- shared-drive mount on boot
+- local Python available
+- first-boot script regenerates identity-specific state
 
-### NFS Mount
-- Mounts `/media/bryan/shared` from 10.0.0.2 (RPi) on boot
-- fstab entry: `10.0.0.2:/media/bryan/shared /media/bryan/shared nfs defaults,nolock,_netdev 0 0`
-- Agent code, task queues, and output all live on NFS
+---
 
-### Python
-- Python 3.13.5 (from Armbian repos)
-- python3-venv, python3-pip installed
-- Local venv at `/opt/worker-env` (empty — libs installed per-task as needed)
+## Shared Mount And Runtime Paths
 
-### Agent
-- Agent code lives on NFS: `/media/bryan/shared/agents/`
-- Workers run agent from NFS path using local venv
-- Single source of truth — update agent once, all workers pick it up
-- Agent runs in cpu_only mode (no GPU detection)
-- cpu_agent.py in development (separate effort)
+Expected shared mount on workers:
 
-### CPU Agent (Current MVP Alignment)
-- CPU agent script path (NFS shared):
+- `/media/bryan/shared`
+
+Expected runtime paths:
+
+- CPU agent:
   - `/media/bryan/shared/scripts/cpu_agent.py`
-- Agent behavior:
-  - Claims only `task_class: cpu` tasks where `executor: worker`
-  - Writes normal task lifecycle files (`queue -> processing -> complete/failed`)
-  - Publishes heartbeats to:
-    - `/media/bryan/shared/cpus/<worker-name>/heartbeat.json`
-    - `/media/bryan/shared/heartbeats/<worker-name>.json`
-- Runtime baseline:
-  - Prefers venv activation from `/opt/worker-env/bin/activate`
-  - Fallback to `/home/bryan/ml-env/bin/activate` if present
-  - Converts `python` to `python3` for shell commands
-- Test command:
-```bash
-python3 /media/bryan/shared/scripts/cpu_agent.py --once --name cpu-worker-10
-```
-
-### Persistent Logs (No /tmp)
-- CPU worker logs should be written to shared persistent storage:
+- CPU worker logs:
   - `/media/bryan/shared/logs/cpu_workers/`
-- Recommended restart helper (keeps logs persistent):
+- config:
+  - `/media/bryan/shared/agents/config.json`
+
+The shared-script path is intentional. It keeps one runtime copy for all CPU
+workers.
+
+---
+
+## First Boot
+
+The image is expected to run a one-time first-boot script that:
+
+1. sets hostname from the assigned IP suffix
+2. regenerates SSH host keys
+3. marks first-boot completion
+4. leaves the worker ready for shared-drive execution
+
+Expected hostname shape:
+
+- `worker-10`
+- `worker-11`
+- and so on
+
+---
+
+## Starting CPU Workers
+
+Restart all default workers:
+
 ```bash
 /media/bryan/shared/scripts/restart_cpu_workers.sh
 ```
-- Target specific workers:
+
+Restart specific workers:
+
 ```bash
 /media/bryan/shared/scripts/restart_cpu_workers.sh 10.0.0.10 10.0.0.11
 ```
 
-### First-Boot Script (`/opt/first-boot.sh`)
-Runs once on first boot of each cloned image via systemd (`first-boot.service`):
-1. Reads IP, extracts last octet
-2. Sets hostname to `worker-{octet}` (e.g., `worker-10` for 10.0.0.10)
-3. Regenerates SSH host keys (`dpkg-reconfigure openssh-server`)
-4. Creates flag file `/opt/.first-boot-done` to prevent re-running
-5. Logs to `/var/log/first-boot.log`
+Single-run smoke test:
 
-Tested: worker-10 confirmed working — hostname set, keys regenerated, NFS mounted on boot.
+```bash
+python3 /media/bryan/shared/scripts/cpu_agent.py --once --name cpu-worker-10
+```
 
-### Pre-Image Cleanup (already done)
-Before the image was captured:
-- [x] SSH host keys deleted (first-boot regenerates)
-- [x] machine-id cleared (regenerates on boot)
-- [x] apt cache cleaned
-- [x] Logs cleared
-- [x] Bash history cleared
-- [x] Filesystem shrunk (resize2fs -M + partition shrink via parted)
-- [x] First-boot systemd service enabled
+---
 
-## Post-Clone Per-Worker
-1. Burn `worker-image.img.xz` to SD card
-2. Boot — first-boot script runs automatically
-3. Armbian will auto-expand filesystem to fill the SD card
-4. Verify: `ssh root@10.0.0.{octet}` (will need `ssh-keygen -R` for reused IPs)
-5. Hostname should be `worker-{octet}`, NFS mounted, venv ready
-6. Start CPU agent from control plane:
-   ```bash
-   /media/bryan/shared/scripts/restart_cpu_workers.sh 10.0.0.{octet}
-   ```
-7. Install task-specific Python libs into `/opt/worker-env` as needed
+## Runtime Notes
 
-## Shopping List
-- [ ] 8x MicroSD cards (8GB+)
-- [ ] 8x heatsinks for H5 SoC
-- [ ] Quality multi-port USB power (avoid cheap converters — coil whine)
+- CPU workers should write logs to shared persistent storage, not `/tmp`.
+- The helper script currently launches the shared CPU agent over SSH and keeps
+  logs in `/media/bryan/shared/logs/cpu_workers/`.
+- CPU workers are expected to stay simple:
+  - no GPU ownership
+  - no LLM runtime ownership
+  - no shared coordination authority
+
+They should behave like lightweight task executors that report status upward.
+
+---
+
+## Provisioning Checklist
+
+1. Burn the base image to microSD.
+2. Boot the worker and let first-boot finish.
+3. Confirm hostname and shared mount.
+4. Confirm `python3` is available.
+5. Start the CPU agent with the shared restart helper.
+6. Confirm heartbeat appears under `shared/cpus/`.
+
+---
+
+## Open Questions
+
+- [ ] Do CPU workers stay Orange Pi specific, or should this doc become a
+  generic CPU-worker contract?
+- [ ] Should the shared CPU agent and repo-local CPU agent be unified into one
+  authoritative path?
+- [ ] Do we want a dedicated `config.cpu_workers.json` instead of reusing the
+  general config?
+
+---
+
+## Shopping / Spare Parts
+
+- [ ] microSD cards
+- [ ] heatsinks
+- [ ] reliable multi-port power supplies

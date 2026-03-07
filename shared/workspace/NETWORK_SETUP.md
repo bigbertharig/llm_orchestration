@@ -1,220 +1,212 @@
-# Network Setup — LLM Orchestration Network
+# Network Setup
 
-Last updated: 2026-02-11
+Reference for the physical network, shared-drive layout, and host-to-host trust
+assumptions behind the orchestration rig.
 
-## Network Topology
+This is an infrastructure reference, not the normal operator runbook. For daily
+operations, use [quickstart.md](quickstart.md) and [CONTEXT.md](CONTEXT.md).
 
-```
+---
+
+## Topology
+
+```text
 Internet
-   │
-Home Router
-   │ LAN port (ethernet)
-   │
-TP-Link Archer C20 (10.0.0.1) ── WAN port
-   │
-   │ LAN ports ──→ Switch(es)
-   │
-   ├── Raspberry Pi       (10.0.0.2)   Control plane, NFS server
-   ├── GPU Rig            (10.0.0.3)   Brain + LLM workers
-   └── Orange Pi workers  (10.0.0.10+) CPU workers (future, ×8)
+  -> home router
+  -> dedicated rig router (10.0.0.1)
+  -> switch(es)
+     -> control plane / Raspberry Pi (10.0.0.2)
+     -> GPU rig (10.0.0.3)
+     -> optional CPU workers (10.0.0.10+)
 ```
 
-All devices on `10.0.0.0/24` subnet. Internet flows through the TP-Link router's WAN connection to the home router.
+The rig is local-network-first. Shared storage and local SSH are the normal
+control channels.
 
-## IP Addressing
+---
 
-| Device | IP | Method | MAC |
-|--------|----|--------|-----|
-| TP-Link Router | 10.0.0.1 | Static (LAN IP) | — |
-| Raspberry Pi | 10.0.0.2 | DHCP reservation | 88:A2:9E:8E:FE:88 |
-| GPU Rig | 10.0.0.3 | DHCP reservation | 18:31:BF:27:65:7D |
-| Orange Pi workers | 10.0.0.10+ | DHCP pool | — |
+## Addressing
 
-DHCP pool: `10.0.0.10` – `10.0.0.254`
+| Device | Address | Notes |
+|--------|---------|-------|
+| Router | `10.0.0.1` | dedicated rig router |
+| Control plane | `10.0.0.2` | repo checkout, shared drive, operator entrypoints |
+| GPU rig | `10.0.0.3` | brain + GPU workers |
+| CPU workers | `10.0.0.10+` | optional worker pool |
 
-## Router — TP-Link Archer C20 AC750
+DHCP pool is on the `10.0.0.0/24` subnet.
 
-**Admin access**: `http://10.0.0.1` — locked to Pi's MAC address only.
+---
 
-### Security Hardening (applied 2026-02-11)
+## Trust Boundary
 
-| Setting | Status |
-|---------|--------|
-| WiFi (both bands) | Disabled |
-| WPS | Disabled |
-| SPI Firewall | Enabled |
-| DoS Protection | Enabled (ICMP/UDP/TCP-SYN flood) |
-| Ping from WAN | Blocked |
-| Ping from LAN | Allowed |
-| UPnP | Disabled |
-| Remote Management | Disabled (IP 0.0.0.0) |
-| Admin access | MAC-locked to Pi |
-| VPN Passthrough (PPTP/L2TP/IPSec) | Disabled |
-| ALG (FTP/TFTP/H323/SIP/RTSP) | All disabled |
-| Port forwarding | None |
+Important assumptions:
 
-### Security Notes
+- the LAN is trusted relative to the internet
+- physical access to the LAN is powerful access
+- the router is the perimeter
+- no inbound public port-forwarding should exist for orchestrator control
 
-- **No wireless entry point** — WiFi disabled on router, WiFi and Bluetooth disabled on Pi
-- **Physical access = full access** — anyone plugging into the switch is on the network with no authentication (NFS, SSH keys, Ollama all trust the LAN)
-- **Router is the perimeter** — all external traffic flows through WAN NAT, no ports forwarded inbound
-- **Admin panel** — change default password, keep firmware updated
+This means local services can trust the rig LAN more than the public internet,
+but not more than the human operator.
 
-## Hardware — GPU Rig
+---
 
-| GPU | Model | VRAM | Role |
-|-----|-------|------|------|
-| 0 | RTX 3090 Ti | 24GB | Primary — large models (32B) |
-| 1 | GTX 1060 6GB | 6GB | Secondary — small models (7B) |
-| 2 | GTX 1060 6GB | 6GB | Available |
-| 3 | GTX 1060 6GB | 6GB | Available |
-| 4 | GTX 1060 6GB | 6GB | Available |
+## Shared Drive Layout
 
-**Driver:** NVIDIA 580.126.09 (proprietary) — required for both Ampere (3090 Ti) and Pascal (1060s). The 590 driver dropped Pascal support; the open kernel driver also doesn't support Pascal.
+Authoritative shared drive:
 
-**Boot config:**
-- GRUB: 0s timeout, hidden menu (no OS selection delay)
-- GDM: auto-login as `bryan` (no login screen)
-- NetworkManager-wait-online: disabled (faster boot)
+- `/media/bryan/shared`
 
-## Ollama Instances
+Repo-side bind mount:
 
-Two Ollama instances run as systemd services, pinned to specific GPUs:
+- `/home/bryan/llm_orchestration/shared`
 
-| Service | Port | GPU | CUDA_VISIBLE_DEVICES | Models |
-|---------|------|-----|---------------------|--------|
-| `ollama.service` | 11434 | RTX 3090 Ti | 0 | qwen2.5-coder:32b |
-| `ollama-1060.service` | 11435 | GTX 1060 #1 | 1 | qwen2.5-coder:7b |
+GPU-rig NFS mount:
 
-Models are not stored on the SSD image. After imaging/restoring, reload from shared drive:
-```bash
-cd /mnt/shared/models/qwen2.5-coder-32b && ollama create qwen2.5-coder:32b -f Modelfile
-cd /mnt/shared/models/qwen2.5-coder-7b && OLLAMA_HOST=http://localhost:11435 ollama create qwen2.5-coder:7b -f Modelfile
-```
+- `/mnt/shared`
 
-## Shared Drive
+This shared drive is the common substrate for:
 
-- Physical disk: 3.6TB WD HDD (WDC WD40EDAZ-11SLVB0) attached to the Pi via USB
-- Filesystem: ext4
-- UUID: `be91c4c6-bb29-467d-85c2-d39f2358b156`
+- task lanes
+- worker heartbeats
+- batch history
+- shared scripts
+- models archive
 
-### Pi mounts (server)
+---
 
-| Mount Point                          | Type | Source    |
-|--------------------------------------|------|-----------|
-| `/media/bryan/shared`                | ext4 | /dev/sda1 |
-| `/home/bryan/llm_orchestration/shared` | bind | above   |
+## Mount Model
 
-Pi fstab entries:
-```
-UUID=be91c4c6-bb29-467d-85c2-d39f2358b156  /media/bryan/shared  ext4  defaults,nofail  0  2
-/media/bryan/shared  /home/bryan/llm_orchestration/shared  none  bind,nofail  0  0
-```
+### Control Plane
 
-### GPU Rig mount (client)
+The control plane mounts the physical disk at:
 
-| Mount Point   | Type | Source                              |
-|---------------|------|-------------------------------------|
-| `/mnt/shared` | nfs  | 10.0.0.2:/media/bryan/shared        |
+- `/media/bryan/shared`
 
-GPU Rig fstab entry:
-```
-10.0.0.2:/media/bryan/shared  /mnt/shared  nfs  defaults,noatime,nofail,mountport=4002,nfsvers=3  0  0
-```
+and bind-mounts it into the repo at:
 
-Systemd auto-mount service: `mount-shared.service`
-- Waits for network, pings Pi, then mounts
-- Desktop shortcut (`Mount-Shared-Drive.sh`) available if manual mount needed
+- `/home/bryan/llm_orchestration/shared`
 
-## NFS Configuration
+### GPU Rig
 
-Server: Pi (10.0.0.2)
+The GPU rig mounts the shared drive over NFS at:
 
-Export (`/etc/exports`):
-```
-/media/bryan/shared 10.0.0.0/24(rw,sync,no_subtree_check,no_root_squash)
-```
+- `/mnt/shared`
 
-Fixed ports (`/etc/nfs.conf`):
+This is the normal path used by the orchestrator running on the GPU host.
 
-| Service     | Port |
-|-------------|------|
-| portmapper  | 111  |
-| nfsd        | 2049 |
-| lockd       | 4001 |
-| mountd      | 4002 |
-| statd       | 4003 |
+---
+
+## NFS
+
+Server:
+
+- control plane / Pi
+
+Client:
+
+- GPU rig
+- optional CPU workers
+
+Key property:
+
+- orchestration communication is largely file-based over the shared mount
+
+If NFS is down, orchestration is not in a safe normal state.
+
+---
 
 ## SSH
 
-Bidirectional passwordless SSH between Pi and GPU Rig.
+Normal SSH trust paths:
 
-| From    | To       | Command    | Key             |
-|---------|----------|------------|-----------------|
-| Pi      | GPU Rig  | `ssh gpu`  | pi-control-plane (ed25519) |
-| GPU Rig | Pi       | `ssh pi`   | gpu-rig (ed25519)          |
+- control plane -> GPU rig
+- GPU rig -> control plane
 
-Keys stored on shared drive: `/shared/scripts/gpu_rig_ed25519[.pub]`
+This is used for:
 
-## Chat Scripts (on Pi)
+- submit wrapper behavior when targeting the rig
+- startup/reset helper scripts
+- maintenance commands
 
-Quick access to LLM chat sessions from the Pi:
+SSH here is an operator/control-plane tool, not the main runtime data plane.
 
-| Command | What it does |
-|---------|-------------|
-| `chat brain` | Chat with 32B model (current terminal) |
-| `chat worker` | Chat with 7B model (current terminal) |
-| `chat b --new` | Chat with 32B model (new window) |
-| `chat w --new` | Chat with 7B model (new window) |
+---
 
-Scripts in `~/llm_orchestration/scripts/` (chat, chat-brain, chat-worker).
+## Runtime Ownership Note
 
-## Setup Scripts (on shared drive)
+This doc should not be read as “the rig is driven by fixed always-on Ollama
+services.”
 
-| Script                                  | Purpose                              | Run on    |
-|-----------------------------------------|--------------------------------------|-----------|
-| `/shared/scripts/setup-sudo-permissions.sh` | Replicate Pi sudo/groups config  | GPU Rig   |
-| `/shared/scripts/setup-ssh.sh`              | Install SSH keys + config        | GPU Rig   |
+Current normal runtime model is:
 
-## GPU Rig Desktop Files
+- startup scripts bring up the orchestrator
+- brain owns shared coordination
+- workers are cold by default unless startup mode says otherwise
+- worker model load/unload happens through orchestrator `meta` tasks or explicit
+  startup-mode wrappers
 
-| File | Purpose |
-|------|---------|
-| `Mount-Shared-Drive.sh` | Manual mount of NFS shared drive |
-| `NETWORK_SETUP.md` | This document (offline reference) |
+Older host-specific Ollama service layouts are historical infrastructure notes,
+not the primary operator workflow.
 
-## Troubleshooting
+Relevant startup entrypoints:
 
-**Can't reach router admin panel:**
-1. Ensure you're on the Pi (MAC-locked admin access)
-2. Go to `http://10.0.0.1`
+- `/home/bryan/llm_orchestration/shared/agents/startup.py`
+- `/home/bryan/llm_orchestration/scripts/start_default_mode.py`
+- `/home/bryan/llm_orchestration/scripts/start_benchmark_mode.py`
+- `/home/bryan/llm_orchestration/scripts/start_custom_mode.py`
 
-**Shared drive not mounted on GPU Rig:**
-1. Double-click `Mount-Shared-Drive.sh` on the Desktop
-2. Or run: `sudo mount /mnt/shared`
+---
 
-**NFS mount hangs:**
-1. Check Pi is reachable: `ping 10.0.0.2`
-2. Check NFS ports from GPU rig: `nc -zw2 10.0.0.2 2049 && nc -zw2 10.0.0.2 4002`
-3. If ports unreachable, restart NFS on Pi: `ssh pi "sudo systemctl restart nfs-server"`
+## Models And Storage
 
-**Shared drive not mounted on Pi:**
-1. Run: `sudo mount /media/bryan/shared && sudo mount /home/bryan/llm_orchestration/shared`
+Shared archive storage:
 
-**SSH host key changed (after reimage):**
-1. `ssh-keygen -R 10.0.0.3` (on Pi) or `ssh-keygen -R 10.0.0.2` (on GPU Rig)
+- `/media/bryan/shared/models/`
 
-**1060s not detected (only 3090 Ti visible):**
-1. Check driver: must be `nvidia-driver-580` (proprietary), NOT `590` or `open`
-2. Verify: `sudo dmesg | grep NVRM` — look for "580.xx Legacy" messages
-3. Fix: `sudo apt install nvidia-driver-580`, then `sudo dkms install --force nvidia/580.126.09`, reboot
+The shared drive is the archive/source of model assets. Local host runtime
+storage is the hot set.
 
-**Reload models after reimage:**
-1. Mount shared drive first
-2. `cd /mnt/shared/models/qwen2.5-coder-32b && ollama create qwen2.5-coder:32b -f Modelfile`
-3. `cd /mnt/shared/models/qwen2.5-coder-7b && OLLAMA_HOST=http://localhost:11435 ollama create qwen2.5-coder:7b -f Modelfile`
+This keeps model promotion and eviction explicit instead of hidden inside the
+network layout.
 
-**New device not getting IP:**
-1. Check cable and switch LEDs
-2. Check router DHCP client list at `http://10.0.0.1`
-3. If device needs a fixed IP, add DHCP reservation by MAC address
+---
+
+## Troubleshooting Anchors
+
+When the network/storage layer is suspect, check:
+
+1. router reachability
+2. control-plane reachability
+3. NFS mount state on the GPU rig
+4. shared-drive visibility under `/mnt/shared`
+5. SSH connectivity between control plane and GPU rig
+
+Useful checks:
+
+```bash
+ping 10.0.0.2
+ping 10.0.0.3
+mount | grep /mnt/shared
+nc -zw2 10.0.0.2 2049
+ssh gpu hostname
+ssh pi hostname
+```
+
+If the shared mount is unavailable, stop treating task lanes and history
+artifacts as trustworthy until the mount is healthy again.
+
+---
+
+## Historical Notes Worth Keeping
+
+These topics still matter historically, but they are not the main operator
+story anymore:
+
+- host-specific dual-Ollama service experiments
+- old fixed worker/brain service pinning
+- desktop convenience shortcuts on the GPU rig
+
+If those become operationally important again, document them as host-specific
+appendices instead of the primary network model.
