@@ -44,9 +44,9 @@ Or start a specific triplet:
 
 ```bash
 python3 ~/llm_orchestration/scripts/start_custom_mode.py \
-  --brain-model qwen2.5:32b \
+  --brain-model qwen2.5-coder:32b \
   --single-model qwen2.5:7b \
-  --split-model qwen2.5:14b \
+  --split-model qwen2.5-coder:14b \
   --split-candidate-group pair_4_5
 ```
 
@@ -260,27 +260,41 @@ If workers auto-unload unexpectedly, verify benchmark config can actually hold t
 
 ## Current Known Compatibility Limits
 
-As of 2026-03-05:
+As of 2026-03-06:
 
+### Model issues
 - `qwen3.5:4b` and `qwen3.5:9b` are not currently benchmarkable on this stack
   - load attempts and direct generate probes failed despite the tags being present
-- `qwen2.5:14b` split baseline on `pair_4_5` is currently unstable
+- `qwen2.5-coder:14b` split baseline on `pair_4_5` is currently unstable
   - warmup failed and the pair had to be reset
-- `fast_smoke` is blocked on the current Ollama + `lm_eval` compatibility path
-  - `boolq`, `piqa`, and `hellaswag` need loglikelihood-style evaluation
-  - current tested chat/completions endpoint paths do not support that combination cleanly
 
-Use the living reference to track whether these blockers have been cleared before treating those models or suites as runnable again.
+### Ollama limitations (fundamental, not fixable by config)
+- Ollama `/v1/completions` does not return logprobs — this blocks all MC/loglikelihood lm_eval tasks
+- Ollama `/v1/completions` rejects array-shaped prompts (a proxy at port 11435 can fix the shape issue, but not the missing logprobs)
+- These are Ollama API limitations confirmed on v0.17.6 as of 2026-03-06
+- **Do not keep trying to make MC tasks work on Ollama** — use vLLM instead
 
-Additional standardized-test lessons now confirmed:
-- `local-chat-completions` without `--apply_chat_template` is a broken lane for generation tasks on the current stack
-- `local-chat-completions` with `--apply_chat_template` is the current working lane for at least:
-  - `gsm8k`
-  - `drop`
-- `local-completions` is still blocked for multiple-choice/loglikelihood tasks on the current Ollama stack
-  - confirmed failures include:
-    - `boolq`
-    - `arc_challenge`
+### What works on Ollama
+- `local-chat-completions` with `--apply_chat_template` works for generation tasks:
+  - gsm8k, drop, bbh, math_500, aime_2024
+- `local_custom` harness works for all custom pipeline tests
+- `local-chat-completions` without `--apply_chat_template` is broken for generation tasks
+
+### What needs vLLM (or equivalent full-API backend)
+- All MC/loglikelihood lm_eval tasks: mmlu, arc_challenge, hellaswag, boolq, piqa, winogrande, truthfulqa_mc2, gpqa_diamond, mmmlu, musr
+- These tasks require logprobs in the completions response, which Ollama does not provide
+
+### Environment setup status
+- Ollama: working for generation tasks and custom tests
+- vLLM: not yet set up — blocks baseline_core, fast_smoke, reasoning_heavy
+- evalplus: not yet set up — blocks coding_heavy, part of baseline_core
+- lighteval: partially installed, dependency conflict with latex2sympy2 — blocks mmlu_pro
+- swebench/livecodebench/bfcl/harbor: not yet set up — deferred
+
+### Chat template rule
+- Always use `--apply_chat_template` for Ollama lm_eval runs
+- Always specify the correct HF tokenizer for the model family
+- See README.md "Chat Template Standardization" table for tokenizer mappings
 
 ## What Not To Do
 
