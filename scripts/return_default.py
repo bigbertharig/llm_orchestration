@@ -225,7 +225,7 @@ def _run_remote_restart(timeout_s: int) -> tuple[bool, dict]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Return rig to default startup state")
     parser.add_argument("--timeout", type=int, default=240, help="Remote restart timeout seconds per restart attempt")
-    parser.add_argument("--wait", type=int, default=30, help="Heartbeat wait timeout seconds per restart attempt")
+    parser.add_argument("--wait", type=int, default=90, help="Heartbeat/default-state wait timeout seconds per restart attempt")
     parser.add_argument("--heartbeat-stale-seconds", type=int, default=60, help="Heartbeat freshness threshold")
     parser.add_argument("--max-restarts", type=int, default=10, help="Maximum restart/rescan attempts before failing")
     parser.add_argument("--rescan-interval", type=int, default=30, help="Seconds to wait between failed restart attempts")
