@@ -69,8 +69,15 @@
     <div class="grid g5" id="countCards"></div>
 
     <div class="section card">
-      <h3>Alerts</h3>
+      <h3>Active Alerts</h3>
       <div id="alerts"></div>
+      <details class="dismissed-section" id="dismissedSection" style="margin-top: 10px;">
+        <summary style="cursor: pointer; color: var(--muted); font-size: 13px;">
+          Dismissed Alerts (<span id="dismissedCount">0</span>)
+          <button class="small-btn" id="clearAllDismissed" style="margin-left: 10px; font-size: 11px;">Clear All</button>
+        </summary>
+        <div id="dismissedAlerts" style="margin-top: 8px;"></div>
+      </details>
     </div>
 
     <div class="section card">

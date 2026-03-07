@@ -544,20 +544,14 @@ class TestMetaClaimTargetEnforcement(unittest.TestCase):
 
     def test_can_claim_meta_task_checks_target(self):
         """Verify _can_claim_meta_task rejects mismatched targets."""
-        # This test reads the source to verify the check exists
-        # Actual behavior would require more mocking
-        import inspect
-        try:
-            from gpu_tasks import GPUTaskMixin
-            source = inspect.getsource(GPUTaskMixin._can_claim_meta_task)
-            # Verify reset commands check target
-            self.assertIn("reset_gpu_runtime", source)
-            self.assertIn("reset_split_runtime", source)
-            self.assertIn("target_worker", source)
-            self.assertIn("target_mismatch", source)
-        except ImportError:
-            # If import fails, skip gracefully
-            self.skipTest("Could not import GPUTaskMixin (missing dependencies)")
+        # Read source directly to avoid runtime import dependencies.
+        source_path = Path(__file__).parent.parent / "gpu_tasks.py"
+        source = source_path.read_text(encoding="utf-8")
+        # Verify reset commands check target
+        self.assertIn("reset_gpu_runtime", source)
+        self.assertIn("reset_split_runtime", source)
+        self.assertIn("target_worker", source)
+        self.assertIn("target_mismatch", source)
 
 
 if __name__ == "__main__":

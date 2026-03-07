@@ -1,214 +1,147 @@
-# Stale Task Cleanup Plan (Authoritative)
+# Stale Task Cleanup Plan (Execution Checklist)
 
-Date: 2026-03-04  
-Scope: core orchestration (`shared/agents/*`)  
-Status: Proposed
+Date: 2026-03-04
+Scope: core orchestration (`shared/agents/*`)
+Status: Open (not implemented)
 
-## Objective
+## Goal
 
-Prevent queue poisoning and worker deadlocks from stale `meta`/`llm` tasks by adding deterministic stale lifecycle handling:
-1. Expire unclaimed tasks (`pending` TTL)
-2. Detect dead processing tasks (heartbeat lease timeout)
-3. Enforce hard runtime timeouts (processing wall timeout)
-4. Recover workers safely (targeted reset + controlled requeue)
+Prevent stale queue/processing tasks from poisoning scheduling by adding deterministic lifecycle cleanup with bounded recovery.
 
-No silent deletion. Every stale action must produce a terminal status + log event.
+## Current State (Verified)
 
----
+Not implemented yet in core:
+1. No `stale_task_policy` block consumed by agents.
+2. No stale-task sweeper in `brain_resources.py`.
+3. No stale-task event keys (`STALE_SWEEP_*`, `TASK_EXPIRED_UNCLAIMED`, etc.).
+4. No dedicated stale cleanup unit test module.
 
-## Policy (What to enforce)
+## Required Outcome
 
-## 1) Pending TTL (unclaimed)
+1. Unclaimed tasks expire by TTL with explicit terminal reason.
+2. Dead processing tasks are failed/recovered deterministically.
+3. Hard processing timeouts are enforced with bounded requeue.
+4. Invalid queue state is auto-quarantined.
+5. Recovery resets are targeted/deduped.
 
-If `status=pending` for too long:
-- Mark task terminal: `expired_unclaimed`
-- Write result metadata (`reason`, `age_seconds`, `sla_seconds`)
-- For retryable commands, release one replacement task (dedup-safe)
-
-Suggested defaults:
-- `unload_llm`: 60s
-- `load_llm`: 240s
-- `unload_split_llm`: 90s
-- `load_split_llm`: 420s
-- normal `llm` work task: 300s pending warning, 900s hard expire (configurable)
-
-## 2) Processing lease timeout (heartbeat-based)
-
-If `status=processing` but task heartbeat is stale:
-- Mark task terminal: `stale_processing`
-- Issue targeted reset for assigned worker
-- Requeue original task only if retry budget allows
-
-Lease rule:
-- stale if no heartbeat update for `3 * task_heartbeat_interval_seconds`
-
-## 3) Hard processing timeout (wall clock)
-
-If task is processing and `now - started_at > hard_timeout`:
-- Mark terminal: `timeout_processing`
-- Issue targeted reset
-- Requeue once (or fail+escalate after max timeout retries)
-
-Suggested hard timeouts:
-- `unload_llm`: 90s
-- `load_llm`: 240s
-- `unload_split_llm`: 120s
-- `load_split_llm`: 480s
-- worker review llm tasks: keep existing logic, add config cap if missing
-
-## 4) Queue hygiene invariant
-
-Invalid queue tasks must be auto-cleaned:
-- `pending` task with `completed_at` or `result` present
-- `pending` task with stale `assigned_to` state from prior lifecycle
-- orphan `.lock` with no corresponding task JSON
-
-Action:
-- mark/relocate task to `failed/` with reason `invalid_queue_state`
-- emit explicit log event
-
----
-
-## Core Implementation (Where to change)
-
-## A) Brain side stale sweeper
-
-File: `shared/agents/brain_resources.py`
-
-Add function:
-- `_sweep_stale_tasks(shared_path, state, now) -> dict`
-
-Responsibilities:
-1. Scan `tasks/queue/*.json` and `tasks/processing/*.json`
-2. Apply pending TTL and invalid queue-state checks
-3. Apply processing lease/hard-timeout checks
-4. Emit recovery tasks (`reset_gpu_runtime` / `reset_split_runtime`) targeted via `target_worker`
-5. Respect dedupe (no duplicate recovery task per worker+reason)
-6. Return summary counters for monitor logs
-
-Call site:
-- start of `_make_resource_decisions()` before normal capacity decisions
-
-## B) Recovery task routing consistency
-
-File: `shared/agents/gpu_tasks.py`
-
-Confirm/keep:
-- `reset_gpu_runtime` and `reset_split_runtime` are target-enforced in:
-  - emergency claim path
-  - normal meta claim path
-
-Add:
-- reject stale/invalid task states early with `invalid_task_state` reason
-
-## C) Shared constants/config
+## Phase 1: Policy + Config Wiring
 
 Files:
-- `shared/agents/gpu_constants.py` (or dedicated stale constants block)
 - `shared/agents/config.template.json`
 - `shared/agents/config.json`
+- `shared/agents/brain.py` (load defaults)
 
-Add config block:
-```json
-"stale_task_policy": {
-  "enabled": true,
-  "pending_ttl_seconds": {
-    "load_llm": 240,
-    "unload_llm": 60,
-    "load_split_llm": 420,
-    "unload_split_llm": 90
-  },
-  "processing_hard_timeout_seconds": {
-    "load_llm": 240,
-    "unload_llm": 90,
-    "load_split_llm": 480,
-    "unload_split_llm": 120
-  },
-  "processing_lease_missed_heartbeats": 3,
-  "max_timeout_requeues": 1
-}
-```
+Implement:
+1. Add `stale_task_policy` config block.
+2. Load policy into brain state with defaults if missing.
+3. Keep feature behind `stale_task_policy.enabled`.
 
-## D) Task state transition helper (single authority)
+Policy fields:
+1. `pending_ttl_seconds` per command (`load_llm`, `unload_llm`, `load_split_llm`, `unload_split_llm`).
+2. `processing_hard_timeout_seconds` per command.
+3. `processing_lease_missed_heartbeats`.
+4. `max_timeout_requeues`.
 
-Preferred location:
-- `shared/agents/brain_dispatch.py` or shared task utility module used by brain
+Exit criteria:
+1. Brain starts cleanly with/without the block.
+2. Effective policy values visible in brain logs at startup.
 
-Add helper:
-- `_fail_task_with_reason(task, reason, details)`  
-Guarantees:
-1. atomic move queue/processing -> failed
-2. sets `status`, `completed_at`, `result`
-3. writes lock-safe
-4. never leaves partially updated task files
+## Phase 2: Brain Stale Sweeper Core
 
----
+Files:
+- `shared/agents/brain_resources.py`
+- `shared/agents/brain_dispatch.py` (shared fail helper if needed)
 
-## Logging/Telemetry Requirements
+Implement:
+1. Add `_sweep_stale_tasks(shared_path, state, now)`.
+2. Invoke sweep at start of `_make_resource_decisions()`.
+3. Sweep `tasks/queue/*.json`:
+- expire by pending TTL (`expired_unclaimed`),
+- detect invalid queue state (`pending` + `completed_at`/`result`/stale assignment markers).
+4. Sweep `tasks/processing/*.json`:
+- lease timeout from heartbeat staleness,
+- hard wall timeout from `started_at`.
+5. For stale processing:
+- fail task with structured reason,
+- issue targeted reset (`reset_gpu_runtime` or `reset_split_runtime`) using `target_worker`,
+- bounded requeue only when budget allows.
+6. Add dedupe for recovery task insertion by `(command, target_worker, incident_key)`.
 
-Add structured events:
-- `STALE_SWEEP_START`
-- `TASK_EXPIRED_UNCLAIMED`
-- `TASK_STALE_PROCESSING`
-- `TASK_TIMEOUT_PROCESSING`
-- `TASK_INVALID_QUEUE_STATE`
-- `STALE_RECOVERY_TASK_ISSUED`
-- `STALE_SWEEP_SUMMARY`
+Required helper:
+1. Single task terminalization helper that atomically moves queue/processing task to failed with `status`, `completed_at`, `result`.
 
-Each event should include:
-- `task_id`, `task_name`, `task_class`, `command`
-- `batch_id`
-- `assigned_to` (if any)
-- `age_seconds`, `sla_seconds`
-- `action_taken` (`failed`, `requeued`, `reset_issued`)
+Exit criteria:
+1. Sweep is idempotent across ticks.
+2. No partial task-file transitions.
+3. No duplicate reset flood for same worker/incident.
 
----
+## Phase 3: Worker-Side Guardrails
 
-## Guardrails
+File:
+- `shared/agents/gpu_tasks.py`
 
-1. Never delete task JSON without terminalizing it.
-2. Never requeue indefinitely; enforce max timeout requeues.
-3. Never issue untargeted reset from stale sweeper; always `target_worker`.
-4. Dedupe recovery tasks by `(command, target_worker, incident_key)`.
-5. Stale sweeper must be idempotent each brain tick.
+Implement:
+1. Reject obviously invalid task lifecycle state early (`invalid_task_state`) before claim/execution.
+2. Preserve existing target enforcement for reset commands in both claim paths.
 
----
+Exit criteria:
+1. Invalid stale task payload cannot execute.
+2. Reset routing remains target-safe.
 
-## Test Plan (required before rollout)
+## Phase 4: Telemetry
 
-File: `shared/agents/tests/test_stale_task_cleanup.py`
+Files:
+- `shared/agents/brain_resources.py`
+- `shared/agents/gpu_tasks.py` (if result-side event needed)
+
+Emit events:
+1. `STALE_SWEEP_START`
+2. `TASK_EXPIRED_UNCLAIMED`
+3. `TASK_STALE_PROCESSING`
+4. `TASK_TIMEOUT_PROCESSING`
+5. `TASK_INVALID_QUEUE_STATE`
+6. `STALE_RECOVERY_TASK_ISSUED`
+7. `STALE_SWEEP_SUMMARY`
+
+Event payload minimum:
+1. `task_id`, `task_name`, `task_class`, `command`
+2. `batch_id`
+3. `assigned_to`
+4. `age_seconds`, `sla_seconds`
+5. `action_taken`
+
+Exit criteria:
+1. Logs are sufficient to reconstruct every stale decision.
+
+## Phase 5: Tests
+
+File:
+- `shared/agents/tests/test_stale_task_cleanup.py`
 
 Minimum tests:
-1. pending meta task expires at TTL and replacement is issued once
-2. processing task with stale heartbeat triggers targeted reset
-3. processing hard-timeout task transitions to failed and requeue obeys budget
-4. invalid queue task (`pending` + `completed_at`) is quarantined/finalized
-5. dedupe prevents duplicate reset tasks per worker
-6. lock/orphan handling does not crash sweep
+1. Pending meta task expires by TTL and replacement is bounded/deduped.
+2. Processing task with stale heartbeat triggers targeted reset.
+3. Hard-timeout processing task transitions terminal and bounded requeue applies.
+4. Invalid queue task is terminalized with `invalid_queue_state`.
+5. Recovery dedupe prevents duplicate reset tasks.
+6. Lock/orphan file handling does not crash sweep.
 
-Runtime validation:
-1. Inject synthetic stale `load_llm` in queue -> auto-expire observed
-2. Inject synthetic stale processing task -> reset task appears and worker recovers
-3. Confirm queue resumes draining without manual intervention
+Exit criteria:
+1. Tests pass with no skipped core stale-cleanup cases.
 
----
+## Runtime Validation Checklist
 
-## Rollout Sequence
-
-1. Add constants/config + sweep logic behind `stale_task_policy.enabled`
-2. Add tests and pass locally
-3. Enable in one benchmark batch (`github_analyzer_verify_benchmark`)
-4. Validate logs and no false positives
-5. Enable for full `github_analyzer`
-
----
+1. Inject synthetic stale `load_llm` in queue and confirm auto-expire.
+2. Inject stale processing task and confirm targeted reset appears.
+3. Confirm queue resumes draining without manual intervention.
+4. Confirm no reset storms from repeated sweeps.
 
 ## Definition of Done
 
 All must pass:
-1. No stale meta tasks remain pending after SLA windows
-2. Stale processing tasks are deterministically failed/recovered
-3. No queue entries remain with contradictory state (`pending` + `completed_at`)
-4. Reset/requeue behavior is bounded and deduped
-5. Tests pass with no skipped core stale-cleanup tests
-
+1. No stale meta tasks remain pending beyond policy TTL.
+2. Stale processing tasks are failed/recovered deterministically.
+3. Invalid queue-state tasks are auto-terminalized.
+4. Reset/requeue behavior is bounded and deduped.
+5. Unit tests for stale cleanup pass.
+6. Runtime validation checklist passes with evidence in `brain_decisions.log`.

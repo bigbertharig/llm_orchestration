@@ -39,6 +39,9 @@ def derive_backend_id(model_backend: str, model_args: str, apply_chat_template: 
     if backend == "local-chat-completions" and "/v1/chat/completions" in args:
         return "ollama_chat_completions_templated" if apply_chat_template else "ollama_chat_completions_raw"
     if backend == "local-completions" and "/v1/completions" in args:
+        # Port 11435 = proxy that flattens array prompts for MC/loglikelihood tasks
+        if ":11435/" in args:
+            return "ollama_completions_proxied"
         return "ollama_completions"
     return ""
 

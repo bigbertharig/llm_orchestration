@@ -2,7 +2,7 @@
 
 Date: 2026-03-04
 Owner: orchestration core
-Status: In Progress (re-audited 2026-03-04; core code gaps closed, runtime proof still required)
+Status: In Progress (re-audited 2026-03-05; code paths/tests complete; runtime escalation + brain observability proof still open)
 
 ## Goal
 Upgrade existing thermal gating so sustained CPU overheat does not deadlock throughput.
@@ -67,6 +67,11 @@ This section reflects direct code inspection in:
 5. Test verification: Improved but not final.
    - Latest run: `Ran 13 tests ... OK (skipped=1)`.
    - Remaining skip is dependency-related import gating for one target-enforcement test.
+6. Runtime/observability proof: Not complete.
+   - Worker-side incident lifecycle evidence now exists in `/media/bryan/shared/logs/startup-manual.log` (`THERMAL_INCIDENT_START` / `THERMAL_INCIDENT_CLEARED`).
+   - Recent incidents are short-lived (`duration` mostly `0-5s`) with `resets_issued=0`; targeted reset/escalation path has not been exercised.
+   - `brain_decisions.log` still has no `THERMAL_TARGETED_RESET_*`, `THERMAL_FULL_RESET_TRIGGERED`, or `THERMAL_INCIDENT_BRAIN_*` events.
+   - Gate C/D still require deliberate sustained-overheat exercise and capture.
 
 ### Non-Critical Mismatches (doc vs code)
 1. `thermal_recovery_state` field is documented but not implemented.
@@ -262,8 +267,9 @@ Observed:
 3. Remaining skipped test: `TestMetaClaimTargetEnforcement.test_can_claim_meta_task_checks_target`
 4. Skip reason: `Could not import GPUTaskMixin (missing dependencies)`.
 
-Next required change for closure:
-1. Refactor that one test to use inline lightweight stubs (matching the rest of the suite) so it executes without optional runtime deps.
+Next required changes for closure:
+1. Gate B update completed: import-gated skip removed; full suite now passes without skips.
+2. Remaining closure work is Gate C/D runtime evidence, not additional unit test plumbing.
 
 Exit criteria:
 1. Thermal test suite runs with meaningful coverage (no blanket skips).
@@ -340,20 +346,41 @@ Regression checks:
 4. Deterministic restart handshake: Implemented.
 5. Split-port cleanup in full reset: Implemented.
 6. Targeted reset routing: Implemented in emergency + normal claim paths.
-7. Verified test coverage: Not complete (one test still skipped due dependency gating).
+7. Verified test coverage: Complete (`python3 -m unittest discover -s /home/bryan/llm_orchestration/shared/agents/tests -p 'test_*.py' -v` -> `Ran 66 tests ... OK`).
+8. Runtime integration proof: Not complete.
+9. Observability evidence continuity: Not complete.
 
-## Verification Snapshot (2026-03-04)
+## Verification Snapshot (2026-03-05)
 Direct checks performed:
 1. `gpu_tasks.py`: emergency scan and normal claim paths both enforce `target_worker` with `target_gpu` fallback.
 2. `startup.py`: `_check_restart_workers_signal()` + `_restart_gpu_workers()` present and main loop polling active.
 3. `brain_dispatch.py`: stop-wait uses `last_updated` then `timestamp`; cleanup sweep covers `11435-11441`.
-4. Thermal events present across modules:
+4. Thermal events present across modules (code-level presence):
    - `THERMAL_INCIDENT_START`
    - `THERMAL_INCIDENT_CLEARED`
    - `THERMAL_TARGETED_RESET_ISSUED`
    - `THERMAL_TARGETED_RESET_RESULT`
    - `THERMAL_FULL_RESET_TRIGGERED`
    - `THERMAL_INCIDENT_BRAIN_CLEARED`
+5. Test command run:
+   - `python3 -m unittest discover -s /home/bryan/llm_orchestration/shared/agents/tests -p 'test_*.py' -v`
+   - Result: `Ran 66 tests ... OK`.
+6. Log evidence check:
+   - `brain_decisions.log` search for thermal lifecycle events returned no matching lines in current sample window.
+   - Runtime/observability gates remain open until incident path is exercised and captured.
+
+## Remaining Required Work (authoritative)
+1. Complete Gate B:
+   - Completed (`66` tests passing, no skips).
+2. Complete Gate C:
+   - run a controlled sustained-overheat scenario (or equivalent simulation),
+   - verify bounded targeted resets and escalation behavior.
+3. Complete Gate D:
+   - capture and attach decision-log evidence showing incident_id continuity across:
+     - start
+     - targeted reset issued/result
+     - optional full reset trigger
+     - incident cleared.
 
 ## Finish Criteria (Must All Pass)
 
@@ -405,6 +432,21 @@ No partial completion, no skipped tests, no "looks good" sign-off.
    - full-reset cooldown is respected
    - no duplicate full-reset tasks issued
 
+Current state (2026-03-05 check):
+1. Partially met: incident start/clear observed.
+2. Not met: no targeted reset and no full reset observed yet (`resets_issued=0` across sampled incidents).
+3. Action required: run a controlled sustained overheat test that exceeds `cpu_overheat_trigger_seconds` (default 300s).
+
+Additional live finding (2026-03-04 ~22:55-22:58 local):
+1. `gpu-2` remained `cold` with a queued targeted `load_llm` task pending (`batch_id=system`) while other GPUs kept processing normal slices.
+2. Brain repeatedly warned:
+   - `load_llm task available for ... but GPUs ['gpu-2'] still cold`
+3. Worker logs show repeated claim suppression on `gpu-2`:
+   - `TASKS_THERMAL_PAUSED: skip claiming new work ...`
+4. Interpretation:
+   - Thermal pause gating is active and effective.
+   - The specific targeted recovery path for that cold GPU was blocked by thermal pause windows, with no higher-level corrective action observed.
+
 ### Gate D: Observability Evidence
 1. Decision log contains these events with coherent metadata:
    - `THERMAL_INCIDENT_START`
@@ -417,6 +459,21 @@ No partial completion, no skipped tests, no "looks good" sign-off.
    - reset counters
    - target gpu names
    - queue/processing context at time of action
+
+Current state (2026-03-05 check):
+1. Partially met:
+   - Worker logs show incident continuity (`incident_id`) and clear events.
+2. Not met:
+   - No brain-level thermal recovery events recorded for targeted/full-reset path.
+3. Action required:
+   - Capture one complete brain-side incident lifecycle containing:
+     `THERMAL_INCIDENT_BRAIN_START` -> `THERMAL_TARGETED_RESET_ISSUED` -> `THERMAL_TARGETED_RESET_RESULT` -> (`THERMAL_FULL_RESET_TRIGGERED` when applicable) -> `THERMAL_INCIDENT_BRAIN_CLEARED`.
+
+Additional observability gap from live run:
+1. Worker-side evidence exists for pause/incident transitions (`TASKS_THERMAL_PAUSED`, `THERMAL_INCIDENT_START/CLEARED`).
+2. Brain-side evidence is still absent for the same window despite blocked progress on a targeted `load_llm`.
+3. Required follow-up:
+   - Add/verify brain decision emission at the point where a targeted thermal-blocked meta task remains pending beyond threshold (before full escalation), so the operator can see why progress is constrained.
 
 ### Gate E: Documentation Integrity
 1. This document's status section matches observed behavior and test outputs.

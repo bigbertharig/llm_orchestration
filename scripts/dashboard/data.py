@@ -19,6 +19,7 @@ from .workers import load_brain_heartbeat, load_brain_state, load_gpu_telemetry,
 
 _TASK_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
 TASK_ERROR_LIMIT = 4000
+META_COMPLETE_LOOKBACK_SECONDS = 45 * 60
 
 
 def _clip_text(text: str, limit: int = TASK_ERROR_LIMIT) -> str:
@@ -106,6 +107,26 @@ def _task_batch_id(task: dict[str, Any]) -> str:
     return str(task.get("batch_id") or "").strip()
 
 
+def _parse_ts(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        # Handle common "YYYY-MM-DD HH:MM:SS" form
+        norm = raw if "T" in raw else raw.replace(" ", "T")
+        return datetime.fromisoformat(norm)
+    except Exception:
+        return None
+
+
+def _is_recent_meta_completion(task: dict[str, Any], now: datetime) -> bool:
+    ts = _parse_ts(task.get("completed_at")) or _parse_ts(task.get("started_at")) or _parse_ts(task.get("created_at"))
+    if not ts:
+        return False
+    age = (now - ts).total_seconds()
+    return age <= META_COMPLETE_LOOKBACK_SECONDS
+
+
 def list_tasks(shared_path: Path, focus_batch_ids: set[str] | None = None) -> dict[str, list[dict[str, Any]]]:
     """List tasks from all lanes."""
     lanes = {
@@ -123,17 +144,17 @@ def list_tasks(shared_path: Path, focus_batch_ids: set[str] | None = None) -> di
             task = _load_task_cached(task_file)
             if not task:
                 continue
-            # Hide orchestration meta/system tasks from dashboard lanes and counts.
-            if str(task.get("batch_id") or "").strip().lower() == "system" or is_system_meta_task(task):
-                continue
             batch_id = _task_batch_id(task)
-            if focus_set and lane in {"complete", "failed"} and batch_id not in focus_set:
+            task_is_meta = is_meta_task(task)
+            # Keep complete/failed focused to tracked batches, but always include
+            # meta tasks so load/unload flow is visible for debugging.
+            if focus_set and lane in {"complete", "failed"} and batch_id not in focus_set and not task_is_meta:
                 continue
             status = str(task.get("status") or "").strip().lower()
             # Some failed tasks can be materialized under complete/.
             # Rebucket by explicit status so dashboard failure counts stay accurate.
             if status in {"failed", "blocked_cloud", "abandoned", "error"}:
-                if focus_set and batch_id not in focus_set:
+                if focus_set and batch_id not in focus_set and not task_is_meta:
                     continue
                 lanes["failed"].append(task)
             else:
@@ -151,8 +172,6 @@ def list_private_tasks(shared_path: Path, focus_batch_ids: set[str] | None = Non
     for task_file in iter_task_files(private_dir) or []:
         task = _load_task_cached(task_file)
         if task:
-            if str(task.get("batch_id") or "").strip().lower() == "system" or is_system_meta_task(task):
-                continue
             if focus_set and _task_batch_id(task) not in focus_set:
                 continue
             rows.append(task)
@@ -175,6 +194,61 @@ def is_system_meta_task(task: dict[str, Any]) -> bool:
     """Check if task is a system meta task (model loading)."""
     name = str(task.get("name") or "").lower()
     return name.startswith("load_llm") or name.startswith("load_worker_model")
+
+
+def is_meta_task(task: dict[str, Any]) -> bool:
+    """Check if task is any meta task."""
+    return str(task.get("task_class") or "").strip().lower() == "meta"
+
+
+def _resolve_effective_batch_id(
+    task: dict[str, Any],
+    active_batch_ids: set[str],
+    selected_batch_ids: set[str],
+) -> str:
+    """Resolve a display/filter batch id for tasks.
+
+    Meta tasks are sometimes persisted with batch_id=system. Prefer explicit per-task
+    batch linkage fields when present; otherwise, bind to the single active batch.
+    """
+    raw = _task_batch_id(task)
+    if not raw:
+        return raw
+    if not is_meta_task(task):
+        return raw
+    if raw.lower() != "system":
+        return raw
+    for key in ("source_batch_id", "origin_batch_id", "parent_batch_id", "task_batch_id"):
+        value = str(task.get(key) or "").strip()
+        if value and value.lower() != "system":
+            return value
+    if len(active_batch_ids) == 1:
+        return next(iter(active_batch_ids))
+    if not active_batch_ids and len(selected_batch_ids) == 1:
+        return next(iter(selected_batch_ids))
+    return raw
+
+
+def _with_effective_batch_ids(
+    lanes: dict[str, list[dict[str, Any]]],
+    active_batch_ids: set[str],
+    selected_batch_ids: set[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return lanes with effective batch ids applied for filtering/counting."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for lane, tasks in lanes.items():
+        lane_rows: list[dict[str, Any]] = []
+        for task in tasks:
+            resolved = _resolve_effective_batch_id(task, active_batch_ids, selected_batch_ids)
+            if resolved == _task_batch_id(task):
+                lane_rows.append(task)
+                continue
+            patched = dict(task)
+            patched["batch_id_raw"] = task.get("batch_id")
+            patched["batch_id"] = resolved
+            lane_rows.append(patched)
+        out[lane] = lane_rows
+    return out
 
 
 def _resolve_batch_plan(shared_path: Path, batch_id: str, active_batches: dict[str, Any]) -> str:
@@ -295,6 +369,7 @@ def summarize(
     lanes = list_tasks(shared_path, focus_batch_ids=focus_batch_ids)
     private_tasks = list_private_tasks(shared_path, focus_batch_ids=focus_batch_ids)
     lanes["private"] = private_tasks
+    lanes = _with_effective_batch_ids(lanes, active_batch_ids, selected_set)
 
     workers = load_worker_rows(shared_path, lanes["processing"])
     brain_holding = []
@@ -489,12 +564,22 @@ def summarize(
     # Keep lane tables focused on engaged or user-selected batches.
     lane_focus_ids = engaged_batch_ids | selected_set
     if lane_focus_ids:
+        now = datetime.now()
+
+        def _keep_lane_task(task: dict[str, Any]) -> bool:
+            if task.get("batch_id") in lane_focus_ids:
+                return True
+            if is_meta_task(task):
+                status = str(task.get("status") or "").strip().lower()
+                return status == "complete" and _is_recent_meta_completion(task, now)
+            return False
+
         lane_source = {
-            "queue": [t for t in lanes["queue"] if t.get("batch_id") in lane_focus_ids],
-            "processing": [t for t in lanes["processing"] if t.get("batch_id") in lane_focus_ids],
-            "private": [t for t in lanes["private"] if t.get("batch_id") in lane_focus_ids],
-            "complete": [t for t in lanes["complete"] if t.get("batch_id") in lane_focus_ids],
-            "failed": [t for t in lanes["failed"] if t.get("batch_id") in lane_focus_ids],
+            "queue": [t for t in lanes["queue"] if _keep_lane_task(t)],
+            "processing": [t for t in lanes["processing"] if _keep_lane_task(t)],
+            "private": [t for t in lanes["private"] if _keep_lane_task(t)],
+            "complete": [t for t in lanes["complete"] if _keep_lane_task(t)],
+            "failed": [t for t in lanes["failed"] if _keep_lane_task(t)],
         }
     else:
         lane_source = lanes

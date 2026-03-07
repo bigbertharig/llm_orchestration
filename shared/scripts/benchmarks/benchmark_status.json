@@ -17,6 +17,12 @@
       "transport": "local-completions",
       "base_url_suffix": "/v1/completions",
       "scope": "Backend-level certification for Ollama completions."
+    },
+    {
+      "backend_id": "ollama_completions_proxied",
+      "transport": "local-completions",
+      "base_url_suffix": "/v1/completions",
+      "scope": "Ollama completions via array-prompt-flattening proxy (port 11435). Enables MC/loglikelihood tasks that fail on direct Ollama."
     }
   ],
   "certified_tests": [
@@ -154,6 +160,15 @@
       "note": "lm-eval task 'musr' is not available in this environment. Run `python3 -m lm_eval --tasks list` to inspect installed task names.",
       "model_id": "mistral:7b-instruct",
       "observed_at": "2026-03-05T20:36:28"
+    },
+    {
+      "backend_id": "ollama_completions_proxied",
+      "test_id": "boolq",
+      "task_name": "boolq",
+      "state": "blocked",
+      "note": "2026-03-06:14:37:15 WARNING  [config.evaluate_config:281] --limit SHOULD ONLY BE USED FOR TESTING. REAL METRICS SHOULD NOT BE COMPUTED USING LIMIT.",
+      "model_id": "qwen2.5-coder:32b",
+      "observed_at": "2026-03-06T14:38:03"
     }
   ],
   "task_runtime_notes": [
@@ -173,7 +188,7 @@
       "test_id": "mmmlu",
       "runtime_class": "very_slow_group",
       "observed_at": "2026-03-05T20:45:00",
-      "note": "Full MMMLU group expansion is too slow for quick certification runs. Use a representative subject for backend certification and reserve the full grouped task for dedicated benchmark runs."
+      "note": "Full MMMLU group expansion is too slow for quick certification runs. Expect roughly 20 to 30 minutes before the first real results or first failures. Use a representative subject for backend certification and reserve the full grouped task for dedicated benchmark runs."
     },
     {
       "test_id": "gpqa_diamond",

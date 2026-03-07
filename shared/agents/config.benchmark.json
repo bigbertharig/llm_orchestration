@@ -1,0 +1,121 @@
+{
+  "_generated_by": "setup.py",
+  "_generated_at": "2026-02-11T13:00:43.703028",
+  "_discovery_mode": "standard",
+  "_hardware": {
+    "hostname": "bryan-System-Product-Name",
+    "gpu_count": 5
+  },
+  "shared_path": "../",
+  "permissions_path": "permissions/",
+  "ollama_host": "http://localhost:11434",
+  "brain_keep_alive": "30m",
+  "worker_keep_alive": "30m",
+  "brain_context_tokens": 32768,
+  "worker_context_tokens": 8192,
+  "review_lap_models": {
+    "extractor": {
+      "preferred": "qwen2.5:7b",
+      "fallback": "qwen2.5-coder:14b"
+    },
+    "verifier": {
+      "preferred": "qwen2.5-coder:14b",
+      "fallback": "qwen2.5:7b"
+    },
+    "adjudicator": {
+      "preferred": "qwen2.5-coder:14b",
+      "fallback": "qwen2.5:7b"
+    }
+  },
+  "brain": {
+    "name": "brain",
+    "model": "qwen2.5:32b",
+    "gpus": [
+      0
+    ]
+  },
+  "gpus": [
+    {
+      "name": "gpu-1",
+      "id": 1,
+      "vram_mb": 6144,
+      "model": "qwen2.5:7b",
+      "port": 11435,
+      "permissions": "worker.json"
+    },
+    {
+      "name": "gpu-2",
+      "id": 2,
+      "vram_mb": 6144,
+      "model": "qwen2.5:7b",
+      "port": 11436,
+      "permissions": "worker.json"
+    },
+    {
+      "name": "gpu-3",
+      "id": 3,
+      "vram_mb": 6144,
+      "model": "qwen2.5:7b",
+      "port": 11437,
+      "permissions": "worker.json"
+    },
+    {
+      "name": "gpu-4",
+      "id": 4,
+      "vram_mb": 6144,
+      "model": "qwen2.5:7b",
+      "port": 11438,
+      "permissions": "worker.json"
+    },
+    {
+      "name": "gpu-5",
+      "id": 5,
+      "vram_mb": 6144,
+      "model": "qwen2.5:7b",
+      "port": 11439,
+      "permissions": "worker.json"
+    }
+  ],
+  "worker_mode": "cold",
+  "initial_hot_workers": 0,
+  "max_hot_workers": 5,
+  "timeouts": {
+    "poll_interval_seconds": 5,
+    "brain_think_seconds": 120,
+    "worker_task_seconds": 0
+  },
+  "resource_limits": {
+    "max_temp_c": 100,
+    "gpu_temp_warning_c": 88,
+    "gpu_temp_critical_c": 93,
+    "cpu_temp_warning_c": 85,
+    "cpu_temp_critical_c": 99,
+    "max_vram_percent": 95,
+    "max_power_w": 140
+  },
+  "retry_policy": {
+    "max_attempts": 3
+  },
+  "thermal_pause": {
+    "initial_seconds": 30,
+    "max_seconds": 300,
+    "backoff_factor": 1.8,
+    "resume_margin_c": 4
+  },
+  "thermal_recovery": {
+    "cpu_overheat_trigger_seconds": 300,
+    "targeted_reset_interval_seconds": 60,
+    "max_targeted_resets_per_incident": 5,
+    "full_reset_cooldown_seconds": 300,
+    "enable_full_reset_escalation": true,
+    "same_gpu_reset_backoff_seconds": 120
+  },
+  "cpu_agent": {
+    "resource_limits": {
+      "cpu_temp_warning_c": 85,
+      "cpu_temp_critical_c": 95
+    }
+  },
+  "auto_default_enabled": false,
+  "auto_default_idle_seconds": 999999
+}
