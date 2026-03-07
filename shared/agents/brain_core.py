@@ -210,7 +210,9 @@ class BrainCoreMixin:
             "last_any_llm_demand_at": self.last_any_llm_demand_at.isoformat(),
             "last_split_llm_demand_at": self.last_split_llm_demand_at.isoformat(),
             "incidents": self.incidents,
-            "gpu_missing_escalations": self.gpu_missing_escalations
+            "gpu_missing_escalations": self.gpu_missing_escalations,
+            "brain_split_failures": getattr(self, "brain_split_failures", {}),
+            "brain_quarantined_pairs": getattr(self, "brain_quarantined_pairs", {}),
         }
         with open(self.state_file, 'w') as f:
             json.dump(state, f, indent=2)
@@ -218,6 +220,19 @@ class BrainCoreMixin:
     def _write_brain_heartbeat(self):
         """Publish brain heartbeat for dashboard/status consumers."""
         try:
+            now_ts = time.time()
+            quarantined_pairs = getattr(self, "brain_quarantined_pairs", {}) or {}
+            active_quarantines = {}
+            for group_id, info in quarantined_pairs.items():
+                until = float(info.get("until", 0) or 0)
+                if until <= now_ts:
+                    continue
+                remaining = max(0, int(until - now_ts))
+                active_quarantines[group_id] = {
+                    "remaining_seconds": remaining,
+                    "failure_count": int(info.get("failure_count", 0) or 0),
+                    "reason": info.get("reason", ""),
+                }
             hb = {
                 "worker_type": "brain",
                 "name": "brain",
@@ -227,6 +242,11 @@ class BrainCoreMixin:
                 "brain_gpus": self.gpus,
                 "active_batches": len(self.active_batches),
                 "brain_pids": {"pid": os.getpid()},
+                "split_quarantine": {
+                    "active_pair_count": len(active_quarantines),
+                    "pairs": active_quarantines,
+                    "tracked_failure_groups": len(getattr(self, "brain_split_failures", {}) or {}),
+                },
             }
             with open(self.brain_heartbeat_file, "w", encoding="utf-8") as f:
                 json.dump(hb, f, indent=2)

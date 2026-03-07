@@ -196,6 +196,8 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
         self.split_wedge_counts: Dict[str, int] = {}
         self.split_wedge_last_reclaim_at: Dict[str, datetime] = {}
         self.split_wedge_reclaims_this_hour: Dict[str, List[datetime]] = {}
+        self.brain_split_failures: Dict[str, List[Dict[str, Any]]] = {}
+        self.brain_quarantined_pairs: Dict[str, Dict[str, Any]] = {}
 
         # =============================================================================
         # Thermal Recovery Controller State
