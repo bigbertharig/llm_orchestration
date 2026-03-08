@@ -12,8 +12,8 @@ for arg in "$@"; do
 done
 
 if [[ "$1" == "--new" || "$2" == "--new" ]]; then
-    lxterminal --title="Worker (qwen2.5-coder:7b)" -e "ssh -t gpu 'OLLAMA_HOST=http://localhost:$PORT ollama run qwen2.5-coder:7b'" &
+    lxterminal --title="Worker (qwen2.5-coder:7b)" -e "ssh -t gpu 'python3 /home/bryan/llm_orchestration/scripts/chat_runtime.py --port $PORT --model qwen2.5-coder:7b'" &
     disown
 else
-    ssh -t gpu "OLLAMA_HOST=http://localhost:$PORT ollama run qwen2.5-coder:7b"
+    ssh -t gpu "python3 /home/bryan/llm_orchestration/scripts/chat_runtime.py --port $PORT --model qwen2.5-coder:7b"
 fi

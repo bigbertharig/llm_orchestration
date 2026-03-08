@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Agent Monitor Dashboard
-Shows GPU status, Ollama models, and task queue.
+Shows GPU status, runtime models, and task queue.
 
 Usage:
     python agent-monitor.py           # Live dashboard (updates every 2s)
@@ -39,39 +39,32 @@ def get_gpu_stats():
     except Exception as e:
         return []
 
-def get_ollama_status():
-    """Get running Ollama models."""
+def get_runtime_status():
+    """Get currently loaded llama runtime models."""
     try:
-        result = subprocess.run(['ollama', 'ps'], capture_output=True, text=True, timeout=5)
-        lines = result.stdout.strip().split('\n')
+        result = subprocess.run(
+            ["curl", "-sS", "http://localhost:11434/v1/models"],
+            capture_output=True, text=True, timeout=5,
+        )
         models = []
-        if len(lines) > 1:  # Has header + data
-            for line in lines[1:]:
-                parts = line.split()
-                if len(parts) >= 4:
-                    models.append({
-                        'name': parts[0],
-                        'id': parts[1],
-                        'size': parts[2] + ' ' + parts[3] if len(parts) > 3 else parts[2],
-                    })
+        payload = json.loads(result.stdout or "{}")
+        for item in payload.get("data", []) if isinstance(payload, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            model_id = str(item.get("id") or "").strip()
+            if model_id:
+                models.append({
+                    'name': model_id,
+                    'id': model_id,
+                    'size': 'loaded',
+                })
         return models
-    except Exception as e:
+    except Exception:
         return []
 
-def get_ollama_models():
-    """Get available Ollama models."""
-    try:
-        result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, timeout=5)
-        lines = result.stdout.strip().split('\n')
-        models = []
-        if len(lines) > 1:
-            for line in lines[1:]:
-                parts = line.split()
-                if parts:
-                    models.append(parts[0])
-        return models
-    except:
-        return []
+def get_runtime_models():
+    """Get runtime models visible on the default port."""
+    return [item['name'] for item in get_runtime_status()]
 
 def get_task_queue():
     """Read task queue from file if exists."""
@@ -111,9 +104,9 @@ def print_dashboard(gpus, running_models, available_models, tasks):
               f"Mem: {gpu['mem_used']:4d}/{gpu['mem_total']}MB │ "
               f"{gpu['temp']:2d}°C │ {color}{status}{reset} ║")
 
-    # Ollama Section
+    # Runtime Section
     print("╟──────────────────────────────────────────────────────────────────╢")
-    print("║ Ollama Models                                                    ║")
+    print("║ Runtime Models                                                   ║")
     print("╟──────────────────────────────────────────────────────────────────╢")
     if running_models:
         for m in running_models:
@@ -147,8 +140,8 @@ def main():
     try:
         while True:
             gpus = get_gpu_stats()
-            running = get_ollama_status()
-            available = get_ollama_models()
+            running = get_runtime_status()
+            available = get_runtime_models()
             tasks = get_task_queue()
 
             print_dashboard(gpus, running, available, tasks)

@@ -197,8 +197,8 @@ def clear_active_batch(batch_id: str = None):
         json.dump(state, f, indent=2)
 
 
-def unload_worker_models(ports: list = None):
-    """Unload models from worker Ollama instances (not the brain)."""
+def unload_worker_models(ports: list = None, runtime_backend: str = "llama"):
+    """Unload models from worker runtimes (not the brain)."""
     print("Unloading worker models...")
 
     if ports is None:
@@ -214,20 +214,11 @@ def unload_worker_models(ports: list = None):
 
     for port in ports:
         try:
-            result = subprocess.run(
-                ["curl", "-s", f"http://localhost:{port}/api/ps"],
-                capture_output=True, text=True, timeout=5
+            subprocess.run(
+                ["bash", "-lc", f"pid=$(ss -ltnp 2>/dev/null | grep ':{port}\\b' | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | head -n1); [ -n \"$pid\" ] && kill \"$pid\" || true"],
+                capture_output=True,
+                timeout=10,
             )
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                for model in data.get("models", []):
-                    model_name = model.get("name", "")
-                    print(f"  Unloading {model_name} from port {port}...")
-                    subprocess.run(
-                        ["curl", "-s", f"http://localhost:{port}/api/generate",
-                         "-d", json.dumps({"model": model_name, "keep_alive": 0})],
-                        capture_output=True, timeout=10
-                    )
         except Exception:
             pass  # Port not responding, skip
 
@@ -287,6 +278,7 @@ def main():
     )
     args = parser.parse_args()
     config = load_config()
+    runtime_backend = str(config.get("runtime_backend", "llama"))
 
     print("=" * 50)
     print("Killing plan...")
@@ -313,7 +305,7 @@ def main():
 
     # Step 5: Unload worker models (brain stays loaded)
     if not args.keep_models:
-        unload_worker_models()
+        unload_worker_models(runtime_backend=runtime_backend)
 
     # Step 6: Restore default resting state (brain + configured warm workers) unless disabled.
     # A full clean reset handles its own restart/default path, so do not enqueue

@@ -26,7 +26,7 @@ PY
 )"
 fi
 
-REMOTE_CMD="ollama run ${MODEL}"
+REMOTE_CMD="python3 /home/bryan/llm_orchestration/scripts/chat_runtime.py --port 11434 --model ${MODEL}"
 INIT_FILE="${BRAIN_CHAT_INIT_FILE:-/home/bryan/Desktop/brain_chat_init.txt}"
 NO_INIT=0
 

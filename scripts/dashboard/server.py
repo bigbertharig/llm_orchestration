@@ -410,9 +410,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 f"failed_meta_removed={int(artifacts.get('failed_meta_removed', 0))}, "
                 f"system_meta_removed={int(system_meta.get('tasks_removed', 0))}, "
                 f"brain_load_requests_cleared={int(system_meta.get('brain_load_llm_requests_cleared', 0))}, "
-                f"split_ports_killed={int(remote_runtime.get('split_port_ollama_killed', 0))}, "
-                f"orphan_ollama_killed={int(remote_runtime.get('orphan_ollama_killed', 0))}, "
-                f"orphan_runners_killed={int(remote_runtime.get('orphan_ollama_runner_killed', 0))}"
+                f"split_ports_reclaimed={int(remote_runtime.get('split_ports_reclaimed', 0))}, "
+                f"worker_runtime_containers_removed={int(remote_runtime.get('worker_runtime_containers_removed', 0))}, "
+                f"split_runtime_containers_removed={int(remote_runtime.get('split_runtime_containers_removed', 0))}, "
+                f"runtime_host_processes_killed={int(remote_runtime.get('runtime_host_processes_killed', 0))}"
             )
         else:
             msg = "Cleanup stale complete"
@@ -428,19 +429,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "stderr": "" if ok else f"cleanup_errors={errors}",
         }
 
-    def _clear_ollama(self) -> dict[str, Any]:
+    def _clear_runtime(self) -> dict[str, Any]:
         scripts_dir = Path(__file__).resolve().parent.parent
-        script = scripts_dir / "clear_ollama.py"
+        script = scripts_dir / "clear_runtime.py"
         cmd = f"python3 {shlex.quote(str(script))} --json"
         out = run_shell(cmd, timeout_s=180)
         if out.get("ok"):
             try:
                 parsed = json.loads(str(out.get("stdout") or "").strip().splitlines()[-1])
                 if isinstance(parsed, dict):
-                    out["clear_ollama"] = parsed
+                    out["clear_runtime"] = parsed
             except Exception:
                 pass
-        out["message"] = "Cleared worker/split Ollama runtimes" if out.get("ok") else "Failed to clear worker/split Ollama runtimes"
+        out["message"] = "Cleared worker/split runtimes" if out.get("ok") else "Failed to clear worker/split runtimes"
         return out
 
     def _cleanup_stale_processing_heartbeats(self) -> dict[str, Any]:
@@ -819,17 +820,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         Aggressive behavior (allow_aggressive=True):
         - kill listeners on split ports 11440/11441
-        - kill orphan `ollama serve` / `ollama runner` processes (PPID 1),
-          excluding system /usr/local/bin/ollama serve
+        - kill orphan legacy runtime server/worker processes left behind by old runtimes
         - clear split reservation/global load lock signal files on shared drive
         """
         if not allow_aggressive:
             return {
                 "skipped": True,
                 "reason": "active_batches_present",
-                "split_port_ollama_killed": 0,
-                "orphan_ollama_killed": 0,
-                "orphan_ollama_runner_killed": 0,
+                "split_ports_reclaimed": 0,
+                "worker_runtime_containers_removed": 0,
+                "split_runtime_containers_removed": 0,
+                "runtime_host_processes_killed": 0,
                 "split_signal_files_removed": 0,
                 "errors": [],
             }
@@ -837,8 +838,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         script = r"""
 set -e
 split_killed=0
-orphan_killed=0
-orphan_runner_killed=0
+worker_containers_removed=0
+split_containers_removed=0
+runtime_host_processes_killed=0
 signals_removed=0
 
 for p in 11440 11441; do
@@ -849,19 +851,20 @@ for p in 11440 11441; do
   fi
 done
 
-# Reap orphan ollama runner processes left behind by crashed/stopped runtimes.
-for pid in $(ps -eo pid=,ppid=,args= | awk '$2==1 && $0 ~ /ollama runner/ {print $1}'); do
+# Reap orphan llama-server host processes left behind by crashed/stopped GPU agents.
+for pid in $(ps -eo pid=,ppid=,args= | awk '$2==1 && $0 ~ /llama-server/ {print $1}'); do
   [ -n "$pid" ] || continue
   kill "$pid" 2>/dev/null || true
-  orphan_runner_killed=$((orphan_runner_killed + 1))
+  runtime_host_processes_killed=$((runtime_host_processes_killed + 1))
 done
 
-# Reap orphan ollama serve processes left behind by crashed/stopped GPU agents.
-# Keep the system brain ollama service (/usr/local/bin/ollama serve).
-for pid in $(ps -eo pid=,ppid=,args= | awk '$2==1 && $0 ~ /ollama serve/ && $0 !~ /\/usr\/local\/bin\/ollama serve/ {print $1}'); do
-  [ -n "$pid" ] || continue
-  kill "$pid" 2>/dev/null || true
-  orphan_killed=$((orphan_killed + 1))
+for name in $(docker ps -a --format '{{.Names}}' | grep '^llama-worker-gpu-' || true); do
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  worker_containers_removed=$((worker_containers_removed + 1))
+done
+for name in $(docker ps -a --format '{{.Names}}' | grep '^llama-split-' || true); do
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  split_containers_removed=$((split_containers_removed + 1))
 done
 
 for f in /mnt/shared/signals/model_load.global.json /mnt/shared/signals/model_load.global.json.lock; do
@@ -872,15 +875,16 @@ for f in /mnt/shared/signals/split_llm/pair_*.json /mnt/shared/signals/split_llm
   rm -f "$f" && signals_removed=$((signals_removed + 1))
 done
 
-printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_runner_killed":%s,"split_signal_files_removed":%s}\n' \
-  "$split_killed" "$orphan_killed" "$orphan_runner_killed" "$signals_removed"
+printf '{"split_ports_reclaimed":%s,"worker_runtime_containers_removed":%s,"split_runtime_containers_removed":%s,"runtime_host_processes_killed":%s,"split_signal_files_removed":%s}\n' \
+  "$split_killed" "$worker_containers_removed" "$split_containers_removed" "$runtime_host_processes_killed" "$signals_removed"
 """
         out = self._gpu_ssh(script, timeout_s=60)
         errors: list[str] = []
         parsed: dict[str, Any] = {
-            "split_port_ollama_killed": 0,
-            "orphan_ollama_killed": 0,
-            "orphan_ollama_runner_killed": 0,
+            "split_ports_reclaimed": 0,
+            "worker_runtime_containers_removed": 0,
+            "split_runtime_containers_removed": 0,
+            "runtime_host_processes_killed": 0,
             "split_signal_files_removed": 0,
         }
         if not out.get("ok"):
@@ -1171,8 +1175,8 @@ printf '{"split_port_ollama_killed":%s,"orphan_ollama_killed":%s,"orphan_ollama_
         if parsed.path == "/api/control/cleanup_stale":
             self._send_json(self._cleanup_stale())
             return
-        if parsed.path == "/api/control/clear_ollama":
-            self._send_json(self._clear_ollama())
+        if parsed.path == "/api/control/clear_runtime":
+            self._send_json(self._clear_runtime())
             return
         if parsed.path == "/api/control/return_default":
             self._send_json(self._return_default())

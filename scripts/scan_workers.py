@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preflight scan worker heartbeats against live Ollama port state.
+"""Preflight scan worker heartbeats against live llama runtime port state.
 
 If requested, this can trigger a return-to-default reset and wait for the rig
 to stabilize before allowing a plan submission to continue.
@@ -80,15 +80,21 @@ def _load_heartbeat(gpu_id: int) -> tuple[dict | None, str | None, float | None]
         return None, str(exc), None
 
 
-def _fetch_live_port_models(ports: list[int], timeout_s: int) -> tuple[dict[int, dict], str | None]:
+def _fetch_live_port_models(
+    ports: list[int],
+    timeout_s: int,
+    runtime_backend: str,
+) -> tuple[dict[int, dict], str | None]:
     port_json = json.dumps([int(p) for p in ports])
+    backend_json = json.dumps(str(runtime_backend or "llama"))
     remote_script = (
         "python3 - <<'PY'\n"
         "import json, subprocess\n"
         f"ports = {port_json}\n"
+        f"runtime_backend = {backend_json}\n"
         "out = {}\n"
         "for port in ports:\n"
-        "    url = f'http://localhost:{port}/api/ps'\n"
+        "    url = f'http://localhost:{port}/v1/models'\n"
         "    try:\n"
         "        proc = subprocess.run(['curl', '-sS', '--max-time', '2', url], capture_output=True, text=True, timeout=5)\n"
         "    except Exception as exc:\n"
@@ -104,9 +110,9 @@ def _fetch_live_port_models(ports: list[int], timeout_s: int) -> tuple[dict[int,
         "        out[str(port)] = {'ok': False, 'error': f'invalid_json:{exc}', 'models': [], 'raw': raw[:400]}\n"
         "        continue\n"
         "    models = []\n"
-        "    for item in (data.get('models') or []):\n"
-        "        if isinstance(item, dict) and item.get('name'):\n"
-        "            models.append(str(item.get('name')))\n"
+        "    for item in (data.get('data') or []):\n"
+        "        if isinstance(item, dict) and item.get('id'):\n"
+        "            models.append(str(item.get('id')))\n"
         "    out[str(port)] = {'ok': True, 'error': None, 'models': models}\n"
         "print(json.dumps(out))\n"
         "PY\n"
@@ -151,7 +157,13 @@ def _processing_task_count() -> int:
 
 def _analyze_once(specs: list[dict], stale_seconds: int, remote_timeout: int) -> dict:
     now = time.time()
-    live_ports, remote_error = _fetch_live_port_models([spec["port"] for spec in specs], timeout_s=remote_timeout)
+    config = _load_json(CONFIG_PATH)
+    runtime_backend = str(config.get("runtime_backend", "llama"))
+    live_ports, remote_error = _fetch_live_port_models(
+        [spec["port"] for spec in specs],
+        timeout_s=remote_timeout,
+        runtime_backend=runtime_backend,
+    )
     issues: list[dict] = []
     workers: list[dict] = []
 

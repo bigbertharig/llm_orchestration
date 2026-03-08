@@ -12,7 +12,12 @@ from pathlib import Path
 
 LANES = ("queue", "processing", "complete", "failed")
 PROC_HINTS = (
-    "ollama",
+    "llama",
+    "llama-server",
+    "llama-brain",
+    "llama-worker",
+    "llama-split",
+    "docker run",
     "brain.py",
     "gpu.py",
     "worker.py",
@@ -141,12 +146,33 @@ def _gpu_snapshot() -> dict:
     return {"gpus": gpus}
 
 
-def _ollama_snapshot() -> dict:
-    ok, out = _run(["ollama", "ps"], timeout=6.0)
-    if not ok:
-        return {"error": out}
-    lines = [ln.rstrip() for ln in out.splitlines() if ln.strip()]
-    return {"lines": lines[:80]}
+def _runtime_snapshot() -> dict:
+    snapshot: dict = {}
+    ok, out = _run(
+        [
+            "docker",
+            "ps",
+            "--format",
+            "{{.Names}}\t{{.Status}}\t{{.Ports}}",
+        ],
+        timeout=6.0,
+    )
+    if ok:
+        rows = []
+        for line in out.splitlines():
+            parts = line.split("\t")
+            rows.append(
+                {
+                    "name": parts[0] if len(parts) > 0 else "",
+                    "status": parts[1] if len(parts) > 1 else "",
+                    "ports": parts[2] if len(parts) > 2 else "",
+                }
+            )
+        snapshot["docker"] = rows
+    else:
+        snapshot["docker_error"] = out
+
+    return snapshot
 
 
 def _cpu_temp_snapshot() -> dict:
@@ -196,7 +222,7 @@ def main() -> int:
                 "task_counts": _task_counts(shared_path, args.batch_id),
                 "processes": _process_snapshot(),
                 "gpu": _gpu_snapshot(),
-                "ollama": _ollama_snapshot(),
+                "runtime": _runtime_snapshot(),
                 "cpu_temps": _cpu_temp_snapshot(),
             }
         )
