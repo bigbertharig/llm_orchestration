@@ -1,7 +1,10 @@
-"""GPU agent Ollama management mixin.
+"""GPU agent legacy runtime management mixin.
 
-Extracted from gpu.py to isolate Ollama server lifecycle, model loading/unloading,
-and global model load lock coordination.
+Extracted from gpu.py to isolate legacy runtime server lifecycle, model
+loading/unloading, and global model load lock coordination.
+
+NOTE: This mixin is retained as a fallback. The primary runtime path is
+GPULlamaMixin in gpu_llama.py.
 """
 
 import json
@@ -28,23 +31,22 @@ from gpu_constants import (
 )
 
 
-class GPUOllamaMixin:
-    """Mixin providing Ollama server and model management methods."""
+class GPURuntimeMixin:
+    """Mixin providing legacy runtime server and model management methods."""
 
-    def start_ollama(self):
-        """Start Ollama instance on this GPU's dedicated port."""
+    def start_runtime_legacy(self):
+        """Start legacy runtime instance on this GPU's dedicated port."""
         if not self.port:
-            self.logger.info("No port configured - script-only GPU, skipping Ollama")
+            self.logger.info("No port configured - script-only GPU, skipping legacy runtime")
             return
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
-        env["OLLAMA_HOST"] = f"0.0.0.0:{self.port}"
 
-        self.logger.info(f"Starting Ollama on GPU {self.gpu_id}, port {self.port}")
+        self.logger.info(f"Starting legacy runtime on GPU {self.gpu_id}, port {self.port}")
 
-        self.ollama_process = subprocess.Popen(
-            ["ollama", "serve"],
+        self.runtime_process = subprocess.Popen(
+            ["llama-server", "--host", "0.0.0.0", "--port", str(self.port)],
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
@@ -52,27 +54,27 @@ class GPUOllamaMixin:
 
         for i in range(30):
             try:
-                requests.get(f"http://localhost:{self.port}/api/tags", timeout=1)
-                self.logger.info("Ollama server ready")
+                requests.get(f"http://localhost:{self.port}/v1/models", timeout=1)
+                self.logger.info("Legacy runtime server ready")
                 return
             except Exception:
                 time.sleep(1)
 
-        raise RuntimeError("Ollama failed to start")
+        raise RuntimeError("Legacy runtime failed to start")
 
-    def stop_ollama(self):
-        """Stop the Ollama instance."""
-        if self.ollama_process:
-            self.ollama_process.terminate()
+    def stop_runtime_legacy(self):
+        """Stop the legacy runtime instance."""
+        if self.runtime_process:
+            self.runtime_process.terminate()
             try:
-                self.ollama_process.wait(timeout=10)
+                self.runtime_process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self.ollama_process.kill()
-            self.ollama_process = None
-            self.logger.info("Ollama stopped")
+                self.runtime_process.kill()
+            self.runtime_process = None
+            self.logger.info("Legacy runtime stopped")
 
-    def check_ollama_health(self) -> Dict[str, Any]:
-        """Check Ollama instance health via /api/tags endpoint.
+    def check_runtime_health_legacy(self) -> Dict[str, Any]:
+        """Check legacy runtime instance health via /v1/models endpoint.
 
         Returns dict with health status and loaded models. Tracks consecutive
         failures and triggers restart after threshold. Implements circuit breaker
@@ -81,19 +83,19 @@ class GPUOllamaMixin:
         health = {
             "healthy": False,
             "loaded_models": [],
-            "consecutive_failures": self.ollama_consecutive_failures,
+            "consecutive_failures": self.runtime_consecutive_failures,
             "response_ms": None,
         }
 
         if not self.port:
-            health["healthy"] = True  # Script-only GPU, no Ollama expected
-            health["note"] = "no_ollama_configured"
+            health["healthy"] = True  # Script-only GPU, no runtime expected
+            health["note"] = "no_runtime_configured"
             return health
 
         try:
             start = time.time()
             resp = requests.get(
-                f"http://localhost:{self.port}/api/tags",
+                f"http://localhost:{self.port}/v1/models",
                 timeout=5
             )
             elapsed_ms = int((time.time() - start) * 1000)
@@ -101,36 +103,36 @@ class GPUOllamaMixin:
 
             if resp.status_code == 200:
                 data = resp.json()
-                models = data.get("models", [])
-                health["loaded_models"] = [m.get("name", "") for m in models]
+                models = data.get("data", [])
+                health["loaded_models"] = [m.get("id", "") for m in models if isinstance(m, dict)]
                 health["healthy"] = True
-                self.ollama_consecutive_failures = 0
-                self.ollama_healthy = True
+                self.runtime_consecutive_failures = 0
+                self.runtime_healthy = True
             else:
-                self.ollama_consecutive_failures += 1
+                self.runtime_consecutive_failures += 1
                 self.logger.warning(
-                    f"Ollama health check returned {resp.status_code} "
-                    f"(failure {self.ollama_consecutive_failures})")
+                    f"Runtime health check returned {resp.status_code} "
+                    f"(failure {self.runtime_consecutive_failures})")
 
         except Exception as e:
-            self.ollama_consecutive_failures += 1
+            self.runtime_consecutive_failures += 1
             self.logger.warning(
-                f"Ollama health check failed: {e} "
-                f"(failure {self.ollama_consecutive_failures})")
+                f"Runtime health check failed: {e} "
+                f"(failure {self.runtime_consecutive_failures})")
 
-        health["consecutive_failures"] = self.ollama_consecutive_failures
+        health["consecutive_failures"] = self.runtime_consecutive_failures
 
         # Auto-restart after threshold
-        if self.ollama_consecutive_failures >= self.ollama_health_threshold:
+        if self.runtime_consecutive_failures >= self.runtime_health_threshold:
             self.logger.error(
-                f"Ollama failed {self.ollama_consecutive_failures} consecutive health checks, "
+                f"Runtime failed {self.runtime_consecutive_failures} consecutive health checks, "
                 f"attempting restart")
             try:
-                self.stop_ollama()
+                self.stop_runtime_legacy()
                 time.sleep(2)
-                self.start_ollama()
-                self.ollama_consecutive_failures = 0
-                self.ollama_healthy = True
+                self.start_runtime_legacy()
+                self.runtime_consecutive_failures = 0
+                self.runtime_healthy = True
                 # Model was lost in restart - reset to cold state
                 self.model_loaded = False
                 self.loaded_model = None
@@ -138,26 +140,26 @@ class GPUOllamaMixin:
                 self.runtime_placement = "single_gpu"
                 self.runtime_group_id = None
                 self.runtime_port = self.port
-                self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
+                self.runtime_api_base = f"http://localhost:{self.port}" if self.port else None
                 self._set_runtime_state(
                     RUNTIME_STATE_COLD,
-                    phase="ollama_restart_recovery",
+                    phase="runtime_restart_recovery",
                 )
-                self.logger.info("Ollama restarted successfully after health check failures")
+                self.logger.info("Runtime restarted successfully after health check failures")
             except Exception as e:
-                self.logger.error(f"Ollama restart failed: {e}")
+                self.logger.error(f"Runtime restart failed: {e}")
 
         # Circuit breaker
-        if self.ollama_consecutive_failures >= self.ollama_circuit_breaker:
-            self.ollama_healthy = False
+        if self.runtime_consecutive_failures >= self.runtime_circuit_breaker:
+            self.runtime_healthy = False
             self.logger.error(
-                f"Circuit breaker: Ollama unhealthy after {self.ollama_consecutive_failures} "
+                f"Circuit breaker: runtime unhealthy after {self.runtime_consecutive_failures} "
                 f"failures, will not claim LLM tasks")
 
         return health
 
     def load_model(self, model_id: Optional[str] = None, task_id: Optional[str] = None):
-        """Load an LLM model into VRAM on this worker's dedicated Ollama runtime."""
+        """Load an LLM model into VRAM on this worker's dedicated runtime."""
         # Preflight: check runtime state allows load
         can_load, preflight_reason = self._can_accept_load_task()
         if not can_load:
@@ -170,7 +172,7 @@ class GPUOllamaMixin:
             return
 
         if not self.api_url:
-            self.logger.warning("Cannot load model - no Ollama port configured")
+            self.logger.warning("Cannot load model - no runtime port configured")
             return
 
         target_model = str(model_id or self.model or "").strip()
@@ -276,7 +278,7 @@ class GPUOllamaMixin:
             if self.runtime_placement != "split_gpu":
                 self.runtime_group_id = None
             self.runtime_port = self.port
-            self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
+            self.runtime_api_base = f"http://localhost:{self.port}" if self.port else None
             # Transition to ready state
             self._set_runtime_state(
                 RUNTIME_STATE_READY_SINGLE,
@@ -402,6 +404,26 @@ class GPUOllamaMixin:
             json.dump(payload, f, indent=2)
         os.replace(tmp_path, self.model_load_owner_path)
 
+    def _create_global_model_load_owner(self, payload: Dict[str, Any]) -> bool:
+        try:
+            fd = os.open(
+                str(self.model_load_owner_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+            except Exception:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+                raise
+            return True
+        except FileExistsError:
+            return False
+
     def _read_global_model_load_owner(self) -> Optional[Dict[str, Any]]:
         try:
             if not self.model_load_owner_path.exists():
@@ -436,35 +458,60 @@ class GPUOllamaMixin:
         except Exception:
             return True
 
+    def _reclaim_stale_global_model_load_owner(self, owner: Optional[Dict[str, Any]]) -> bool:
+        if not owner or not self._global_owner_is_stale(owner):
+            return False
+
+        current = self._read_global_model_load_owner()
+        if not current or not self._global_owner_is_stale(current):
+            return False
+
+        expected_worker = str(owner.get("worker", "")).strip()
+        expected_lease_id = str(owner.get("lease_id", "")).strip()
+        expected_pid = owner.get("pid")
+        current_worker = str(current.get("worker", "")).strip()
+        current_lease_id = str(current.get("lease_id", "")).strip()
+        current_pid = current.get("pid")
+
+        if (
+            current_worker != expected_worker
+            or current_lease_id != expected_lease_id
+            or current_pid != expected_pid
+        ):
+            return False
+
+        try:
+            self.model_load_owner_path.unlink(missing_ok=True)
+        except Exception:
+            return False
+
+        self.logger.warning(
+            "GLOBAL_LOAD_LOCK_STALE_OWNER_RECLAIMED "
+            f"worker={self.name} stale_owner={current or {}}"
+        )
+        return True
+
     def _try_acquire_global_model_load_owner(self, phase: str) -> bool:
         owner_payload = self._global_model_load_owner_payload(phase=phase)
-        try:
-            fd = os.open(
-                str(self.model_load_owner_path),
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                0o644,
-            )
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(owner_payload, f, indent=2)
-            except Exception:
-                try:
-                    os.close(fd)
-                except Exception:
-                    pass
-                raise
+        if self._create_global_model_load_owner(owner_payload):
             return True
-        except FileExistsError:
-            owner = self._read_global_model_load_owner()
-            if self._global_owner_is_stale(owner):
-                self._report_global_load_owner_issue("stale_owner_takeover", owner)
-                self.logger.warning(
-                    "GLOBAL_LOAD_LOCK_STALE_OWNER_REPORTED "
-                    f"worker={self.name} stale_owner={owner or {}}"
-                )
-                return False
-            self._clear_global_load_owner_issue()
+
+        owner = self._read_global_model_load_owner()
+        if self._global_owner_is_stale(owner):
+            self._report_global_load_owner_issue("stale_owner_takeover", owner)
+            self.logger.warning(
+                "GLOBAL_LOAD_LOCK_STALE_OWNER_REPORTED "
+                f"worker={self.name} stale_owner={owner or {}}"
+            )
+            if self._reclaim_stale_global_model_load_owner(owner):
+                owner_payload = self._global_model_load_owner_payload(phase=phase)
+                if self._create_global_model_load_owner(owner_payload):
+                    self._clear_global_load_owner_issue()
+                    return True
             return False
+
+        self._clear_global_load_owner_issue()
+        return False
 
     def _global_model_load_owner_heartbeat_loop(self, stop_event: threading.Event, phase: str):
         while not stop_event.wait(GLOBAL_MODEL_LOAD_OWNER_HEARTBEAT_INTERVAL):
@@ -499,7 +546,7 @@ class GPUOllamaMixin:
 
     def _wait_for_model_ready(self, model_id: str, max_wait_seconds: int = 90) -> bool:
         """
-        Probe Ollama until model is actually ready to serve.
+        Probe runtime until model is actually ready to serve.
         Prevents immediate LLM task claims while model is still warming.
         """
         if not self.api_url:
@@ -538,25 +585,25 @@ class GPUOllamaMixin:
         return False
 
     def _wait_for_model_unloaded(self, model_id: str, max_wait_seconds: int = 30) -> bool:
-        """Poll Ollama until this model no longer appears as loaded."""
+        """Poll runtime until the worker runtime no longer responds as ready."""
         if not self.port:
             return True
 
-        ps_url = f"http://localhost:{self.port}/api/ps"
+        models_url = f"http://localhost:{self.port}/v1/models"
         deadline = time.time() + max_wait_seconds
         last_error = ""
 
         while time.time() < deadline:
             try:
-                r = requests.get(ps_url, timeout=5)
-                if r.status_code == 200:
-                    models = r.json().get("models", [])
-                    loaded_names = [m.get("name", "") for m in models]
-                    if model_id not in loaded_names:
-                        return True
-                else:
-                    last_error = f"status={r.status_code}"
+                r = requests.get(models_url, timeout=5)
+                if r.status_code != 200:
+                    return True
+                if str(self.loaded_model or "").strip() != str(model_id or "").strip():
+                    return True
+                last_error = "runtime still reports a loaded model"
             except Exception as e:
+                if isinstance(e, requests.exceptions.ConnectionError):
+                    return True
                 last_error = str(e)
             time.sleep(1)
 
@@ -635,7 +682,7 @@ class GPUOllamaMixin:
             self.runtime_placement = "single_gpu"
             self.runtime_group_id = None
             self.runtime_port = self.port
-            self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
+            self.runtime_api_base = f"http://localhost:{self.port}" if self.port else None
             self._set_runtime_state(
                 RUNTIME_STATE_COLD,
                 task_id=task_id,

@@ -26,8 +26,8 @@ def gpu(index, name="NVIDIA GTX 1060", vram_mb=6144):
     }
 
 
-# Helper to build fake Ollama status
-def ollama(models=None):
+# Helper to build fake runtime status
+def runtime(models=None):
     if models is None:
         models = []
     return {
@@ -48,14 +48,14 @@ class TestSuggestAssignment(unittest.TestCase):
     # --- 0 GPUs ---
 
     def test_zero_gpus_cpu_only_mode(self):
-        result = suggest_assignment([], ollama())
+        result = suggest_assignment([], runtime())
         self.assertEqual(result["_discovery_mode"], "cpu_only")
         self.assertEqual(result["brain"]["gpus"], [])
         self.assertEqual(result["gpus"], [])
 
     def test_zero_gpus_with_models(self):
         models = [model("qwen2.5:7b", 4400)]
-        result = suggest_assignment([], ollama(models))
+        result = suggest_assignment([], runtime(models))
         self.assertEqual(result["_discovery_mode"], "cpu_only")
         # No GPU = 0 VRAM = no model fits
         self.assertEqual(result["brain"]["model"], "")
@@ -65,7 +65,7 @@ class TestSuggestAssignment(unittest.TestCase):
     def test_one_gpu_single_mode(self):
         gpus = [gpu(0, "NVIDIA RTX 3080", 10240)]
         models = [model("qwen2.5:14b", 8200), model("qwen2.5:7b", 4400)]
-        result = suggest_assignment(gpus, ollama(models))
+        result = suggest_assignment(gpus, runtime(models))
 
         self.assertEqual(result["_discovery_mode"], "single_gpu")
         self.assertEqual(result["brain"]["gpus"], [0])
@@ -75,7 +75,7 @@ class TestSuggestAssignment(unittest.TestCase):
     def test_one_gpu_small_vram(self):
         gpus = [gpu(0, "NVIDIA GTX 1060", 6144)]
         models = [model("qwen2.5:14b", 8200), model("qwen2.5:7b", 4400)]
-        result = suggest_assignment(gpus, ollama(models))
+        result = suggest_assignment(gpus, runtime(models))
 
         # 14b doesn't fit (8200 > 6144*0.85=5222), 7b does
         self.assertEqual(result["brain"]["model"], "qwen2.5:7b")
@@ -85,7 +85,7 @@ class TestSuggestAssignment(unittest.TestCase):
     def test_two_gpus_minimal_mode(self):
         gpus = [gpu(0, "NVIDIA RTX 3080", 10240), gpu(1, "NVIDIA GTX 1060", 6144)]
         models = [model("qwen2.5:14b", 8200), model("qwen2.5:7b", 4400)]
-        result = suggest_assignment(gpus, ollama(models))
+        result = suggest_assignment(gpus, runtime(models))
 
         self.assertEqual(result["_discovery_mode"], "minimal")
         self.assertEqual(result["brain"]["gpus"], [0])  # Bigger GPU
@@ -97,7 +97,7 @@ class TestSuggestAssignment(unittest.TestCase):
     def test_two_identical_gpus(self):
         gpus = [gpu(0, "NVIDIA GTX 1060", 6144), gpu(1, "NVIDIA GTX 1060", 6144)]
         models = [model("qwen2.5:7b", 4400)]
-        result = suggest_assignment(gpus, ollama(models))
+        result = suggest_assignment(gpus, runtime(models))
 
         self.assertEqual(result["_discovery_mode"], "minimal")
         # Biggest (first by index since tied) becomes brain
@@ -113,7 +113,7 @@ class TestSuggestAssignment(unittest.TestCase):
             gpu(2, "NVIDIA GTX 1060", 6144),
         ]
         models = [model("qwen2.5:14b", 8200), model("qwen2.5:7b", 4400)]
-        result = suggest_assignment(gpus, ollama(models))
+        result = suggest_assignment(gpus, runtime(models))
 
         self.assertEqual(result["_discovery_mode"], "standard")
         # Single largest GPU for brain (no identical pair at max VRAM)
@@ -128,7 +128,7 @@ class TestSuggestAssignment(unittest.TestCase):
             gpu(2, "NVIDIA GTX 1060", 6144),
         ]
         models = [model("qwen2.5:7b", 4400)]
-        result = suggest_assignment(gpus, ollama(models))
+        result = suggest_assignment(gpus, runtime(models))
 
         self.assertEqual(result["_discovery_mode"], "standard")
         # First two identical top-VRAM GPUs paired for brain
@@ -141,7 +141,7 @@ class TestSuggestAssignment(unittest.TestCase):
     def test_five_identical_gpus(self):
         gpus = [gpu(i, "NVIDIA GTX 1060", 6144) for i in range(5)]
         models = [model("qwen2.5:14b", 8200), model("qwen2.5:7b", 4400)]
-        result = suggest_assignment(gpus, ollama(models))
+        result = suggest_assignment(gpus, runtime(models))
 
         self.assertEqual(result["_discovery_mode"], "standard")
         # Two paired for brain (identical top-VRAM)
@@ -157,7 +157,7 @@ class TestSuggestAssignment(unittest.TestCase):
             gpu(4, "NVIDIA GTX 1060", 6144),
         ]
         models = [model("qwen2.5:14b", 8200), model("qwen2.5:7b", 4400)]
-        result = suggest_assignment(gpus, ollama(models))
+        result = suggest_assignment(gpus, runtime(models))
 
         # Two RTX 3080s should be paired for brain
         self.assertEqual(sorted(result["brain"]["gpus"]), [0, 3])
@@ -170,7 +170,7 @@ class TestSuggestAssignment(unittest.TestCase):
     def test_eight_gpus(self):
         gpus = [gpu(i, "NVIDIA A100", 81920) for i in range(8)]
         models = [model("llama3:70b", 40000), model("llama3:8b", 4700)]
-        result = suggest_assignment(gpus, ollama(models))
+        result = suggest_assignment(gpus, runtime(models))
 
         self.assertEqual(result["_discovery_mode"], "standard")
         # Two paired for brain
@@ -180,11 +180,11 @@ class TestSuggestAssignment(unittest.TestCase):
 
     # --- Edge cases ---
 
-    def test_no_ollama(self):
+    def test_no_runtime(self):
         gpus = [gpu(0, "NVIDIA RTX 3080", 10240)]
-        no_ollama = {"running": False, "host": "http://localhost:11434",
-                     "available_models": [], "loaded_models": []}
-        result = suggest_assignment(gpus, no_ollama)
+        no_runtime = {"running": False, "host": "http://localhost:11434",
+                      "available_models": [], "loaded_models": []}
+        result = suggest_assignment(gpus, no_runtime)
 
         self.assertEqual(result["brain"]["model"], "")
         self.assertEqual(result["brain"]["gpus"], [0])
@@ -192,7 +192,7 @@ class TestSuggestAssignment(unittest.TestCase):
     def test_no_models_fit(self):
         gpus = [gpu(0, "NVIDIA GTX 750", 2048)]
         models = [model("qwen2.5:14b", 8200), model("qwen2.5:7b", 4400)]
-        result = suggest_assignment(gpus, ollama(models))
+        result = suggest_assignment(gpus, runtime(models))
 
         # Nothing fits in 2048*0.85=1740 MB
         self.assertEqual(result["brain"]["model"], "")
@@ -201,7 +201,7 @@ class TestSuggestAssignment(unittest.TestCase):
         gpus = [gpu(0, "NVIDIA RTX 3080", 10240), gpu(1, "NVIDIA GTX 1060", 6144)]
         models = [model("qwen2.5:14b", 8200), model("qwen2.5:7b", 4400)]
         prefs = {"brain_model": "qwen2.5:7b", "worker_model": "qwen2.5:7b", "worker_mode": "cold"}
-        result = suggest_assignment(gpus, ollama(models), prefs)
+        result = suggest_assignment(gpus, runtime(models), prefs)
 
         self.assertEqual(result["brain"]["model"], "qwen2.5:7b")
         self.assertEqual(result["gpus"][0]["model"], "qwen2.5:7b")
@@ -209,7 +209,7 @@ class TestSuggestAssignment(unittest.TestCase):
 
     def test_port_auto_assignment(self):
         gpus = [gpu(i) for i in range(5)]
-        result = suggest_assignment(gpus, ollama())
+        result = suggest_assignment(gpus, runtime())
 
         ports = [w["port"] for w in result["gpus"]]
         expected = [11435 + i for i in range(len(result["gpus"]))]
@@ -217,7 +217,7 @@ class TestSuggestAssignment(unittest.TestCase):
 
     def test_worker_names_match_gpu_index(self):
         gpus = [gpu(0, vram_mb=10240), gpu(2), gpu(5)]
-        result = suggest_assignment(gpus, ollama())
+        result = suggest_assignment(gpus, runtime())
 
         for w in result["gpus"]:
             self.assertEqual(w["name"], "gpu-%d" % w['id'])

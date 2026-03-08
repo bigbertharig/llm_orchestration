@@ -2,11 +2,11 @@
 """
 Shared hardware discovery module.
 
-Scans GPUs, Ollama, and system resources. Used by both setup.py (interactive)
+Scans GPUs, runtime, and system resources. Used by both setup.py (interactive)
 and startup.py (non-interactive). Stdlib only — no pip dependencies.
 
 Usage:
-    from hardware import scan_gpus, scan_ollama, scan_system, suggest_assignment
+    from hardware import scan_gpus, scan_runtime, scan_system, suggest_assignment
 """
 
 import json
@@ -71,57 +71,45 @@ def scan_gpus():
     return gpus
 
 
-def scan_ollama(host="http://localhost:11434"):
-    # type: (str) -> Dict[str, Any]
-    """Scan Ollama status: running, available models, loaded models.
+def scan_runtime(host="http://localhost:11434", runtime_backend="llama"):
+    # type: (str, str) -> Dict[str, Any]
+    """Scan runtime status: running, available models, loaded models.
 
     Returns:
         {running, host, available_models: [{name, size_mb}],
          loaded_models: [{name, vram_mb}]}
     """
+    backend = str(runtime_backend or "llama").strip()
+    if backend != "llama":
+        raise ValueError(f"Unsupported runtime_backend: {backend}")
     result = {
         "running": False,
         "host": host,
+        "backend": backend,
         "available_models": [],
         "loaded_models": [],
     }
 
-    # Check if Ollama is running via /api/tags
     try:
-        req = urllib.request.Request(f"{host}/api/tags")
+        req = urllib.request.Request(f"{host}/v1/models")
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
             result["running"] = True
-            for model in data.get("models", []):
-                name = model.get("name", "")
-                size_bytes = model.get("size", 0)
-                size_mb = int(size_bytes / (1024 * 1024))
-                result["available_models"].append({
-                    "name": name,
-                    "size_mb": size_mb,
-                })
-            # Sort largest first for suggestion logic
-            result["available_models"].sort(
-                key=lambda m: m["size_mb"], reverse=True
-            )
+            for model in data.get("data", []) if isinstance(data, dict) else []:
+                if not isinstance(model, dict):
+                    continue
+                name = str(model.get("id", "")).strip()
+                if not name:
+                    continue
+                result["available_models"].append({"name": name, "size_mb": 0})
+                result["loaded_models"].append({"name": name, "vram_mb": 0})
+    except urllib.error.HTTPError as exc:
+        if exc.code == 503:
+            result["running"] = True
+        else:
+            return result
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
         return result
-
-    # Get currently loaded models via /api/ps
-    try:
-        req = urllib.request.Request(f"{host}/api/ps")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-            for model in data.get("models", []):
-                name = model.get("name", "")
-                vram_bytes = model.get("size_vram", 0)
-                vram_mb = int(vram_bytes / (1024 * 1024))
-                result["loaded_models"].append({
-                    "name": name,
-                    "vram_mb": vram_mb,
-                })
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
-        pass
 
     return result
 
@@ -219,7 +207,7 @@ def scan_system():
 
 def _find_best_model(models, max_vram_mb):
     # type: (List[Dict], int) -> Optional[str]
-    """Pick the largest available Ollama model that fits in the given VRAM.
+    """Pick the largest available model that fits in the given VRAM.
 
     Uses a 0.85 safety factor for runtime overhead.
     Returns model name or None if nothing fits.
@@ -236,7 +224,7 @@ def _find_best_model(models, max_vram_mb):
     return fitting[0]["name"]
 
 
-def suggest_assignment(gpus, ollama, preferences=None):
+def suggest_assignment(gpus, runtime, preferences=None):
     # type: (List[Dict], Dict, Optional[Dict]) -> Dict[str, Any]
     """Suggest brain/worker GPU assignment based on discovered hardware.
 
@@ -254,13 +242,13 @@ def suggest_assignment(gpus, ollama, preferences=None):
 
     Args:
         gpus: Output from scan_gpus()
-        ollama: Output from scan_ollama()
+        runtime: Output from scan_runtime()
         preferences: Optional overrides (brain_model, worker_model, worker_mode)
 
     Returns config-ready structure with _discovery_mode, brain, gpus, worker_mode.
     """
     prefs = preferences or {}
-    available_models = ollama.get("available_models", [])
+    available_models = runtime.get("available_models", [])
 
     # --- 0 GPUs: CPU-only mode ---
     if not gpus:
@@ -365,7 +353,7 @@ def suggest_assignment(gpus, ollama, preferences=None):
     }
 
 
-def format_scan_report(gpus, ollama, system):
+def format_scan_report(gpus, runtime, system):
     # type: (List[Dict], Dict, Dict) -> str
     """Format a human-readable hardware scan report for display."""
     lines = []
@@ -390,26 +378,26 @@ def format_scan_report(gpus, ollama, system):
     else:
         lines.append("\nGPUs found: 0 (CPU-only mode)")
 
-    # Ollama
-    if ollama["running"]:
-        lines.append("\nOllama: running (%s)" % ollama['host'])
-        if ollama["available_models"]:
+    # Runtime
+    if runtime["running"]:
+        lines.append("\nRuntime: running (%s)" % runtime['host'])
+        if runtime["available_models"]:
             models_str = ", ".join(
                 "%s (%d MB)" % (m['name'], m['size_mb'])
-                for m in ollama["available_models"]
+                for m in runtime["available_models"]
             )
             lines.append("  Available models: %s" % models_str)
         else:
             lines.append("  Available models: none")
 
-        if ollama["loaded_models"]:
+        if runtime["loaded_models"]:
             loaded_str = ", ".join(
                 "%s (%d MB VRAM)" % (m['name'], m['vram_mb'])
-                for m in ollama["loaded_models"]
+                for m in runtime["loaded_models"]
             )
             lines.append("  Loaded models: %s" % loaded_str)
     else:
-        lines.append("\nOllama: not running (%s)" % ollama['host'])
+        lines.append("\nRuntime: not running (%s)" % runtime['host'])
 
     return "\n".join(lines)
 

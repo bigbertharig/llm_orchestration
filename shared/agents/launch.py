@@ -35,10 +35,10 @@ LAUNCH_LOCK = READY_FLAG_DIR / "launch.lock"
 processes = []
 
 
-def check_ollama_models(ollama_host: str = "http://localhost:11434") -> dict:
-    """Check what models are currently loaded in Ollama."""
+def check_runtime_models(runtime_host: str = "http://localhost:11434") -> dict:
+    """Check what models are currently loaded in the runtime."""
     try:
-        req = urllib.request.Request(f"{ollama_host}/api/ps")
+        req = urllib.request.Request(f"{runtime_host}/v1/models")
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
             loaded = {}
@@ -130,8 +130,8 @@ def cleanup(signum=None, frame=None):
 
     clear_ready_flags()
 
-    # Kill any lingering ollama processes
-    subprocess.run(["pkill", "-f", "ollama serve"], capture_output=True)
+    subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "llama-brain"], capture_output=True)
     print("All agents stopped.")
     sys.exit(0)
 
@@ -177,8 +177,8 @@ def main():
     clear_ready_flags()
 
     # Check if brain model is already pre-loaded
-    ollama_host = config.get("ollama_host", "http://localhost:11434")
-    loaded_models = check_ollama_models(ollama_host)
+    runtime_host = config.get("runtime_host", "http://localhost:11434")
+    loaded_models = check_runtime_models(runtime_host)
     brain_model = config["brain"]["model"]
     brain_preloaded = brain_model in loaded_models
 
@@ -187,15 +187,15 @@ def main():
         if brain_preloaded:
             print(f"  Brain model ({brain_model}) is pre-loaded - will reuse")
         print()
-        skip_ollama_restart = brain_preloaded
+        skip_runtime_restart = brain_preloaded
     else:
-        skip_ollama_restart = False
+        skip_runtime_restart = False
 
-    if skip_ollama_restart:
-        print("Reusing existing Ollama instance with pre-loaded models")
+    if skip_runtime_restart:
+        print("Reusing existing runtime instance with pre-loaded models")
     else:
-        print("Stopping any existing Ollama instances...")
-        subprocess.run(["pkill", "-f", "ollama serve"], capture_output=True)
+        print("Stopping any existing runtime instances...")
+        subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
         time.sleep(2)
 
     # --- Start Brain ---

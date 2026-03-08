@@ -10,7 +10,6 @@ import re
 import signal
 import socket
 import subprocess
-import threading
 import time
 import uuid
 from copy import deepcopy
@@ -21,6 +20,7 @@ from typing import Any, Dict, Optional
 import requests
 from filelock import FileLock, Timeout
 
+from brain_core import resolve_llama_runtime_profile
 from gpu_constants import (
     ATTESTATION_MISS_HARD_FAIL_THRESHOLD,
     ATTESTATION_MISS_SOFT_FAIL_THRESHOLD,
@@ -49,6 +49,12 @@ from gpu_constants import (
     SPLIT_RESERVATION_LOADING_STATES,
 )
 
+_LLAMA_SCRIPTS_DIR_SHARED = Path("/mnt/shared/scripts/llama_runtime")
+_LLAMA_SCRIPTS_DIR_REPO = Path(__file__).resolve().parent.parent.parent / "scripts" / "llama_runtime"
+_LLAMA_SCRIPTS_DIR = (
+    _LLAMA_SCRIPTS_DIR_SHARED if _LLAMA_SCRIPTS_DIR_SHARED.exists() else _LLAMA_SCRIPTS_DIR_REPO
+)
+
 SPLIT_WARMUP_REQUEST_TIMEOUT_SECONDS = 25
 SPLIT_WARMUP_MAX_ATTEMPTS = 2
 SPLIT_WARMUP_NUM_PREDICT = 1
@@ -59,6 +65,27 @@ SPLIT_WARMUP_PS_POLL_INTERVAL_SECONDS = 2
 
 class GPUSplitMixin:
     """Mixin providing split GPU runtime coordination methods."""
+
+    def _can_backfill_from_active_split_runtime(
+        self,
+        *,
+        reservation: Dict[str, Any],
+        group_id: str,
+    ) -> bool:
+        """Allow member_clean backfill from an already-active split runtime."""
+        status = str(reservation.get("status", "")).strip()
+        if status not in {"loading", "warming", "ready_stabilizing", "ready"}:
+            return False
+        target_model = str(reservation.get("target_model", "")).strip()
+        if not target_model:
+            return False
+        return (
+            self.runtime_placement == "split_gpu"
+            and str(self.runtime_group_id or "").strip() == group_id
+            and self.model_loaded
+            and str(self.loaded_model or "").strip() == target_model
+            and self.runtime_state in {RUNTIME_STATE_LOADING_SPLIT, RUNTIME_STATE_READY_SPLIT}
+        )
 
     def _split_partner_nudge_path(self, group_id: str) -> Path:
         safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(group_id))
@@ -318,7 +345,7 @@ class GPUSplitMixin:
         - runtime_state == cold (not ready_single/ready_split/loading/etc)
         - model_loaded == false
         - runtime_placement != split_gpu (unless allow_rejoin_group and same group)
-        - local worker Ollama port has no loaded models (probe /api/ps)
+        - local worker runtime port has no loaded models
 
         Returns structured result:
         - ok: bool
@@ -372,22 +399,16 @@ class GPUSplitMixin:
                 result["reason_code"] = f"stale_split_placement:{self.runtime_group_id}"
                 return result
 
-        # Check 4: local worker Ollama port has no loaded models
+        # Check 4: local worker runtime port has no loaded models
         if self.port:
             try:
-                r = requests.get(f"http://127.0.0.1:{self.port}/api/ps", timeout=2)
+                r = requests.get(f"http://127.0.0.1:{self.port}/v1/models", timeout=2)
                 if r.status_code == 200:
-                    models = r.json().get("models", [])
-                    loaded_names = [
-                        str(m.get("name", "")).strip()
-                        for m in models
-                        if isinstance(m, dict) and str(m.get("name", "")).strip()
-                    ]
+                    loaded_names = ["_llama_loaded"]
                     result["details"]["local_port_models"] = loaded_names
-                    if loaded_names:
-                        result["ok"] = False
-                        result["reason_code"] = f"local_port_has_models:{','.join(loaded_names)}"
-                        return result
+                    result["ok"] = False
+                    result["reason_code"] = f"local_port_has_models:{','.join(loaded_names)}"
+                    return result
             except requests.exceptions.ConnectionError:
                 # Port not listening - that's fine, no models loaded
                 result["details"]["local_port_models"] = []
@@ -422,7 +443,10 @@ class GPUSplitMixin:
             f"SPLIT_MEMBER_PRECONDITION_RESET group={group_id} member={self.name} "
             f"reason={pre_reset['reason_code'] or 'always_reset'}"
         )
-        self._full_local_reset(reset_reason)
+        self._full_local_reset(
+            reset_reason,
+            count_toward_circuit_breaker=False,
+        )
 
         rechecked = self._verify_local_split_member_clean_precondition(
             group_id=group_id,
@@ -469,7 +493,7 @@ class GPUSplitMixin:
             self.runtime_port = int(group.get("port"))
         except Exception:
             self.runtime_port = None
-        self.runtime_ollama_url = (
+        self.runtime_api_base = (
             f"http://localhost:{self.runtime_port}" if self.runtime_port else None
         )
         self.split_runtime_owner = bool(as_owner)
@@ -504,7 +528,7 @@ class GPUSplitMixin:
                 reason=f"dead_split_state:{reason}",
                 task_id=task_id,
                 stop_split_runtime=False,
-                stop_local_ollama=False,
+                stop_local_runtime=False,
             )
         return self._coordinated_split_failure_cleanup(
             current_group_id,
@@ -520,7 +544,7 @@ class GPUSplitMixin:
         task_id: Optional[str] = None,
         *,
         stop_split_runtime: bool = False,
-        stop_local_ollama: bool = False,
+        stop_local_runtime: bool = False,
     ) -> Dict[str, Any]:
         """Shared core for runtime reset - used by both _full_local_reset and _coordinated_split_failure_cleanup.
 
@@ -532,7 +556,7 @@ class GPUSplitMixin:
             reason: Reason string for logging
             task_id: Optional task ID for state transition
             stop_split_runtime: If True, stop split runtime process if owner
-            stop_local_ollama: If True, stop tracked local ollama process
+            stop_local_runtime: If True, stop tracked local runtime process
 
         Returns:
             Dict with cleanup results for observability
@@ -553,14 +577,17 @@ class GPUSplitMixin:
                 self.logger.warning(f"Split runtime stop during reset failed: {e}")
                 result["split_runtime_stopped"] = False
 
-        # 2. Stop local worker Ollama if requested
-        if stop_local_ollama and getattr(self, 'ollama_process', None):
+        # 2. Stop local worker runtime if requested
+        if stop_local_runtime:
             try:
-                self.stop_ollama()
-                result["local_ollama_stopped"] = True
+                if getattr(self, 'runtime_backend', 'llama') == 'llama':
+                    self.stop_llama()
+                elif getattr(self, 'runtime_process', None):
+                    self.stop_runtime_legacy()
+                result["local_runtime_stopped"] = True
             except Exception as e:
-                self.logger.warning(f"Ollama stop during reset failed: {e}")
-                result["local_ollama_stopped"] = False
+                self.logger.warning(f"Runtime stop during reset failed: {e}")
+                result["local_runtime_stopped"] = False
 
         # 3. Clean each port (kill listeners, orphan runners)
         local_port_reclaimed = False
@@ -590,29 +617,29 @@ class GPUSplitMixin:
                         local_port_reclaimed = True
 
                 # Kill orphan runners scoped to this port
-                killed = self._kill_orphan_ollama_runners(target_port=port)
+                killed = self._kill_orphan_runtime_processes(target_port=port)
                 port_result["orphan_runners_killed"] = killed
             except Exception as e:
                 self.logger.warning(f"Port cleanup during reset failed port={port}: {e}")
             result["ports_cleaned"][port] = port_result
 
-        # 3b. Clear stale ollama_process handle if process is dead
+        # 3b. Clear stale runtime_process handle if process is dead
         # This prevents lifecycle noise from a tracked Popen handle pointing to dead process
         # Check unconditionally - process may have died on its own without port reclaim
-        if getattr(self, 'ollama_process', None):
+        if getattr(self, 'runtime_process', None):
             try:
-                if self.ollama_process.poll() is not None:
+                if self.runtime_process.poll() is not None:
                     # Process is dead - clear the handle
                     self.logger.debug(
-                        f"RUNTIME_RESET_CLEAR_STALE_OLLAMA_HANDLE port={self.port} "
-                        f"rc={self.ollama_process.returncode} local_port_reclaimed={local_port_reclaimed}"
+                        f"RUNTIME_RESET_CLEAR_STALE_HANDLE port={self.port} "
+                        f"rc={self.runtime_process.returncode} local_port_reclaimed={local_port_reclaimed}"
                     )
-                    self.ollama_process = None
-                    result["stale_ollama_handle_cleared"] = True
+                    self.runtime_process = None
+                    result["stale_runtime_handle_cleared"] = True
             except Exception:
                 # If we can't check, clear it anyway to be safe
-                self.ollama_process = None
-                result["stale_ollama_handle_cleared"] = True
+                self.runtime_process = None
+                result["stale_runtime_handle_cleared"] = True
 
         # 4. Clear runtime state fields
         self.model_loaded = False
@@ -621,7 +648,7 @@ class GPUSplitMixin:
         self.runtime_placement = "single_gpu"
         self.runtime_group_id = None
         self.runtime_port = self.port
-        self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
+        self.runtime_api_base = f"http://localhost:{self.port}" if self.port else None
         self.split_runtime_owner = False
         self.split_runtime_generation = None
         self.split_runtime_invariant_failures = 0
@@ -652,7 +679,7 @@ class GPUSplitMixin:
         self.runtime_placement = "single_gpu"
         self.runtime_group_id = None
         self.runtime_port = self.port
-        self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
+        self.runtime_api_base = f"http://localhost:{self.port}" if self.port else None
         self.split_runtime_owner = False
         self.split_runtime_generation = None
         self.split_runtime_invariant_failures = 0
@@ -708,7 +735,7 @@ class GPUSplitMixin:
             reason=f"split_failure:{reason}",
             task_id=task_id,
             stop_split_runtime=True,
-            stop_local_ollama=False,  # Split failure doesn't need to stop local single-GPU ollama
+            stop_local_runtime=False,  # Split failure doesn't need to stop local single-GPU runtime
         )
 
         # Build result dict for compatibility
@@ -746,9 +773,9 @@ class GPUSplitMixin:
             except Exception as e:
                 self.logger.debug(f"Failed to write member_reset ack: {e}")
 
-        # Post-cleanup verification gate: verify no orphan ollama runners remain
+        # Post-cleanup verification gate: verify no orphan runtime processes remain
         if split_port:
-            leaked_runners = self._verify_no_ollama_runners_on_port(split_port)
+            leaked_runners = self._verify_no_runtime_processes_on_port(split_port)
             if leaked_runners:
                 self.logger.warning(
                     f"SPLIT_CLEANUP_LEAK group={group_id} port={split_port} "
@@ -756,7 +783,7 @@ class GPUSplitMixin:
                 )
                 # Retry one forced kill cycle
                 self._kill_local_listener_on_port(split_port)
-                self._kill_orphan_ollama_runners(target_port=split_port)
+                self._kill_orphan_runtime_processes(target_port=split_port)
                 result["cleanup_leak_retry"] = True
 
         self.logger.info(
@@ -767,8 +794,8 @@ class GPUSplitMixin:
 
         return result
 
-    def _verify_no_ollama_runners_on_port(self, port: int) -> list:
-        """Verify no ollama runner processes are still using the given port.
+    def _verify_no_runtime_processes_on_port(self, port: int) -> list:
+        """Verify no runtime processes are still using the given port.
 
         Returns list of (pid, cmd) tuples for any leaked runners found.
         """
@@ -794,7 +821,7 @@ class GPUSplitMixin:
             if not port_pids:
                 return leaked
 
-            # Check if any of these are ollama runners
+            # Check if any of these are runtime processes
             ps_result = subprocess.run(
                 ["ps", "-eo", "pid,args"],
                 capture_output=True,
@@ -810,11 +837,11 @@ class GPUSplitMixin:
                 except Exception:
                     continue
                 cmd = parts[1]
-                if pid in port_pids and "ollama" in cmd.lower():
+                if pid in port_pids and "llama" in cmd.lower():
                     leaked.append((pid, cmd[:80]))
 
         except Exception as e:
-            self.logger.debug(f"Error verifying ollama runners on port {port}: {e}")
+            self.logger.debug(f"Error verifying runtime processes on port {port}: {e}")
 
         return leaked
 
@@ -1219,7 +1246,7 @@ class GPUSplitMixin:
                 reason=f"single_recovery:{reason}",
                 task_id=None,
                 stop_split_runtime=False,
-                stop_local_ollama=True,  # For single-runtime, stop local ollama
+                stop_local_runtime=True,  # For single-runtime, stop local runtime
             )
             result["reset"] = reset_result
 
@@ -1368,10 +1395,11 @@ class GPUSplitMixin:
         group: Dict[str, Any],
         model_id: str,
         port: int,
-        proc_pid: int,
+        proc_pid: Optional[int],
         *,
         pgid: Optional[int] = None,
         ready_token: Optional[str] = None,
+        container_name: Optional[str] = None,
     ):
         group_id = str(group.get("id", "")).strip()
         if not group_id:
@@ -1382,8 +1410,9 @@ class GPUSplitMixin:
             "members": [str(m).strip() for m in group.get("members", []) if str(m).strip()],
             "model_id": str(model_id).strip(),
             "port": int(port),
-            "pid": int(proc_pid),
+            "pid": int(proc_pid) if proc_pid is not None else None,
             "pgid": pgid,  # Process group ID for cleanup
+            "container_name": str(container_name or "").strip() or None,
             "ready_token": ready_token,  # Token for readiness verification
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
@@ -1569,7 +1598,7 @@ class GPUSplitMixin:
         port: int,
         model_id: str,
     ) -> tuple[bool, Dict[str, Any]]:
-        """Run stability gate: poll /api/ps N consecutive times to verify readiness.
+        """Run stability gate: poll backend-specific readiness N consecutive times.
 
         Only the launcher runs this gate. On success, issues ready_token and
         transitions to "ready" status.
@@ -1636,21 +1665,13 @@ class GPUSplitMixin:
 
     def _split_runtime_loaded_models(self, port: int) -> list[str]:
         try:
-            r = requests.get(f"http://127.0.0.1:{port}/api/ps", timeout=5)
+            r = requests.get(f"http://127.0.0.1:{port}/v1/models", timeout=5)
             if r.status_code != 200:
                 return []
-            models = r.json().get("models", [])
         except Exception:
             return []
-
-        loaded = []
-        for item in models if isinstance(models, list) else []:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name", "")).strip()
-            if name:
-                loaded.append(name)
-        return loaded
+        model_name = str(self.loaded_model or "").strip()
+        return [model_name] if model_name else ["_llama_loaded"]
 
     def _split_runtime_has_stable_model_presence(
         self,
@@ -1679,6 +1700,10 @@ class GPUSplitMixin:
     def _split_warmup_request_budget_seconds(self, warmup_deadline: float) -> int:
         remaining_budget = max(1, int(warmup_deadline - time.time()))
         return max(1, min(SPLIT_WARMUP_REQUEST_TIMEOUT_SECONDS, remaining_budget))
+
+    def _split_runtime_start_budget_seconds(self) -> int:
+        """Reserve most of the split meta budget for initial model readiness."""
+        return max(20, SPLIT_META_TIMEOUT_SECONDS - 30)
 
     def _split_warmup_failure_is_terminal(
         self,
@@ -1720,21 +1745,15 @@ class GPUSplitMixin:
             self._split_runtime_log_file = None
 
     def _start_split_runtime(self, group: Dict[str, Any], model_id: str, task_id: Optional[str] = None) -> tuple[bool, bool]:
-        """Start split runtime and warm the model.
-
-        Returns:
-            (success, cleanup_done) - success indicates load worked,
-            cleanup_done indicates whether coordinated cleanup was already performed
-            (to avoid double cleanup in caller)
-        """
+        """Start split runtime and warm the model."""
         self.last_split_runtime_error = ""
-        # Initialize variables at top to avoid UnboundLocalError in exception handlers
         group_id = str(group.get("id", "")).strip()
         port: Optional[int] = None
-        log_file = None
         cleanup_done = False
+        runtime_backend = str(getattr(self, "runtime_backend", "llama") or "llama").strip()
+        proc: Optional[subprocess.Popen] = None
+        container_name = f"llama-split-{group_id}" if group_id else ""
 
-        # Transition to loading_split state
         self._set_runtime_state(
             RUNTIME_STATE_LOADING_SPLIT,
             task_id=task_id,
@@ -1757,75 +1776,142 @@ class GPUSplitMixin:
             for member in members:
                 cfg = self._get_gpu_config(member)
                 member_gpu_ids.append(str(cfg["id"]))
-
-            env = os.environ.copy()
-            env["CUDA_VISIBLE_DEVICES"] = ",".join(member_gpu_ids)
-            env["OLLAMA_HOST"] = f"127.0.0.1:{port}"
             startup_started = time.time()
 
-            # Avoid hijacking a stale runtime on the split port; that can make
-            # readiness checks pass against the wrong process and wedge warmup.
+            if self._split_runtime_can_reuse_existing(
+                port=port,
+                model_id=model_id,
+                group_id=group_id,
+            ):
+                self.logger.info(
+                    f"SPLIT_RUNTIME_REUSE_EXISTING group={group_id} port={port} model={model_id}"
+                )
+                return True, cleanup_done
+
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(0.5)
             try:
                 if sock.connect_ex(("127.0.0.1", port)) == 0:
-                    self.last_split_runtime_error = f"split port {port} already in use before launch"
-                    self.logger.error(self.last_split_runtime_error)
-                    return False, cleanup_done
+                    reclaimed = self._reclaim_stale_split_listener_before_launch(
+                        port=port,
+                        container_name=container_name,
+                        group_id=group_id,
+                    )
+                    if not reclaimed and self._split_runtime_has_any_listener(port):
+                        self.last_split_runtime_error = f"split port {port} already in use before launch"
+                        self.logger.error(self.last_split_runtime_error)
+                        return False, cleanup_done
             finally:
                 try:
                     sock.close()
                 except Exception:
                     pass
 
-            # Capture stdout/stderr for crash diagnostics instead of discarding
             log_path = self._split_runtime_log_path(group_id) if group_id else None
             if log_path:
                 try:
-                    # Write launch context header
                     with open(log_path, "w", encoding="utf-8") as f:
                         f.write(f"# Split runtime log for group {group_id}\n")
                         f.write(f"# Launched at: {datetime.now().isoformat()}\n")
-                        f.write(f"# CUDA_VISIBLE_DEVICES: {env.get('CUDA_VISIBLE_DEVICES', '')}\n")
-                        f.write(f"# OLLAMA_HOST: {env.get('OLLAMA_HOST', '')}\n")
+                        f.write(f"# Runtime backend: {runtime_backend}\n")
+                        f.write(f"# GPU IDs: {member_gpu_ids}\n")
+                        f.write(f"# Port: {port}\n")
                         f.write(f"# Model: {model_id}\n")
                         f.write(f"# Members: {members}\n")
                         f.write("#" + "=" * 60 + "\n")
-                    log_file = open(log_path, "a", encoding="utf-8")
+                    self._split_runtime_log_file = open(log_path, "a", encoding="utf-8")
                 except Exception as e:
                     self.logger.warning(f"Failed to open split runtime log: {e}")
+                    self._split_runtime_log_file = None
 
-            proc = subprocess.Popen(
-                ["ollama", "serve"],
-                env=env,
-                stdout=log_file if log_file else subprocess.DEVNULL,
-                stderr=subprocess.STDOUT if log_file else subprocess.DEVNULL,
-                start_new_session=True,  # CRITICAL: Create new process group for cleanup
-            )
-            self.split_runtime_process = proc
-            self._split_runtime_log_file = log_file  # Track for cleanup
+            pgid = None
+            if runtime_backend == "llama":
+                gguf_path = self._resolve_gguf_path(model_id)
+                if not gguf_path:
+                    self.last_split_runtime_error = f"GGUF path not found for split model {model_id}"
+                    self.logger.error(self.last_split_runtime_error)
+                    self._close_split_runtime_log_file()
+                    return False, cleanup_done
 
-            # Get process group ID for cleanup
-            try:
-                pgid = os.getpgid(proc.pid)
-            except Exception:
-                pgid = None
+                profile = resolve_llama_runtime_profile(
+                    self.config,
+                    model_id=model_id,
+                    split=True,
+                    override=group.get("llama_runtime"),
+                )
+                cmd = [
+                    str(_LLAMA_SCRIPTS_DIR / "run_runtime.sh"),
+                    "--name", container_name,
+                    "--model", gguf_path,
+                    "--port", str(port),
+                    "--gpus", f"device={','.join(member_gpu_ids)}",
+                    "--ctx-size", str(profile.get("ctx_size", self.worker_num_ctx)),
+                    "--n-gpu-layers", str(profile.get("n_gpu_layers", -1)),
+                    "--batch-size", str(profile.get("batch_size", 512)),
+                    "--parallel", str(profile.get("parallel", 1)),
+                ]
+                if profile.get("threads") is not None:
+                    cmd.extend(["--threads", str(profile["threads"])])
+                if profile.get("tensor_split"):
+                    cmd.extend(["--tensor-split", str(profile["tensor_split"])])
+                for extra_arg in profile.get("extra_args", []):
+                    cmd.extend(["--extra-arg", str(extra_arg)])
+
+                self.logger.info(f"SPLIT_LLAMA_LOAD_CMD: {' '.join(cmd)}")
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if result.returncode != 0:
+                    self.last_split_runtime_error = (
+                        f"split llama runtime launch failed rc={result.returncode}: "
+                        f"{(result.stderr or '')[-500:]}"
+                    )
+                    self.logger.error(self.last_split_runtime_error)
+                    self._close_split_runtime_log_file()
+                    return False, cleanup_done
+                if self._split_runtime_log_file:
+                    try:
+                        self._split_runtime_log_file.write(f"# Container: {container_name}\n")
+                        self._split_runtime_log_file.write(f"# Container ID: {(result.stdout or '').strip()}\n")
+                    except Exception:
+                        pass
+            else:
+                env = os.environ.copy()
+                env["CUDA_VISIBLE_DEVICES"] = ",".join(member_gpu_ids)
+                env["LLAMA_ARG_HOST"] = f"127.0.0.1:{port}"
+                proc = subprocess.Popen(
+                    ["llama-server", "--host", "127.0.0.1", "--port", str(port)],
+                    env=env,
+                    stdout=self._split_runtime_log_file if self._split_runtime_log_file else subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT if self._split_runtime_log_file else subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                self.split_runtime_process = proc
+                try:
+                    pgid = os.getpgid(proc.pid)
+                except Exception:
+                    pgid = None
 
             self._write_split_runtime_owner_meta(
                 group=group,
                 model_id=model_id,
                 port=port,
-                proc_pid=proc.pid,
+                proc_pid=proc.pid if proc is not None else None,
                 pgid=pgid,
+                container_name=container_name if runtime_backend == "llama" else None,
             )
 
-            deadline = time.time() + 20
+            ready_url = f"http://127.0.0.1:{port}/v1/models"
+            startup_ready_budget = self._split_runtime_start_budget_seconds()
+            deadline = time.time() + startup_ready_budget
             ready = False
             while time.time() < deadline:
                 self._touch_meta_task(phase="starting_split_runtime")
                 self._touch_split_runtime_owner_meta()
-                if proc.poll() is not None:
-                    # Gather crash context before cleanup
+                if proc is not None and proc.poll() is not None:
                     crash_ctx = self._gather_split_crash_context(proc.returncode, port, group_id)
                     self.last_split_runtime_error = (
                         f"split runtime exited during startup on port {port} rc={proc.returncode} "
@@ -1833,20 +1919,18 @@ class GPUSplitMixin:
                         f"causes={crash_ctx.get('possible_causes', [])}"
                     )
                     self.logger.error(self.last_split_runtime_error)
-                    # Close log file
                     self._close_split_runtime_log_file()
                     self.split_runtime_process = None
                     self._clear_split_runtime_owner_meta()
-                    # Use coordinated cleanup instead of just state clear
                     self._coordinated_split_failure_cleanup(
                         group_id=group_id,
                         split_port=port,
                         reason=f"startup_crash_rc{proc.returncode}",
                         task_id=task_id,
                     )
-                    return False, True  # cleanup_done=True
+                    return False, True
                 try:
-                    r = requests.get(f"http://127.0.0.1:{port}/api/tags", timeout=1.5)
+                    r = requests.get(ready_url, timeout=1.5)
                     if r.status_code == 200:
                         ready = True
                         break
@@ -1854,111 +1938,52 @@ class GPUSplitMixin:
                     pass
                 time.sleep(0.4)
             if not ready:
-                self.last_split_runtime_error = f"split runtime failed to start on port {port}"
+                self.last_split_runtime_error = (
+                    f"split runtime failed to start on port {port} "
+                    f"within {startup_ready_budget}s"
+                )
                 self.logger.error(self.last_split_runtime_error)
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                # Close log file
                 self._close_split_runtime_log_file()
                 self.split_runtime_process = None
                 self._clear_split_runtime_owner_meta()
-                # Use coordinated cleanup
                 self._coordinated_split_failure_cleanup(
                     group_id=group_id,
                     split_port=port,
                     reason="startup_timeout",
                     task_id=task_id,
                 )
-                return False, True  # cleanup_done=True
+                return False, True
+            self._assert_full_gpu_offload(container_name, model_id)
             self.logger.info(
                 f"SPLIT_RUNTIME_START_READY group={group.get('id')} port={port} "
-                f"pid={proc.pid} startup_ms={int((time.time() - startup_started) * 1000)}"
+                f"backend={runtime_backend} startup_ms={int((time.time() - startup_started) * 1000)}"
             )
 
-            # Warm/load the target model on shared runtime.
             split_load_deadline = time.time() + SPLIT_META_TIMEOUT_SECONDS
 
             def _warm_split_runtime():
                 warmup_deadline = split_load_deadline
+                attempts = 0
                 last_warmup_error = ""
                 warmup_started = time.time()
-                attempts = 0
                 while time.time() < warmup_deadline:
                     self._touch_meta_task(phase="warming_split_runtime")
                     self._touch_split_runtime_owner_meta()
-                    if proc.poll() is not None:
+                    if proc is not None and proc.poll() is not None:
                         raise RuntimeError(
                             f"split runtime exited during warmup on port {port} rc={proc.returncode}"
                         )
+                    attempts += 1
                     try:
-                        attempts += 1
-                        req_result: Dict[str, Any] = {"done": False, "response": None, "error": None}
-
-                        def _warmup_request():
-                            try:
-                                req_result["response"] = requests.post(
-                                    f"http://127.0.0.1:{port}/api/generate",
-                                    json={
-                                        "model": model_id,
-                                        "prompt": "READY?",
-                                        "stream": False,
-                                        "keep_alive": self._effective_keep_alive(),
-                                        "options": {
-                                            "num_gpu": 999,
-                                            "num_ctx": min(self.worker_num_ctx, SPLIT_WARMUP_NUM_CTX),
-                                            "num_predict": SPLIT_WARMUP_NUM_PREDICT,
-                                        }
-                                    },
-                                    timeout=self._split_warmup_request_budget_seconds(warmup_deadline),
-                                )
-                            except Exception as exc:
-                                req_result["error"] = exc
-                            finally:
-                                req_result["done"] = True
-
-                        req_thread = threading.Thread(target=_warmup_request, daemon=True)
-                        req_thread.start()
-                        req_started = time.time()
-                        last_wait_log_at = req_started
-                        while not req_result["done"]:
-                            self._touch_meta_task(phase="warming_split_runtime")
-                            self._touch_split_runtime_owner_meta()
-                            if proc.poll() is not None:
-                                raise RuntimeError(
-                                    f"split runtime exited during warmup on port {port} rc={proc.returncode}"
-                                )
-                            now_wait = time.time()
-                            if (now_wait - last_wait_log_at) >= 20:
-                                # Periodic progress log so long first loads do not look dead.
-                                self.logger.info(
-                                    f"SPLIT_RUNTIME_WARMUP_WAIT group={group.get('id')} port={port} "
-                                    f"model={model_id} attempt={attempts} "
-                                    f"elapsed_s={int(now_wait - req_started)}"
-                                )
-                                last_wait_log_at = now_wait
-                            time.sleep(1)
-
-                        if req_result["error"] is not None:
-                            if self._split_runtime_has_stable_model_presence(port, model_id):
-                                self.logger.info(
-                                    f"SPLIT_RUNTIME_WARMUP_PS_READY group={group.get('id')} port={port} "
-                                    f"model={model_id} attempts={attempts} mode=error_fallback"
-                                )
-                                return True
-                            if self._split_warmup_failure_is_terminal(
-                                error_text=str(req_result["error"]),
-                                exc=req_result["error"],
-                            ):
-                                raise RuntimeError(
-                                    f"terminal warmup failure for model {model_id} on port {port}: "
-                                    f"{req_result['error']}"
-                                )
-                            raise req_result["error"]
-                        r = req_result["response"]
-                        if r is None:
-                            raise RuntimeError("split warmup request finished without response")
+                        r = requests.post(
+                            f"http://127.0.0.1:{port}/v1/chat/completions",
+                            json={
+                                "model": model_id,
+                                "messages": [{"role": "user", "content": "READY?"}],
+                                "max_tokens": SPLIT_WARMUP_NUM_PREDICT,
+                            },
+                            timeout=self._split_warmup_request_budget_seconds(warmup_deadline),
+                        )
                         if r.status_code < 400:
                             self.logger.info(
                                 f"SPLIT_RUNTIME_WARMUP_OK group={group.get('id')} port={port} "
@@ -1966,38 +1991,21 @@ class GPUSplitMixin:
                                 f"warmup_ms={int((time.time() - warmup_started) * 1000)}"
                             )
                             return True
-                        if self._split_runtime_has_stable_model_presence(port, model_id):
-                            self.logger.info(
-                                f"SPLIT_RUNTIME_WARMUP_PS_READY group={group.get('id')} port={port} "
-                                f"model={model_id} attempts={attempts} status={r.status_code}"
-                            )
-                            return True
-                        response_excerpt = (r.text or "").strip().replace("\n", " ")
-                        if len(response_excerpt) > 300:
-                            response_excerpt = response_excerpt[:300] + "..."
-                        last_warmup_error = (
-                            f"warmup HTTP {r.status_code} for model {model_id} on port {port}: {response_excerpt}"
-                        )
-                        if self._split_warmup_failure_is_terminal(
-                            status_code=r.status_code,
-                            error_text=last_warmup_error,
-                        ):
-                            raise RuntimeError(f"terminal {last_warmup_error}")
+                        last_warmup_error = f"warmup HTTP {r.status_code}"
                     except Exception as exc:
                         last_warmup_error = str(exc)
-                        if self._split_warmup_failure_is_terminal(
-                            error_text=last_warmup_error,
-                            exc=exc,
-                        ):
-                            raise RuntimeError(f"terminal {last_warmup_error}") from exc
-                    if attempts >= SPLIT_WARMUP_MAX_ATTEMPTS:
-                        raise RuntimeError(
-                            f"warmup attempt limit reached for model {model_id} on port {port}: "
-                            f"{last_warmup_error or 'no response'}"
+                    if self._split_runtime_has_stable_model_presence(port, model_id):
+                        self.logger.info(
+                            f"SPLIT_RUNTIME_WARMUP_PS_READY group={group.get('id')} port={port} "
+                            f"model={model_id} attempts={attempts}"
                         )
+                        return True
+                    if attempts >= SPLIT_WARMUP_MAX_ATTEMPTS:
+                        break
                     time.sleep(2)
                 raise RuntimeError(
-                    f"warmup timeout for model {model_id} on port {port}: {last_warmup_error or 'no response'}"
+                    f"warmup attempt limit reached for model {model_id} on port {port}: "
+                    f"{last_warmup_error or 'no response'}"
                 )
 
             try:
@@ -2006,7 +2014,6 @@ class GPUSplitMixin:
                     fn=_warm_split_runtime,
                     max_wait_seconds=SPLIT_META_TIMEOUT_SECONDS,
                 )
-                # Close log file on success (keep log file around for debugging)
                 if self._split_runtime_log_file:
                     try:
                         self._split_runtime_log_file.write(
@@ -2015,11 +2022,10 @@ class GPUSplitMixin:
                     except Exception:
                         pass
                 self._close_split_runtime_log_file()
-                return True, False  # success, cleanup_done=False
+                return True, False
             except Exception as exc:
-                # Gather crash context if process died
                 crash_ctx = {}
-                if proc.poll() is not None:
+                if proc is not None and proc.poll() is not None:
                     crash_ctx = self._gather_split_crash_context(proc.returncode, port, group_id)
                     self.last_split_runtime_error = (
                         f"{exc} signal={crash_ctx.get('signal_name', '')} "
@@ -2028,11 +2034,6 @@ class GPUSplitMixin:
                 else:
                     self.last_split_runtime_error = str(exc)
                 self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                # Close log file with failure note
                 if self._split_runtime_log_file:
                     try:
                         self._split_runtime_log_file.write(
@@ -2043,25 +2044,18 @@ class GPUSplitMixin:
                 self._close_split_runtime_log_file()
                 self.split_runtime_process = None
                 self._clear_split_runtime_owner_meta()
-                # Use coordinated cleanup instead of just returning
                 self._coordinated_split_failure_cleanup(
                     group_id=group_id,
                     split_port=port,
                     reason=f"warmup_failed:{type(exc).__name__}",
                     task_id=task_id,
                 )
-                return False, True  # cleanup_done=True
+                return False, True
         except Exception as exc:
             self.last_split_runtime_error = str(exc)
             self.logger.error(f"split runtime start failed: {self.last_split_runtime_error}")
-            if self.split_runtime_process:
-                try:
-                    self.split_runtime_process.terminate()
-                except Exception:
-                    pass
-                self.split_runtime_process = None
-                self._clear_split_runtime_owner_meta()
-            # Close log file if open
+            self.split_runtime_process = None
+            self._clear_split_runtime_owner_meta()
             if getattr(self, '_split_runtime_log_file', None):
                 try:
                     self._split_runtime_log_file.write(
@@ -2070,20 +2064,19 @@ class GPUSplitMixin:
                 except Exception:
                     pass
             self._close_split_runtime_log_file()
-            # Use coordinated cleanup
             self._coordinated_split_failure_cleanup(
                 group_id=group_id,
                 split_port=port,
                 reason=f"split_start_exception:{type(exc).__name__}",
                 task_id=task_id,
             )
-            return False, True  # cleanup_done=True
+            return False, True
 
     def _stop_split_runtime(self):
         """Stop split runtime using owner metadata first for reliable cleanup.
 
         Owner metadata is the authoritative shutdown path because it persists
-        even if the parent ollama process has already died. The in-memory Popen
+        even if the parent runtime process has already died. The in-memory Popen
         handle is only used as a secondary cleanup convenience.
         """
         # Step 1: Use owner metadata first (survives parent-process death)
@@ -2176,8 +2169,34 @@ class GPUSplitMixin:
         if joined.get(self.name) and member_clean.get(self.name):
             return reservation, True, ""
 
+        status = str(reservation.get("status", "")).strip()
+        target_model = str(reservation.get("target_model", "")).strip()
+
         # Backfill case: joined exists but member_clean missing - re-verify
         if joined.get(self.name) and not member_clean.get(self.name):
+            if self._can_backfill_from_active_split_runtime(
+                reservation=reservation,
+                group_id=group_id,
+            ):
+                member_clean[self.name] = {
+                    "verified_at": datetime.now().isoformat(),
+                    "details": {
+                        "backfilled_from_active_runtime": True,
+                        "worker": self.name,
+                        "runtime_state": self.runtime_state,
+                        "runtime_placement": self.runtime_placement,
+                        "runtime_group_id": self.runtime_group_id,
+                        "loaded_model": self.loaded_model,
+                        "target_model": target_model,
+                        "reservation_status": status,
+                    },
+                }
+                reservation["member_clean"] = member_clean
+                reservation["updated_at"] = datetime.now().isoformat()
+                self.logger.info(
+                    f"SPLIT_MEMBER_CLEAN_BACKFILL_ACTIVE_RUNTIME group={group_id} member={self.name}"
+                )
+                return reservation, True, ""
             self.logger.info(
                 f"SPLIT_MEMBER_CLEAN_BACKFILL_START group={group_id} member={self.name}"
             )
@@ -2253,7 +2272,7 @@ class GPUSplitMixin:
         Before joining, verifies:
         - runtime_state == cold
         - model_loaded == false
-        - local Ollama port has no loaded models
+        - local runtime port has no loaded models
 
         If precondition fails, does NOT join and logs explicit reason.
         The reservation will remain waiting for all members to join cleanly.
@@ -2303,12 +2322,8 @@ class GPUSplitMixin:
         if not model_id:
             return False
         try:
-            r = requests.get(f"http://127.0.0.1:{port_int}/api/ps", timeout=2)
-            if r.status_code != 200:
-                return False
-            models = r.json().get("models", [])
-            loaded_names = [str(m.get("name", "")).strip() for m in models if isinstance(m, dict)]
-            return model_id in loaded_names
+            r = requests.get(f"http://127.0.0.1:{port_int}/v1/models", timeout=2)
+            return r.status_code == 200
         except Exception:
             return False
 
@@ -2321,6 +2336,63 @@ class GPUSplitMixin:
             group_id=group_id,
             require_alive_pid=False,
         )
+
+    def _split_runtime_can_reuse_existing(
+        self,
+        *,
+        port: Any,
+        model_id: str,
+        group_id: Optional[str] = None,
+    ) -> bool:
+        """Reuse an already-healthy split runtime owned by the expected group."""
+        if not self._split_runtime_has_any_listener(port):
+            return False
+        if not self._split_runtime_has_expected_owner(port, model_id, group_id):
+            return False
+        if not self._split_runtime_has_model_loaded(port, model_id):
+            return False
+        return True
+
+    def _reclaim_stale_split_listener_before_launch(
+        self,
+        *,
+        port: int,
+        container_name: str,
+        group_id: str,
+    ) -> bool:
+        """Best-effort reclaim for stale split listeners before relaunch."""
+        reclaimed_any = False
+
+        if container_name:
+            try:
+                result = subprocess.run(
+                    ["docker", "rm", "-f", container_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if result.returncode == 0:
+                    reclaimed_any = True
+                    self.logger.warning(
+                        f"SPLIT_RUNTIME_RECLAIM_CONTAINER group={group_id} "
+                        f"port={port} container={container_name}"
+                    )
+                    time.sleep(0.5)
+            except Exception as exc:
+                self.logger.warning(
+                    f"SPLIT_RUNTIME_RECLAIM_CONTAINER_FAIL group={group_id} "
+                    f"port={port} container={container_name}: {exc}"
+                )
+
+        if self._split_runtime_has_any_listener(port):
+            killed = self._kill_local_listener_on_port(port)
+            if killed:
+                reclaimed_any = True
+                time.sleep(0.5)
+
+        if self._split_runtime_has_any_listener(port):
+            return False
+        return reclaimed_any
 
     def _split_runtime_has_any_listener(self, port: Any) -> bool:
         try:
@@ -2360,8 +2432,8 @@ class GPUSplitMixin:
             self.logger.warning(f"SPLIT_ORPHAN_RECLAIM_SCAN_FAIL port={port}: {exc}")
         return killed
 
-    def _kill_orphan_ollama_runners(self, target_port: Optional[int] = None) -> int:
-        """Kill orphan ollama runner processes (PPID 1) for a specific port only.
+    def _kill_orphan_runtime_processes(self, target_port: Optional[int] = None) -> int:
+        """Kill orphan runtime processes (PPID 1) for a specific port only.
 
         Args:
             target_port: Only kill runners associated with this port. If None,
@@ -2415,7 +2487,7 @@ class GPUSplitMixin:
                 cmd = parts[2]
                 if ppid != 1:
                     continue
-                if "ollama runner" not in cmd:
+                if "llama" not in cmd.lower():
                     continue
                 # Only kill if this orphan runner has the target port open
                 # (inherited socket from its now-dead parent)
@@ -2531,6 +2603,7 @@ class GPUSplitMixin:
         result = {
             "group_id": group_id,
             "owner_meta_found": False,
+            "container_kill": None,
             "pgid_kill": None,
             "pid_kill": None,
             "success": False,
@@ -2551,6 +2624,23 @@ class GPUSplitMixin:
         result["owner_meta_found"] = True
         pid = owner_meta.get("pid")
         pgid = owner_meta.get("pgid")
+        container_name = str(owner_meta.get("container_name") or "").strip()
+
+        if container_name:
+            try:
+                subprocess.run(
+                    ["docker", "rm", "-f", container_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                result["container_kill"] = {"container_name": container_name, "success": True}
+            except Exception as exc:
+                result["container_kill"] = {
+                    "container_name": container_name,
+                    "success": False,
+                    "error": str(exc),
+                }
 
         # Try process group kill first (more thorough)
         if pgid and self._is_pid_alive(pgid):
@@ -2565,9 +2655,10 @@ class GPUSplitMixin:
             result["pid_kill"] = {"pid": pid, "already_dead": True}
 
         # Determine overall success
+        container_ok = result.get("container_kill", {}).get("success", True)
         pgid_ok = result.get("pgid_kill", {}).get("success", True)
         pid_ok = result.get("pid_kill", {}).get("killed", True) or result.get("pid_kill", {}).get("already_dead", True)
-        result["success"] = pgid_ok and pid_ok
+        result["success"] = container_ok and pgid_ok and pid_ok
 
         self.logger.info(
             f"SPLIT_FORCE_KILL_OWNER group={group_id} "
@@ -2614,7 +2705,7 @@ class GPUSplitMixin:
         # Only kill orphan runners when we have permission to reclaim the port.
         # This prevents a non-launcher partner from killing a launcher's healthy runtime.
         if can_reclaim_port:
-            result["orphan_runners_killed"] = self._kill_orphan_ollama_runners(
+            result["orphan_runners_killed"] = self._kill_orphan_runtime_processes(
                 target_port=port_int if port_int > 0 else None
             )
 
@@ -2665,6 +2756,51 @@ class GPUSplitMixin:
                 self.logger.warning(
                     f"SPLIT_ORPHAN_RECLAIM_STARTUP port={port} group={group_id or '-'} "
                     f"reservation_status={status or 'missing'}"
+                )
+                self._kill_local_listener_on_port(port)
+
+    def _reclaim_orphan_split_ports_runtime(self):
+        """Kill impossible live split listeners that lost all shared state.
+
+        A healthy split runtime must have either:
+        - an active reservation in loading/ready state, or
+        - local member state already bound to that same group.
+
+        If a known split port is still live after both are gone, the runtime is
+        orphaned and should be reclaimed before it confuses heartbeats,
+        dashboard state, and later split scheduling.
+        """
+        seen_ports = set()
+        for model_id, meta in self.model_meta_by_id.items():
+            for group in meta.get("split_groups", []) or []:
+                members = [str(m).strip() for m in group.get("members", []) if str(m).strip()]
+                if self.name not in members:
+                    continue
+                try:
+                    port = int(group.get("port"))
+                except Exception:
+                    continue
+                if port in seen_ports:
+                    continue
+                seen_ports.add(port)
+                group_id = str(group.get("id", "")).strip()
+                if (
+                    self.runtime_placement == "split_gpu"
+                    and str(self.runtime_group_id or "").strip() == group_id
+                ):
+                    continue
+                reservation = self._read_json_file(self._split_reservation_path(group_id)) if group_id else None
+                status = str((reservation or {}).get("status", "")).strip()
+                active_states = SPLIT_RESERVATION_LOADING_STATES | {"ready"}
+                if status in active_states:
+                    continue
+                if not self._split_runtime_has_any_listener(port):
+                    continue
+                if not self._split_runtime_has_model_loaded(port=port, model_id=model_id):
+                    continue
+                self.logger.warning(
+                    f"SPLIT_ORPHAN_RECLAIM_RUNTIME port={port} group={group_id or '-'} "
+                    f"model={model_id} reservation_status={status or 'missing'}"
                 )
                 self._kill_local_listener_on_port(port)
 

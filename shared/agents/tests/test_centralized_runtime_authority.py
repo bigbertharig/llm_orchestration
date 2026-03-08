@@ -23,6 +23,7 @@ if "requests" not in sys.modules:
     sys.modules["requests"] = types.SimpleNamespace()
 
 from brain_resources import BrainResourceMixin
+from gpu_runtime import GPURuntimeMixin
 from gpu_tasks import GPUTaskMixin
 
 
@@ -59,10 +60,16 @@ class MockBrain(BrainResourceMixin):
 class MockGpuTasks(GPUTaskMixin):
     def __init__(self):
         self.name = "gpu-1"
+        self.runtime_state = "ready_split"
+        self.runtime_error_code = None
+        self.runtime_error_detail = None
+        self.model_loaded = True
+        self.loaded_model = "qwen2.5-coder:14b"
         self.runtime_group_id = "pair_1_2"
         self.runtime_port = 11434
         self.split_runtime_generation = "gen-current"
         self._reservation_epoch = "epoch-current"
+        self.last_split_runtime_error = ""
         self.cleanup_calls = []
         self.logger = MagicMock()
 
@@ -81,6 +88,15 @@ class MockGpuTasks(GPUTaskMixin):
         }
         self.cleanup_calls.append(payload)
         return payload
+
+
+class MockGpuRuntime(GPURuntimeMixin):
+    def __init__(self, tmpdir: Path):
+        self.name = "gpu-2"
+        self.model_load_owner_path = tmpdir / "signals" / "model_load.global.json"
+        self.model_load_owner_path.parent.mkdir(parents=True, exist_ok=True)
+        self.pending_global_load_owner_issue = {}
+        self.logger = MagicMock()
 
 
 class CentralizedRuntimeAuthorityTests(unittest.TestCase):
@@ -228,6 +244,36 @@ class CentralizedRuntimeAuthorityTests(unittest.TestCase):
 
             self.assertTrue(owner_path.exists())
             self.assertFalse(any(x["event"] == "GLOBAL_LOAD_OWNER_RECLAIMED" for x in brain.logged))
+
+    def test_gpu_reclaims_stale_global_load_owner_and_acquires_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = MockGpuRuntime(Path(tmp))
+            stale_owner = {
+                "worker": "gpu-2",
+                "pid": 999999,
+                "phase": "single_model_load",
+                "lease_id": "lease-stale",
+                "acquired_at": (datetime.now() - timedelta(minutes=5)).isoformat(),
+                "heartbeat_at": (datetime.now() - timedelta(minutes=5)).isoformat(),
+            }
+            gpu.model_load_owner_path.write_text(json.dumps(stale_owner), encoding="utf-8")
+
+            acquired = gpu._try_acquire_global_model_load_owner("single_model_load")
+
+            self.assertTrue(acquired)
+            current_owner = json.loads(gpu.model_load_owner_path.read_text(encoding="utf-8"))
+            self.assertEqual(current_owner["worker"], "gpu-2")
+            self.assertNotEqual(current_owner["lease_id"], "lease-stale")
+            self.assertEqual(
+                gpu.pending_global_load_owner_issue["has_issue"],
+                False,
+            )
+            self.assertTrue(
+                any(
+                    "GLOBAL_LOAD_LOCK_STALE_OWNER_RECLAIMED" in str(call.args[0])
+                    for call in gpu.logger.warning.call_args_list
+                )
+            )
 
 
 if __name__ == "__main__":

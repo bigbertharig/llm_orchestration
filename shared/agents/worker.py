@@ -42,7 +42,7 @@ except AttributeError:
 
 
 def execute_task(task: Dict[str, Any], permissions_file: str,
-                 gpu_name: str, ollama_url: str = None,
+                 gpu_name: str, api_base: str = None,
                  model: str = None, task_timeout: int | None = None,
                  worker_num_ctx: int = 8192) -> Dict[str, Any]:
     """
@@ -50,7 +50,7 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
 
     Handles two task types:
       - shell: Run a command via PermissionExecutor
-      - LLM (generate/parse/transform/execute): Send prompt to Ollama
+      - LLM (generate/parse/transform/execute): Send prompt to active runtime
 
     Returns a result dict with at minimum: success, worker, output/error.
     """
@@ -84,14 +84,18 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
         }
 
     # Handle LLM tasks
-    if not ollama_url:
+    runtime_base_url = (
+        str(os.environ.get("WORKER_API_BASE", "")).strip()
+        or str(api_base or "").strip()
+    )
+
+    if not runtime_base_url:
         return {
             "success": False,
-            "error": "LLM task but no Ollama URL provided",
+            "error": "LLM task but no runtime URL provided",
             "worker": gpu_name,
         }
 
-    api_url = f"{ollama_url}/api/generate"
     task_model = str(task.get("llm_model", "")).strip() or str(model or "").strip()
     if not task_model:
         return {
@@ -107,6 +111,16 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
 
     logger.info(f"Executing LLM task type: {task_type}")
 
+    runtime_backend = os.environ.get("WORKER_RUNTIME_BACKEND", "")
+    if not runtime_backend:
+        runtime_backend = "llama"
+    if runtime_backend != "llama":
+        return {
+            "success": False,
+            "error": f"Unsupported runtime backend: {runtime_backend}",
+            "worker": gpu_name,
+        }
+
     try:
         start_time = time.time()
 
@@ -114,28 +128,32 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
         if request_timeout is None:
             request_timeout = task_timeout
 
+        api_url = f"{runtime_base_url}/v1/chat/completions"
         response = requests.post(
             api_url,
             json={
                 "model": task_model,
-                "prompt": full_prompt,
-                "stream": False,
-                "options": {"num_ctx": worker_num_ctx},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": (f"Context:\n{context}\n\n" if context else "") + f"Task:\n{prompt}"},
+                ],
+                "max_tokens": worker_num_ctx,
             },
-            timeout=request_timeout
+            timeout=request_timeout,
         )
         response.raise_for_status()
-
         result = response.json()
         elapsed = time.time() - start_time
-        output = result.get("response", "")
+        choices = result.get("choices", [])
+        output = choices[0]["message"]["content"] if choices else ""
+        tokens = result.get("usage", {}).get("completion_tokens", 0)
 
         _log_training_sample(task, prompt, output, "success", gpu_name, model)
 
         return {
             "success": True,
             "output": output,
-            "tokens": result.get("eval_count", 0),
+            "tokens": tokens,
             "duration_seconds": elapsed,
             "model": task_model,
             "worker": gpu_name,
@@ -212,8 +230,10 @@ def main():
     parser.add_argument("--gpu-name", required=True, help="Name of parent GPU agent")
     parser.add_argument("--permissions", required=True, help="Path to permissions file")
     parser.add_argument("--task", required=True, help="Task JSON string")
-    parser.add_argument("--ollama-url", default=None,
-                        help="Ollama API URL (e.g., http://localhost:11435)")
+    parser.add_argument("--api-base", default=None,
+                        help="Runtime API base URL (e.g., http://localhost:11435)")
+    parser.add_argument("--runtime-url", default=None,
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     # Parse task
@@ -259,15 +279,16 @@ def main():
     os.environ["WORKER_NAME"] = args.gpu_name
     if model:
         os.environ["WORKER_MODEL"] = str(model)
-    if args.ollama_url:
-        os.environ["WORKER_OLLAMA_URL"] = args.ollama_url
+    runtime_api_base = args.api_base or args.runtime_url
+    if runtime_api_base:
+        os.environ["WORKER_API_BASE"] = runtime_api_base
 
     # Execute
     result = execute_task(
         task=task,
         permissions_file=args.permissions,
         gpu_name=args.gpu_name,
-        ollama_url=args.ollama_url,
+        api_base=runtime_api_base,
         model=model,
         task_timeout=task_timeout,
         worker_num_ctx=worker_num_ctx,

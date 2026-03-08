@@ -8,11 +8,52 @@
   },
   "shared_path": "../",
   "permissions_path": "permissions/",
-  "ollama_host": "http://localhost:11434",
+  "model_search_roots": [
+    "/mnt/shared/models"
+  ],
+  "runtime_host": "http://localhost:11434",
+  "runtime_backend": "llama",
   "brain_keep_alive": "30m",
   "worker_keep_alive": "30m",
-  "brain_context_tokens": 32768,
+  "brain_context_tokens": 8192,
   "worker_context_tokens": 8192,
+  "auto_default_gpu": "gpu-2",
+  "auto_default_model": "qwen2.5:7b",
+  "startup_warm_workers": [
+    "gpu-2"
+  ],
+  "llama_single_defaults": {
+    "ctx_size": 2048,
+    "batch_size": 64,
+    "parallel": 1,
+    "n_gpu_layers": 999
+  },
+  "llama_split_defaults": {
+    "ctx_size": 4096,
+    "batch_size": 128,
+    "parallel": 1,
+    "n_gpu_layers": 999
+  },
+  "llama_single_profiles": {
+    "qwen2.5:7b": {
+      "ctx_size": 2048,
+      "batch_size": 64,
+      "parallel": 1,
+      "n_gpu_layers": 999,
+      "extra_args": [
+        "--no-warmup"
+      ]
+    }
+  },
+  "llama_split_profiles": {
+    "qwen2.5-coder:14b": {
+      "ctx_size": 4096,
+      "batch_size": 128,
+      "parallel": 1,
+      "n_gpu_layers": 999,
+      "tensor_split": "1,1"
+    }
+  },
   "review_lap_models": {
     "extractor": {
       "preferred": "qwen2.5:7b",

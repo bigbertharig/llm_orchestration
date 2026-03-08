@@ -27,7 +27,8 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
-from hardware import scan_gpus, scan_ollama, scan_cpu_temps
+from brain_core import resolve_runtime_base_url
+from hardware import scan_gpus, scan_runtime, scan_cpu_temps
 
 # =============================================================================
 # Tunable wait times (seconds)
@@ -203,6 +204,18 @@ def wait_for_ready_flag(name: str, max_wait: int) -> bool:
     return False
 
 
+def brain_ready_wait_budget(brain_preloaded: bool, runtime_backend: str) -> int:
+    """Return the launcher wait budget for the brain ready flag.
+
+    Reused llama runtimes still need time for `brain.py` to reconnect, write
+    heartbeat, and publish its ready flag. A short special-case budget causes
+    false startup failures that look like stalled heartbeats from outside.
+    """
+    _ = brain_preloaded
+    _ = runtime_backend
+    return BRAIN_MAX_WAIT
+
+
 def _is_port_open(port: int, host: str = "127.0.0.1") -> bool:
     """Return True if a TCP port is currently accepting connections."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -250,8 +263,19 @@ def _wait_for_cpu_cooldown(config: dict, max_wait_seconds: int = 600) -> bool:
 
 
 def _clear_stale_heartbeats(shared_path: Path, worker_gpus: list):
-    """Remove stale GPU/task heartbeat files so startup reflects live state."""
+    """Remove stale brain/GPU/task heartbeat files so startup reflects live state."""
     removed = 0
+    for hb in (
+        shared_path / "brain" / "heartbeat.json",
+        shared_path / "heartbeats" / "brain.json",
+    ):
+        if hb.exists():
+            try:
+                hb.unlink()
+                removed += 1
+            except OSError:
+                pass
+
     for gpu_cfg in worker_gpus:
         hb = shared_path / "gpus" / f"gpu_{gpu_cfg['id']}" / "heartbeat.json"
         if hb.exists():
@@ -288,6 +312,28 @@ def _reclaim_worker_port(port: int, gpu_name: str):
         f"  WARNING: worker port {port} ({gpu_name}) is in use. "
         f"Attempting reclaim..."
     )
+
+    # First reclaim the canonical worker container if it exists. This is the
+    # expected owner for llama-backed workers, and removing it preserves single
+    # runtime ownership better than generic port killing.
+    container_name = f"llama-worker-{gpu_name}"
+    try:
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except Exception:
+        pass
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if not _is_port_open(port):
+            print(f"  Reclaimed port {port} for {gpu_name}")
+            return
+        time.sleep(0.2)
 
     # Try lsof first (exact PID targeting), then fuser as fallback.
     killed_any = False
@@ -424,6 +470,7 @@ def _enqueue_startup_load_llm(
     count: int,
     available_workers: list[dict] | None = None,
     agents_dir: Path | None = None,
+    preferred_workers: list[str] | None = None,
 ):
     """Insert N startup load_llm meta tasks into the public queue.
 
@@ -470,11 +517,21 @@ def _enqueue_startup_load_llm(
 
     non_split_workers = [w for w in all_workers if w not in split_members]
     split_workers = [w for w in all_workers if w in split_members]
-    preferred_order = non_split_workers + split_workers
+    preferred_warm = []
+    if isinstance(preferred_workers, list):
+        for worker_name in preferred_workers:
+            normalized = str(worker_name).strip()
+            if normalized and normalized in all_workers and normalized not in preferred_warm:
+                preferred_warm.append(normalized)
+    preferred_order = preferred_warm + [
+        worker_name
+        for worker_name in (non_split_workers + split_workers)
+        if worker_name not in preferred_warm
+    ]
 
     if preferred_order:
         print(
-            f"Startup warm policy: non-split first {non_split_workers}, "
+            f"Startup warm policy: explicit {preferred_warm}, non-split first {non_split_workers}, "
             f"split-member last {split_workers}"
         )
 
@@ -513,27 +570,39 @@ def _enqueue_startup_load_llm(
 # =============================================================================
 # Pre-loaded model detection (from launch.py)
 # =============================================================================
-def check_loaded_models(ollama_host: str) -> dict:
-    """Check what models are currently loaded in Ollama."""
+def check_loaded_models(runtime_base_url: str, runtime_backend: str = "llama") -> dict:
+    """Check what models are currently loaded in the runtime.
+
+    Probes /v1/models for the llama runtime.
+    """
+    if runtime_backend != "llama":
+        raise ValueError(f"Unsupported runtime_backend: {runtime_backend}")
     try:
-        req = urllib.request.Request(f"{ollama_host}/api/ps")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-            loaded = {}
-            for model in data.get("models", []):
-                name = model.get("name", "")
-                loaded[name] = {
-                    "size_vram": model.get("size_vram", 0),
-                }
-            return loaded
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        result = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", "llama-brain"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and "true" in result.stdout.lower():
+            try:
+                req = urllib.request.Request(f"{runtime_base_url}/v1/models")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    if resp.status == 200:
+                        return {"_llama_brain": {"size_vram": 0, "status": "ready"}}
+            except urllib.error.HTTPError as exc:
+                if exc.code == 503:
+                    return {"_llama_brain": {"size_vram": 0, "status": "loading"}}
+            except Exception:
+                pass
+            return {"_llama_brain": {"size_vram": 0, "status": "running"}}
+        return {}
+    except Exception:
         return {}
 
 
 # =============================================================================
 # Hardware verification
 # =============================================================================
-def verify_hardware(config: dict, actual_gpus: list, ollama: dict) -> dict:
+def verify_hardware(config: dict, actual_gpus: list, runtime: dict) -> dict:
     """Compare config expectations against actual hardware.
 
     Returns:
@@ -604,12 +673,12 @@ def verify_hardware(config: dict, actual_gpus: list, ollama: dict) -> dict:
             f"only {available} available"
         )
 
-    # Verify Ollama
-    if ollama["running"]:
-        print("  Ollama: running OK")
+    # Verify Runtime
+    if runtime["running"]:
+        print("  Runtime: running OK")
     else:
-        print("  Ollama: NOT running")
-        result["warnings"].append("Ollama is not running")
+        print("  Runtime: NOT running")
+        result["warnings"].append("Runtime is not running")
         result["ok"] = False
 
     return result
@@ -901,9 +970,9 @@ def main():
 
     # Verify hardware
     print("\nVerifying hardware and thermal state...")
-    ollama_host = config.get("ollama_host", "http://localhost:11434")
+    runtime_base_url = resolve_runtime_base_url(config)
     actual_gpus = scan_gpus()
-    ollama = scan_ollama(ollama_host)
+    runtime_info = scan_runtime(runtime_base_url)
     cpu_temp = _get_max_cpu_temp_c()
     gpu_temp_max = max((g.get("temp_c", 0) for g in actual_gpus), default=None)
 
@@ -916,7 +985,7 @@ def main():
     if gpu_temp_max is not None:
         print(f"  Max GPU temp (live): {gpu_temp_max}C")
 
-    hw = verify_hardware(config, actual_gpus, ollama)
+    hw = verify_hardware(config, actual_gpus, runtime_info)
 
     if not hw["brain_ok"]:
         print("\nERROR: Brain GPU(s) missing. Cannot start.")
@@ -944,22 +1013,31 @@ def main():
     clear_ready_flags()
 
     # Check if brain model is pre-loaded
-    loaded_models = check_loaded_models(ollama_host)
+    runtime_backend = str(config.get("runtime_backend", "llama"))
+    loaded_models = check_loaded_models(runtime_base_url, runtime_backend=runtime_backend)
     brain_model = config["brain"]["model"]
-    brain_preloaded = brain_model in loaded_models if brain_model else False
+
+    if runtime_backend == "llama":
+        llama_state = loaded_models.get("_llama_brain", {})
+        brain_preloaded = llama_state.get("status") == "ready"
+    else:
+        brain_preloaded = brain_model in loaded_models if brain_model else False
 
     if loaded_models:
         print(f"\nPre-loaded models: {', '.join(loaded_models.keys())}")
         if brain_preloaded:
             print(f"  Brain model ({brain_model}) is pre-loaded")
-        skip_ollama_restart = brain_preloaded
+        elif runtime_backend == "llama":
+            llama_state = loaded_models.get("_llama_brain", {}).get("status", "unknown")
+            print(f"  Existing llama brain container state: {llama_state}")
+        skip_runtime_restart = brain_preloaded
     else:
-        skip_ollama_restart = False
+        skip_runtime_restart = False
 
-    if skip_ollama_restart:
-        print("\nReusing existing Ollama instance with pre-loaded models")
+    if skip_runtime_restart:
+        print(f"\nReusing existing {runtime_backend} instance with pre-loaded models")
     else:
-        print("\nNo pre-loaded brain model detected; continuing with live Ollama")
+        print(f"\nNo pre-loaded brain model detected; continuing with live {runtime_backend}")
 
     # --- Start Brain ---
     print(f"\nStarting brain on GPUs {config['brain']['gpus']}...")
@@ -977,7 +1055,7 @@ def main():
     )
     processes.append(("brain", brain_proc))
 
-    wait_time = 60 if brain_preloaded else BRAIN_MAX_WAIT
+    wait_time = brain_ready_wait_budget(brain_preloaded, runtime_backend)
     if not wait_for_ready_flag("brain", wait_time):
         print("Brain failed to start, aborting...")
         cleanup()
@@ -1023,6 +1101,7 @@ def main():
             count=warm_target,
             available_workers=gpus_to_start,
             agents_dir=agents_dir,
+            preferred_workers=config.get("startup_warm_workers"),
         )
 
     # --- Running ---

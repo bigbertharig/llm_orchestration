@@ -17,10 +17,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from hardware import scan_gpus, scan_ollama, scan_system, suggest_assignment
+from hardware import scan_gpus, scan_runtime, scan_system, suggest_assignment
 
 
-def print_hardware_scan(gpus, ollama, system):
+def print_hardware_scan(gpus, runtime, system):
     """Display discovered hardware."""
     print()
     print("=" * 50)
@@ -47,26 +47,29 @@ def print_hardware_scan(gpus, ollama, system):
     else:
         print("    (none — CPU-only mode)")
 
-    # Ollama
-    if ollama["running"]:
-        print(f"\n  Ollama: running ({ollama['host']})")
-        if ollama["available_models"]:
+    backend = str(runtime.get("backend", "llama")).strip()
+    runtime_label = backend.capitalize()
+    if runtime["running"]:
+        print(f"\n  Runtime: {runtime_label} running ({runtime['host']})")
+        if runtime["available_models"]:
             models_str = ", ".join(
                 f"{m['name']} ({m['size_mb']} MB)"
-                for m in ollama["available_models"]
+                for m in runtime["available_models"]
             )
             print(f"    Available models: {models_str}")
         else:
-            print("    Available models: (none — pull some with 'ollama pull')")
-        if ollama["loaded_models"]:
+            if backend == "llama":
+                print("    Available models: reported only when the runtime is already serving")
+            else:
+                print("    Available models: (none — no models available)")
+        if runtime["loaded_models"]:
             loaded_str = ", ".join(
                 f"{m['name']} ({m['vram_mb']} MB VRAM)"
-                for m in ollama["loaded_models"]
+                for m in runtime["loaded_models"]
             )
             print(f"    Loaded models: {loaded_str}")
     else:
-        print(f"\n  Ollama: NOT running ({ollama['host']})")
-        print("    Start with: ollama serve")
+        print(f"\n  Runtime: {runtime_label} NOT responding ({runtime['host']})")
 
 
 def print_suggestion(assignment):
@@ -99,7 +102,7 @@ def print_suggestion(assignment):
     print(f"  Initial hot workers: {assignment.get('initial_hot_workers', 0)}")
 
 
-def prompt_confirm(assignment, ollama):
+def prompt_confirm(assignment, runtime):
     """Ask user to accept, reject, or edit the configuration."""
     print()
     choice = input("  Accept this configuration? [Y/n/edit]: ").strip().lower()
@@ -107,15 +110,15 @@ def prompt_confirm(assignment, ollama):
     if choice in ("", "y", "yes"):
         return assignment
     elif choice == "edit":
-        return prompt_edit(assignment, ollama)
+        return prompt_edit(assignment, runtime)
     else:
         print("  Setup cancelled.")
         sys.exit(0)
 
 
-def prompt_edit(assignment, ollama):
+def prompt_edit(assignment, runtime):
     """Let user edit the suggested configuration."""
-    available_models = ollama.get("available_models", [])
+    available_models = runtime.get("available_models", [])
     model_names = [m["name"] for m in available_models]
 
     while True:
@@ -198,8 +201,11 @@ def prompt_worker_mode(assignment):
     return assignment
 
 
-def build_config(assignment, ollama, system):
+def build_config(assignment, runtime, system):
     """Build the full config.json structure from the assignment."""
+    worker_ids = [int(w["id"]) for w in assignment["gpus"] if w.get("id") is not None]
+    warm_gpu_id = 2 if 2 in worker_ids else (worker_ids[0] if worker_ids else None)
+    warm_gpu_name = f"gpu-{warm_gpu_id}" if warm_gpu_id is not None else ""
     config = {
         "_generated_by": "setup.py",
         "_generated_at": datetime.now().isoformat(),
@@ -211,11 +217,48 @@ def build_config(assignment, ollama, system):
         },
         "shared_path": "../",
         "permissions_path": "permissions/",
-        "ollama_host": ollama["host"],
+        "runtime_backend": "llama",
+        "model_search_roots": [
+            "/mnt/shared/models",
+        ],
+        "runtime_host": runtime["host"],
         "brain_keep_alive": "30m",
         "worker_keep_alive": "30m",
-        "brain_context_tokens": 32768,
+        "brain_context_tokens": 8192,
         "worker_context_tokens": 8192,
+        "auto_default_gpu": warm_gpu_name or "gpu-2",
+        "auto_default_model": "qwen2.5:7b",
+        "startup_warm_workers": [warm_gpu_name] if warm_gpu_name else [],
+        "llama_single_defaults": {
+            "ctx_size": 2048,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+        },
+        "llama_split_defaults": {
+            "ctx_size": 4096,
+            "batch_size": 128,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+        },
+        "llama_single_profiles": {
+            "qwen2.5:7b": {
+                "ctx_size": 2048,
+                "batch_size": 64,
+                "parallel": 1,
+                "n_gpu_layers": 999,
+                "extra_args": ["--no-warmup"],
+            },
+        },
+        "llama_split_profiles": {
+            "qwen2.5-coder:14b": {
+                "ctx_size": 4096,
+                "batch_size": 128,
+                "parallel": 1,
+                "n_gpu_layers": 999,
+                "tensor_split": "1,1",
+            },
+        },
         "brain": {
             "name": "brain",
             "model": assignment["brain"]["model"],
@@ -266,9 +309,9 @@ def main():
         help="Output config file path (default: config.json)",
     )
     parser.add_argument(
-        "--ollama-host",
+        "--runtime-host",
         default="http://localhost:11434",
-        help="Ollama API host",
+        help="Runtime API host",
     )
     parser.add_argument("--brain-model", help="Override brain model choice")
     parser.add_argument("--worker-model", help="Override worker model choice")
@@ -293,7 +336,8 @@ def main():
 
     # Scan hardware
     gpus = scan_gpus()
-    ollama = scan_ollama(args.ollama_host)
+    runtime_host = str(args.runtime_host).strip()
+    runtime = scan_runtime(runtime_host, runtime_backend="llama")
     system = scan_system()
 
     # Build preferences from CLI args
@@ -302,7 +346,7 @@ def main():
         preferences["worker_mode"] = args.worker_mode
 
     # Get suggestion
-    assignment = suggest_assignment(gpus, ollama, preferences)
+    assignment = suggest_assignment(gpus, runtime, preferences)
 
     # Apply CLI overrides
     if args.brain_model:
@@ -318,12 +362,12 @@ def main():
         assignment["initial_hot_workers"] = assignment.get("initial_hot_workers", 0)
 
     # Display scan results and suggestion
-    print_hardware_scan(gpus, ollama, system)
+    print_hardware_scan(gpus, runtime, system)
     print_suggestion(assignment)
 
     if not args.yes:
         # Interactive confirmation
-        assignment = prompt_confirm(assignment, ollama)
+        assignment = prompt_confirm(assignment, runtime)
 
         # Ask about worker mode if not already set via CLI
         if not args.worker_mode and assignment["gpus"]:
@@ -343,7 +387,7 @@ def main():
         assignment["initial_hot_workers"] = len(assignment.get("gpus", []))
 
     # Build and write config
-    config = build_config(assignment, ollama, system)
+    config = build_config(assignment, runtime, system)
 
     config_path = Path(args.config)
     if config_path.exists() and not args.yes:

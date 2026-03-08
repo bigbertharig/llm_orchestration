@@ -1,7 +1,7 @@
 """Brain core services mixin.
 
 Extracted from brain.py to isolate config/model catalog loading, state
-persistence, decision logging/escalation, incident bookkeeping, and Ollama
+persistence, decision logging/escalation, incident bookkeeping, and runtime
 client lifecycle helpers.
 """
 
@@ -58,6 +58,120 @@ def resolve_auto_default_target(config: dict) -> tuple[str, str]:
             selected_model = "qwen2.5:7b"
 
     return selected_gpu, selected_model
+
+
+def _merge_llama_profile(base: dict[str, Any], override: Any) -> dict[str, Any]:
+    if not isinstance(override, dict):
+        return dict(base)
+    merged = dict(base)
+    for key, value in override.items():
+        merged[key] = value
+    return merged
+
+
+def _normalize_llama_profile(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+
+    normalized: dict[str, Any] = {}
+    for field in ("ctx_size", "n_gpu_layers", "batch_size", "parallel", "threads"):
+        value = raw.get(field)
+        if value in (None, ""):
+            continue
+        try:
+            normalized[field] = int(value)
+        except Exception:
+            continue
+
+    tensor_split = raw.get("tensor_split")
+    if isinstance(tensor_split, list):
+        parts = [str(part).strip() for part in tensor_split if str(part).strip()]
+        if parts:
+            normalized["tensor_split"] = ",".join(parts)
+    elif isinstance(tensor_split, str) and tensor_split.strip():
+        normalized["tensor_split"] = tensor_split.strip()
+
+    extra_args = raw.get("extra_args")
+    if isinstance(extra_args, list):
+        normalized["extra_args"] = [str(arg).strip() for arg in extra_args if str(arg).strip()]
+
+    return normalized
+
+
+def resolve_llama_runtime_profile(
+    config: dict,
+    *,
+    model_id: str = "",
+    gpu_config: dict | None = None,
+    split: bool = False,
+    override: dict | None = None,
+) -> dict[str, Any]:
+    """Resolve explicit llama launch settings from config."""
+    defaults_key = "llama_split_defaults" if split else "llama_single_defaults"
+    profiles_key = "llama_split_profiles" if split else "llama_single_profiles"
+
+    profile = _normalize_llama_profile(config.get(defaults_key))
+
+    model_profiles = config.get(profiles_key)
+    if isinstance(model_profiles, dict):
+        profile = _merge_llama_profile(
+            profile,
+            _normalize_llama_profile(model_profiles.get(str(model_id).strip())),
+        )
+
+    if isinstance(gpu_config, dict):
+        profile = _merge_llama_profile(
+            profile,
+            _normalize_llama_profile(gpu_config.get("llama_runtime")),
+        )
+
+    profile = _merge_llama_profile(profile, _normalize_llama_profile(override))
+    return profile
+
+
+def resolve_runtime_base_url(config: dict) -> str:
+    """Resolve the configured runtime base URL using backend-neutral naming."""
+    runtime_base = str(config.get("runtime_host") or "").strip()
+    if not runtime_base:
+        runtime_base = "http://localhost:11434"
+    return runtime_base.rstrip("/")
+
+
+def resolve_model_search_roots(config: dict) -> list[Path]:
+    """Resolve explicit model search roots in priority order."""
+    configured = config.get("model_search_roots")
+    roots: list[Path] = []
+
+    if isinstance(configured, list):
+        for raw in configured:
+            candidate = str(raw or "").strip()
+            if candidate:
+                roots.append(Path(candidate))
+
+    runtime_root = str(config.get("runtime_model_root") or "").strip()
+    if runtime_root:
+        roots.append(Path(runtime_root))
+
+    roots.append(Path("/mnt/shared/models"))
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(root)
+    return deduped
+
+
+def resolve_runtime_chat_endpoint(config: dict) -> str:
+    """Resolve the active llama chat endpoint."""
+    runtime_base = resolve_runtime_base_url(config)
+    backend = str(config.get("runtime_backend", "llama") or "llama").strip()
+    if backend != "llama":
+        raise ValueError(f"Unsupported runtime_backend: {backend}")
+    return f"{runtime_base}/v1/chat/completions"
 
 
 class BrainCoreMixin:
@@ -548,50 +662,199 @@ class BrainCoreMixin:
         self.logger.debug(f"Logged training sample: {sample_type} -> {outcome}")
 
     # =========================================================================
-    # Ollama Management
+    # Runtime Management (backend-aware: llama)
     # =========================================================================
 
-    def start_ollama(self):
-        """Ensure Ollama is running - use existing if available."""
-        self.logger.info(f"Checking Ollama on GPUs {self.gpus}")
+    BRAIN_LLAMA_CONTAINER = "llama-brain"
+    BRAIN_LLAMA_READINESS_TIMEOUT = 300  # 32B model is slow to load
+    BRAIN_LLAMA_READINESS_POLL = 3
 
-        # Check if ollama is already running
-        try:
-            response = requests.get(f"{self.config['ollama_host']}/api/tags", timeout=2)
-            if response.status_code == 200:
-                self.logger.info("Using existing Ollama server")
-                return
-        except:
-            pass
+    def _brain_runtime_backend(self) -> str:
+        return str(self.config.get("runtime_backend", "llama"))
 
-        # Start our own if nothing is running
-        self.logger.info("Starting Ollama...")
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.gpus))
+    def _brain_runtime_base_url(self) -> str:
+        return resolve_runtime_base_url(self.config)
 
-        self.ollama_process = subprocess.Popen(
-            ["ollama", "serve"],
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+    def _brain_runtime_is_ready(self, timeout_seconds: int = 5) -> bool:
+        """Return True when the configured brain runtime is serving requests."""
+        url = self._brain_runtime_base_url()
+        deadline = time.time() + max(1, int(timeout_seconds))
+        if self._brain_runtime_backend() != "llama":
+            raise RuntimeError("Only runtime_backend=llama is supported")
+
+        while time.time() < deadline:
+            try:
+                response = requests.get(f"{url}/v1/models", timeout=3)
+                if response.status_code == 200:
+                    return True
+            except Exception:
+                pass
+            time.sleep(1)
+
+        return False
+
+    def start_runtime(self):
+        """Start the brain's LLM runtime (llama container)."""
+        if self._brain_runtime_backend() != "llama":
+            raise RuntimeError("Only runtime_backend=llama is supported")
+        self._start_llama_brain()
+
+    def stop_runtime(self):
+        """Stop the brain's LLM runtime."""
+        if self._brain_runtime_backend() != "llama":
+            raise RuntimeError("Only runtime_backend=llama is supported")
+        self._stop_llama_brain()
+
+    def _resolve_brain_gguf_path(self) -> str:
+        """Resolve the brain model to a GGUF path under /mnt/shared/models/.
+
+        Handles model names like 'qwen2.5:32b' mapping to directories
+        like 'qwen2.5-coder-32b' by extracting the base family and size parts.
+        """
+        model_id = self.model  # e.g. "qwen2.5:32b"
+        model_roots = resolve_model_search_roots(self.config)
+        normalized = model_id.replace(":", "-").replace("/", "-").lower()
+
+        def _pick_gguf(candidate_dir: Path) -> str:
+            ggufs = list(candidate_dir.glob("*.gguf"))
+            if len(ggufs) == 1:
+                return str(ggufs[0])
+            for g in ggufs:
+                if "Q4_K_M" in g.name:
+                    return str(g)
+            if ggufs:
+                return str(ggufs[0])
+            return ""
+
+        # Pass 1: exact substring match (e.g. "qwen2.5-32b" in "qwen2.5-32b")
+        for models_root in model_roots:
+            if not models_root.exists():
+                continue
+            for candidate_dir in models_root.iterdir():
+                if not candidate_dir.is_dir():
+                    continue
+                dir_name = candidate_dir.name.lower()
+                if normalized in dir_name or dir_name in normalized:
+                    result = _pick_gguf(candidate_dir)
+                    if result:
+                        return result
+
+        # Pass 2: family+size match (e.g. "qwen2.5" + "32b" matches "qwen2.5-coder-32b")
+        parts = normalized.rsplit("-", 1)
+        if len(parts) == 2:
+            family, size = parts  # e.g. "qwen2.5", "32b"
+            for models_root in model_roots:
+                if not models_root.exists():
+                    continue
+                for candidate_dir in models_root.iterdir():
+                    if not candidate_dir.is_dir():
+                        continue
+                    dir_name = candidate_dir.name.lower()
+                    if family in dir_name and size in dir_name:
+                        result = _pick_gguf(candidate_dir)
+                        if result:
+                            return result
+
+        raise RuntimeError(f"No GGUF file found for brain model {model_id}")
+
+    def _start_llama_brain(self):
+        """Start brain's llama-server container on GPU 0 / port 11434."""
+        self.logger.info(f"Starting llama brain runtime on GPUs {self.gpus}")
+
+        # Stop any existing runtime process that may hold port 11434
+        self._kill_existing_runtime()
+
+        # Clean up orphaned container from previous run
+        self._stop_llama_container(self.BRAIN_LLAMA_CONTAINER)
+
+        gguf_path = self._resolve_brain_gguf_path()
+        brain_port = int(self._brain_runtime_base_url().rsplit(":", 1)[-1])
+        gpu_device = str(self.gpus[0]) if self.gpus else "0"
+
+        # Use the same runtime helpers as workers
+        scripts_dir_shared = Path("/mnt/shared/scripts/llama_runtime")
+        scripts_dir_repo = Path(__file__).resolve().parent.parent.parent / "scripts" / "llama_runtime"
+        scripts_dir = scripts_dir_shared if scripts_dir_shared.exists() else scripts_dir_repo
+        run_script = str(scripts_dir / "run_runtime.sh")
+
+        cmd = [
+            run_script,
+            "--name", self.BRAIN_LLAMA_CONTAINER,
+            "--model", gguf_path,
+            "--port", str(brain_port),
+            "--gpus", f"device={gpu_device}",
+            "--ctx-size", str(self.brain_num_ctx),
+        ]
+
+        self.logger.info(f"BRAIN_LLAMA_CMD: {' '.join(cmd)}")
+        start_time = time.time()
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            stderr_tail = (result.stderr or "")[-500:]
+            raise RuntimeError(f"Brain llama container failed to start (rc={result.returncode}): {stderr_tail}")
+
+        # Wait for readiness
+        url = f"http://127.0.0.1:{brain_port}/v1/models"
+        deadline = time.time() + self.BRAIN_LLAMA_READINESS_TIMEOUT
+
+        while time.time() < deadline:
+            try:
+                r = requests.get(url, timeout=3)
+                if r.status_code == 200:
+                    elapsed = int(time.time() - start_time)
+                    self.logger.info(f"llama brain runtime ready ({elapsed}s)")
+                    return
+            except Exception:
+                pass
+            time.sleep(self.BRAIN_LLAMA_READINESS_POLL)
+
+        # Timeout — grab logs
+        logs = self._get_brain_container_logs()
+        raise RuntimeError(
+            f"Brain llama-server readiness timed out after {self.BRAIN_LLAMA_READINESS_TIMEOUT}s. "
+            f"Container logs:\n{logs}"
         )
 
-        for i in range(30):
-            try:
-                requests.get(f"{self.config['ollama_host']}/api/tags", timeout=1)
-                self.logger.info("Ollama server ready")
-                return
-            except:
-                time.sleep(1)
+    def _stop_llama_brain(self):
+        """Stop the brain's llama-server container."""
+        self._stop_llama_container(self.BRAIN_LLAMA_CONTAINER)
+        self.logger.info("llama brain runtime stopped")
 
-        raise RuntimeError("Ollama failed to start")
+    def _stop_llama_container(self, container_name: str):
+        """Stop and remove a Docker container by name. Idempotent."""
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", container_name],
+                capture_output=True, text=True, timeout=15,
+            )
+        except Exception as e:
+            self.logger.debug(f"Container stop/remove for {container_name}: {e}")
 
-    def stop_ollama(self):
-        """Stop Ollama if we started it."""
-        if self.ollama_process:
-            self.ollama_process.terminate()
-            self.ollama_process.wait(timeout=10)
-            self.logger.info("Ollama stopped")
+    def _get_brain_container_logs(self, tail: int = 30) -> str:
+        """Get recent brain container logs for diagnostics."""
+        try:
+            result = subprocess.run(
+                ["docker", "logs", "--tail", str(tail), self.BRAIN_LLAMA_CONTAINER],
+                capture_output=True, text=True, timeout=5,
+            )
+            return (result.stdout or "") + (result.stderr or "")
+        except Exception:
+            return "(failed to retrieve container logs)"
+
+    def _kill_existing_runtime(self):
+        """Stop any local llama-server process holding the brain port."""
+        brain_port = int(self._brain_runtime_base_url().rsplit(":", 1)[-1])
+        try:
+            result = subprocess.run(
+                ["pkill", "-f", f"llama-server.*--port {brain_port}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                self.logger.info("Stopped existing llama-server process to free brain port")
+                time.sleep(2)
+        except Exception as e:
+            self.logger.debug(f"llama runtime kill attempt: {e}")
 
     def think(self, prompt: str, context: str = "", log_as: str = None) -> str:
         """Use the brain model to reason about something."""
@@ -601,21 +864,38 @@ class BrainCoreMixin:
         full_prompt += prompt
 
         try:
-            response = requests.post(
-                self.api_url,
-                json={
-                    "model": self.model,
-                    "prompt": full_prompt,
-                    "stream": False,
-                    "keep_alive": self.brain_keep_alive,
-                    "options": {
-                        "num_ctx": self.brain_num_ctx
-                    }
-                },
-                timeout=self.think_timeout
-            )
-            response.raise_for_status()
-            result = response.json().get("response", "")
+            backend = self._brain_runtime_backend()
+            if backend == "llama":
+                response = requests.post(
+                    self.api_url,
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": full_prompt}],
+                        "max_tokens": 4096,
+                        "stream": False,
+                    },
+                    timeout=self.think_timeout,
+                )
+                response.raise_for_status()
+                data = response.json()
+                choices = data.get("choices", [])
+                result = choices[0]["message"]["content"] if choices else ""
+            else:
+                response = requests.post(
+                    self.api_url,
+                    json={
+                        "model": self.model,
+                        "prompt": full_prompt,
+                        "stream": False,
+                        "keep_alive": self.brain_keep_alive,
+                        "options": {
+                            "num_ctx": self.brain_num_ctx
+                        }
+                    },
+                    timeout=self.think_timeout,
+                )
+                response.raise_for_status()
+                result = response.json().get("response", "")
 
             if log_as:
                 self.log_training_sample(

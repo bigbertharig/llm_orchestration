@@ -300,7 +300,8 @@ class BrainResourceMixin:
         """Aggregate LLM demand across queue, processing, and private tasks.
 
         Purposefully conservative: private tasks count as future demand so the brain
-        does not unload models during brief release gaps.
+        does not unload models during brief release gaps. Orphaned private tasks
+        from inactive batches must not count as live demand.
         """
         counts = {
             "queue_llm": 0,
@@ -331,11 +332,20 @@ class BrainResourceMixin:
                 counts["max_tier"] = max(counts["max_tier"], tier)
                 counts["tiers"][str(tier)] = int(counts["tiers"].get(str(tier), 0)) + 1
 
+        active_batch_ids = {
+            str(batch_id).strip()
+            for batch_id in getattr(self, "active_batches", {}).keys()
+            if str(batch_id).strip()
+        }
+
         for task in self._iter_task_files_json(self.queue_path):
             _accumulate(task, "queue")
         for task in self._iter_task_files_json(self.processing_path):
             _accumulate(task, "processing")
         for task in self._iter_task_files_json(self.private_tasks_path):
+            batch_id = str(task.get("batch_id", "")).strip()
+            if not batch_id or batch_id not in active_batch_ids:
+                continue
             _accumulate(task, "private")
 
         return counts
@@ -879,21 +889,21 @@ class BrainResourceMixin:
 
         return True, f"threshold_reached:{count}"
 
-    def _probe_split_runtime_models(self, port: Optional[int], timeout_s: float = 1.5) -> Dict[str, Any]:
+    def _probe_split_runtime_models(
+        self,
+        port: Optional[int],
+        timeout_s: float = 1.5,
+        expected_model: str = "",
+    ) -> Dict[str, Any]:
         if not port:
             return {"reachable": False, "models": [], "error": "missing_port"}
-        url = f"http://127.0.0.1:{int(port)}/api/ps"
         try:
-            response = requests.get(url, timeout=timeout_s)
+            runtime_backend = str(self.config.get("runtime_backend", "llama") or "llama").strip()
+            if runtime_backend != "llama":
+                raise RuntimeError(f"Unsupported runtime_backend: {runtime_backend}")
+            response = requests.get(f"http://127.0.0.1:{int(port)}/v1/models", timeout=timeout_s)
             response.raise_for_status()
-            payload = response.json()
-            models = []
-            for item in payload.get("models", []) if isinstance(payload, dict) else []:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name") or item.get("model") or "").strip()
-                if name:
-                    models.append(name)
+            models = [expected_model] if expected_model else ["_llama_loaded"]
             return {"reachable": True, "models": models, "error": None}
         except Exception as e:
             return {"reachable": False, "models": [], "error": str(e)}
@@ -915,7 +925,7 @@ class BrainResourceMixin:
         port = group.get("port")
         members = [str(m).strip() for m in group.get("members", []) if str(m).strip()]
         reservation = self._read_split_reservation(group_id)
-        probe = self._probe_split_runtime_models(port)
+        probe = self._probe_split_runtime_models(port, expected_model=target_model)
         models = [str(m).strip() for m in probe.get("models", []) if str(m).strip()]
         target_loaded = target_model in models
         status = str((reservation or {}).get("status", "")).strip()
@@ -1089,7 +1099,7 @@ class BrainResourceMixin:
         - Heartbeat is fresh
         - Not in thermal pause
         - Runtime state is stable (not transitioning, wedged, or error)
-        - Ollama is healthy
+        - Runtime is healthy
         """
         issues = []
 
@@ -1112,9 +1122,9 @@ class BrainResourceMixin:
             # Unknown state - treat as potentially problematic
             issues.append(f"unknown_state:{runtime_state}")
 
-        # Ollama health
-        if not state.get("ollama_healthy", True):
-            issues.append("ollama_unhealthy")
+        # Runtime health
+        if not state.get("runtime_healthy", True):
+            issues.append("runtime_unhealthy")
 
         return len(issues) == 0, issues
 
@@ -2353,12 +2363,12 @@ class BrainResourceMixin:
                 tier = 0
             max_loaded_tier = max(max_loaded_tier, tier)
 
-        # Track unhealthy GPUs (Ollama circuit breaker tripped)
+        # Track unhealthy GPUs (runtime circuit breaker tripped)
         unhealthy_gpus = [g for g, s in gpu_states.items()
-                          if not s.get("ollama_healthy", True)]
+                          if not s.get("runtime_healthy", True)]
         if unhealthy_gpus:
             self.log_decision("GPU_UNHEALTHY",
-                f"GPUs with unhealthy Ollama: {unhealthy_gpus}",
+                f"GPUs with unhealthy runtime: {unhealthy_gpus}",
                 {"unhealthy": unhealthy_gpus})
 
         # Only count healthy cold GPUs as candidates for load_llm

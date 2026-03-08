@@ -37,7 +37,8 @@ from gpu_constants import (
     SPLIT_ISSUE_BRAIN_TIMEOUT_SECONDS,
 )
 from gpu_core import GPUCoreMixin
-from gpu_ollama import GPUOllamaMixin
+from gpu_llama import GPULlamaMixin
+from gpu_runtime import GPURuntimeMixin
 from gpu_split import GPUSplitMixin
 from gpu_state import GPUStateMixin
 from gpu_tasks import GPUTaskMixin
@@ -54,7 +55,8 @@ logging.basicConfig(
 class GPUAgent(
     GPUCoreMixin,
     GPUStateMixin,
-    GPUOllamaMixin,
+    GPULlamaMixin,
+    GPURuntimeMixin,
     GPUSplitMixin,
     GPUThermalMixin,
     GPUTaskMixin,
@@ -65,7 +67,8 @@ class GPUAgent(
     Inherits functionality from specialized mixins:
     - GPUCoreMixin: Config loading, utility methods
     - GPUStateMixin: Runtime state machine
-    - GPUOllamaMixin: Ollama server and model management
+    - GPULlamaMixin: llama-server runtime management
+    - GPURuntimeMixin: shared runtime lifecycle helpers
     - GPUSplitMixin: Split GPU runtime coordination
     - GPUThermalMixin: Thermal safety and resource management
     - GPUTaskMixin: Task claiming and meta task handling
@@ -122,11 +125,12 @@ class GPUAgent(
         self.log_path.mkdir(parents=True, exist_ok=True)
         self.training_log = self.log_path / "training_samples.jsonl"
 
-        # Ollama config
+        # Runtime config
         self.model = self.gpu_config.get("model")
         self.model_tier = int(self.model_tier_by_id.get(self.model, DEFAULT_LLM_MIN_TIER))
         self.port = self.gpu_config.get("port")
-        self.api_url = f"http://localhost:{self.port}/api/generate" if self.port else None
+        self.api_url = f"http://localhost:{self.port}/v1/chat/completions" if self.port else None
+        self.runtime_backend = str(self.config.get("runtime_backend", "llama")).strip()
         self.worker_keep_alive = str(self.config.get("worker_keep_alive", "-1"))
         self.worker_num_ctx = int(self.config.get("worker_context_tokens", 8192))
 
@@ -151,7 +155,7 @@ class GPUAgent(
         self.runtime_placement: str = "single_gpu"
         self.runtime_group_id: Optional[str] = None
         self.runtime_port: Optional[int] = self.port
-        self.runtime_ollama_url: Optional[str] = f"http://localhost:{self.port}" if self.port else None
+        self.runtime_api_base: Optional[str] = f"http://127.0.0.1:{self.port}" if self.port else None
         self.split_runtime_owner: bool = False
         self.split_runtime_process: Optional[subprocess.Popen] = None
         self.last_split_runtime_error: str = ""
@@ -183,7 +187,7 @@ class GPUAgent(
             "detected_at": None,
             "reported_at": None,
         }
-        self.ollama_process: Optional[subprocess.Popen] = None
+        self.runtime_process: Optional[subprocess.Popen] = None
 
         # Runtime state machine (authoritative)
         self.runtime_state: str = RUNTIME_STATE_COLD
@@ -212,11 +216,11 @@ class GPUAgent(
         self.env_check_cache: Dict[str, Dict] = {}
         self.env_block_reason: Optional[str] = None
 
-        # Ollama health tracking
-        self.ollama_healthy = True
-        self.ollama_consecutive_failures = 0
-        self.ollama_health_threshold = 6  # Restart after ~30s of consecutive failures
-        self.ollama_circuit_breaker = 8   # Stop claiming LLM tasks before forced restart
+        # Runtime health tracking
+        self.runtime_healthy = True
+        self.runtime_consecutive_failures = 0
+        self.runtime_health_threshold = 6  # Restart after ~30s of consecutive failures
+        self.runtime_circuit_breaker = 8   # Stop claiming LLM tasks before forced restart
 
         # Thermal/constrained-state tracking for explicit stall visibility
         self.thermal_pause_active = False
@@ -249,20 +253,23 @@ class GPUAgent(
 
         self.logger.info(
             f"GPU agent initialized: {self.name} (GPU {self.gpu_id}), "
-            f"port {self.port}, model {self.model}"
+            f"port {self.port}, model {self.model}, backend={self.runtime_backend}"
         )
+
+    def _check_runtime_health(self):
+        """Probe the active llama runtime health."""
+        return self.check_llama_health()
 
     def _write_heartbeat(self):
         """Write GPU-level heartbeat to filesystem. We are sole owner, no lock needed.
 
-        Includes Ollama health check results so the brain can detect unhealthy GPUs
+        Includes runtime health check results so the brain can detect unhealthy GPUs
         and avoid assigning LLM work to them.
         """
         gpu_stats = self._get_gpu_stats()
         constrained, constrained_reasons = self._is_resource_constrained(gpu_stats)
 
-        # Run Ollama health check as part of heartbeat cycle
-        ollama_health = self.check_ollama_health()
+        runtime_health = self._check_runtime_health()
 
         active_task_info = []
         for worker_id, info in self.active_workers.items():
@@ -298,7 +305,7 @@ class GPUAgent(
         capability_ready = (
             self._is_runtime_ready()
             and self.model_loaded
-            and self.ollama_healthy
+            and bool(self.runtime_healthy)
         )
 
         heartbeat = {
@@ -329,11 +336,12 @@ class GPUAgent(
             "split_runtime_owner": self.split_runtime_owner,
             "split_runtime_generation": self.split_runtime_generation,
             "runtime_port": self.runtime_port,
-            "runtime_ollama_url": self.runtime_ollama_url,
+            "runtime_backend": self.runtime_backend,
+            "runtime_api_base": self.runtime_api_base,
             "split_health_issue": self._get_split_health_issue_heartbeat(),
             "global_load_owner_issue": dict(self.pending_global_load_owner_issue),
-            "ollama_healthy": self.ollama_healthy,
-            "ollama": ollama_health,
+            "runtime_healthy": bool(self.runtime_healthy),
+            "runtime_health": runtime_health,
             "last_updated": datetime.now().isoformat(),
             "temperature_c": gpu_stats["temperature_c"],
             "cpu_temp_c": cpu_temp,
@@ -383,8 +391,8 @@ class GPUAgent(
         crash_exception = None
 
         try:
-            # Start Ollama if this GPU has a port
-            self.start_ollama()
+            # Start runtime cleanup/initialization if this GPU has a port
+            self.start_llama()
             self._reclaim_orphan_split_ports_on_startup()
 
             # Signal ready to launcher
@@ -530,7 +538,7 @@ class GPUAgent(
         self._flush_outbox()
 
         # Stop runtimes BEFORE final heartbeat so heartbeat reflects actual state
-        self.stop_ollama()
+        self.stop_llama()
         self._stop_split_runtime()
 
         # Final heartbeat (now reflects stopped runtime)

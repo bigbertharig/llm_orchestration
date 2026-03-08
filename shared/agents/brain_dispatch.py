@@ -88,13 +88,15 @@ class BrainDispatchMixin:
         try:
             env = os.environ.copy()
             # Strict brain-task ownership: brain-class work always runs with
-            # brain model/runtime defaults (GPU 0 / brain ollama).
+            # brain model/runtime defaults (GPU 0 / brain runtime).
             if task_class == "brain" or str(task.get("executor", "")).lower() == "brain":
                 env["BRAIN_MODEL"] = str(self.model)
-                env["BRAIN_OLLAMA_URL"] = str(self.config.get("ollama_host", "http://localhost:11434"))
+                brain_api_base = str(self.config.get("runtime_host") or "http://localhost:11434")
+                env["BRAIN_API_BASE"] = brain_api_base
+                env["BRAIN_RUNTIME_BACKEND"] = str(self.config.get("runtime_backend", "llama"))
                 # Compatibility bridge for scripts that still read WORKER_* vars.
                 env["WORKER_MODEL"] = env["BRAIN_MODEL"]
-                env["WORKER_OLLAMA_URL"] = env["BRAIN_OLLAMA_URL"]
+                env["WORKER_API_BASE"] = env["BRAIN_API_BASE"]
 
             proc = subprocess.Popen(
                 command,
@@ -320,7 +322,7 @@ class BrainDispatchMixin:
         This is a drastic recovery action that:
         1. Signals all GPU agents to shut down gracefully
         2. Waits for clean shutdown (up to 60s)
-        3. Kills any stale Ollama worker processes
+        3. Kills any stale runtime worker processes
         4. Clears thermal incident state
         5. Returns control to the launcher (which will restart agents)
 
@@ -397,7 +399,7 @@ class BrainDispatchMixin:
             all_stopped = False
             self.logger.warning(f"FULL_RESET: Some agents did not stop within {max_wait_seconds}s")
 
-        # Step 3: Force kill any stale Ollama worker/split processes
+        # Step 3: Force kill any stale runtime worker/split processes
         # Worker ports: 11435-11439, Split ports: 11440-11441
         killed_processes = []
         all_ports = list(range(11435, 11442))  # 11435-11441 inclusive
