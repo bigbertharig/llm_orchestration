@@ -36,18 +36,24 @@ The current design spreads runtime state across:
 
 `llama-server` will not remove all orchestration complexity, but it removes one whole layer of wrapper behavior and gets runtime control closer to the actual serving process.
 
-## What The Codebase Looks Like Today
+## What The Codebase Looks Like Now
 
-Based on current code exploration:
+As of 2026-03-08 after the runtime vocabulary cleanup:
 
-- [gpu_ollama.py](/home/bryan/llm_orchestration/shared/agents/gpu_ollama.py) owns single-GPU Ollama lifecycle, health checks, load, unload, and readiness probing.
-- [gpu_split.py](/home/bryan/llm_orchestration/shared/agents/gpu_split.py) is the main complexity sink for split serving, ownership metadata, warmup, readiness validation, orphan cleanup, and recovery.
-- [gpu_tasks.py](/home/bryan/llm_orchestration/shared/agents/gpu_tasks.py) assumes Ollama runtime probes via `/api/ps` and dispatches `load_llm`, `unload_llm`, `load_split_llm`, and `unload_split_llm`.
-- [gpu.py](/home/bryan/llm_orchestration/shared/agents/gpu.py) still builds worker API URLs around `/api/generate`.
-- [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py), [brain.py](/home/bryan/llm_orchestration/shared/agents/brain.py), and [startup.py](/home/bryan/llm_orchestration/shared/agents/startup.py) still assume Ollama startup and health semantics.
-- [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py), [launch.py](/home/bryan/llm_orchestration/shared/agents/launch.py), [setup.py](/home/bryan/llm_orchestration/shared/agents/setup.py), and [kill_plan.py](/home/bryan/llm_orchestration/scripts/kill_plan.py) also contain Ollama-specific control logic.
+- [gpu_ollama.py](/home/bryan/llm_orchestration/shared/agents/gpu_ollama.py) still exists, but the class inside was renamed to `GPURuntimeMixin` and is now the generic single-runtime mixin entrypoint rather than an Ollama-only implementation surface.
+- [gpu_llama.py](/home/bryan/llm_orchestration/shared/agents/gpu_llama.py) is the active llama runtime implementation for containerized `llama-server`.
+- [gpu.py](/home/bryan/llm_orchestration/shared/agents/gpu.py), [gpu_tasks.py](/home/bryan/llm_orchestration/shared/agents/gpu_tasks.py), [gpu_workers.py](/home/bryan/llm_orchestration/shared/agents/gpu_workers.py), and [worker.py](/home/bryan/llm_orchestration/shared/agents/worker.py) now use llama-first runtime naming and llama-compatible API assumptions.
+- [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py), [brain.py](/home/bryan/llm_orchestration/shared/agents/brain.py), and [brain_dispatch.py](/home/bryan/llm_orchestration/shared/agents/brain_dispatch.py) now treat llama as the sole active backend in normal control flow.
+- [gpu_split.py](/home/bryan/llm_orchestration/shared/agents/gpu_split.py) remains the highest-complexity runtime file, but its runtime naming and launch path were cleaned to the llama model.
+- [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py), [setup.py](/home/bryan/llm_orchestration/shared/agents/setup.py), [startup.py](/home/bryan/llm_orchestration/shared/agents/startup.py), and [launch.py](/home/bryan/llm_orchestration/shared/agents/launch.py) were also cleaned to use runtime terminology as the primary operator surface.
 
-That means this migration is real work, but it also means the seam lines are clear.
+What is still intentionally present:
+
+- some backwards-compat config fallbacks like `config.get("ollama_host")`
+- some legacy cleanup commands that explicitly reap old `ollama serve` / `ollama runner` processes during transition
+- compatibility wrappers such as `scan_ollama()` in [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py)
+
+That means the active path is now llama-first, but the final cleanup phase still needs to remove the last transition-only compatibility shims.
 
 ## Core Design Choice
 
@@ -114,6 +120,61 @@ Current implementation artifacts:
 - [smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/smoke_test.sh)
 - [build_and_smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/build_and_smoke_test.sh)
 
+## Remaining Cleanup Gaps Found In Code Review (2026-03-08)
+
+The runtime vocabulary cleanup is not complete. The report claiming completion overstates the current state of the codebase.
+
+Still needs to be changed or fixed:
+
+- [gpu_split.py](/home/bryan/llm_orchestration/shared/agents/gpu_split.py) still contains active legacy branches using `/api/ps` and `/api/tags` at lines 415, 1691, 1941, and 2382. This is not just a passive compatibility shim; split runtime control flow is still backend-branching.
+- [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py) still implements legacy Ollama-native probes with `/api/tags` and `/api/ps`, and still exposes `scan_ollama()` at line 150. If the goal is to remove Ollama as a runtime concept rather than hide it, the primary scan logic still needs a llama-only end state.
+- [startup.py](/home/bryan/llm_orchestration/shared/agents/startup.py) still documents and executes the legacy `/api/ps` probe path in `check_loaded_models()` around lines 576 and 606. Startup is still backend-branching rather than fully llama-only.
+- [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py) still has active legacy startup and readiness flow using `/api/tags` and `["ollama", "serve"]` around lines 691, 721, 733, and 741. The cleanup report described these as transition aliases, but they are still executable control-path logic.
+- [brain_resources.py](/home/bryan/llm_orchestration/shared/agents/brain_resources.py) still probes split runtime models via `/api/ps` for the non-llama branch at line 907. That means brain-side split reconciliation is not yet llama-only.
+- [gpu_ollama.py](/home/bryan/llm_orchestration/shared/agents/gpu_ollama.py) still contains legacy model-state probing via `/api/ps` at line 592. The filename was intentionally kept, but the implementation surface is still partly legacy-specific.
+- [setup.py](/home/bryan/llm_orchestration/shared/agents/setup.py) still writes `ollama_host` into generated config at line 225 and still falls back to `scan_runtime(..., runtime_backend="ollama")` at line 348. If config generation is supposed to be runtime-neutral first, this is not finished.
+- [config.json](/home/bryan/llm_orchestration/shared/agents/config.json), [config.template.json](/home/bryan/llm_orchestration/shared/agents/config.template.json), and [config.benchmark.json](/home/bryan/llm_orchestration/shared/agents/config.benchmark.json) still carry `ollama_host`. That may be an intentional transition choice, but it contradicts any claim that the codebase has only one runtime vocabulary now.
+- [brain_dispatch.py](/home/bryan/llm_orchestration/shared/agents/brain_dispatch.py), [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py), and [launch.py](/home/bryan/llm_orchestration/shared/agents/launch.py) still read `config.get("ollama_host")` as active fallback. Keep this only if backward compatibility is still explicitly required; otherwise remove it and fail fast on missing `runtime_host`.
+- [tests](/home/bryan/llm_orchestration/shared/agents/tests) are not clean. Multiple test files still reference `GPUOllamaMixin`, `start_ollama`, `runtime_ollama_url`, `ollama_healthy`, `ollama_host`, and legacy backend expectations. The report statement that tests were already clean is false.
+
+Practical next step:
+
+- Decide whether the project is still in a compatibility transition or whether Ollama removal is now mandatory. If removal is mandatory, delete the remaining backend branches instead of preserving them behind `if runtime_backend != "llama"` paths.
+
+## Llama-Only Conversion Progress (2026-03-08)
+
+Completed in the active repo:
+
+- [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py) now rejects non-llama backends and no longer exposes `scan_ollama()`.
+- [startup.py](/home/bryan/llm_orchestration/shared/agents/startup.py) preload detection is now llama-only and no longer probes `/api/ps`.
+- [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py), [brain_dispatch.py](/home/bryan/llm_orchestration/shared/agents/brain_dispatch.py), and [worker.py](/home/bryan/llm_orchestration/shared/agents/worker.py) now require llama-only runtime routing instead of branching to legacy Ollama endpoints.
+- [setup.py](/home/bryan/llm_orchestration/shared/agents/setup.py), [launch.py](/home/bryan/llm_orchestration/shared/agents/launch.py), and the config JSON files no longer write or read `ollama_host` in the normal agent path.
+- [gpu_split.py](/home/bryan/llm_orchestration/shared/agents/gpu_split.py) and [brain_resources.py](/home/bryan/llm_orchestration/shared/agents/brain_resources.py) now use llama runtime probes and warmup only.
+- The agent tests were updated away from legacy `ollama_host`, `runtime_ollama_url`, and `GPUOllamaMixin` naming where those references were just migration leftovers.
+
+Still to finish after this pass:
+
+- sweep the remaining Ollama-specific helper scripts under `scripts/`
+- remove or rename any leftover Ollama-specific filenames that still imply dual-backend support
+- re-run targeted tests and fix whatever breaks under the stricter llama-only contract
+
+Follow-up after the second cleanup pass:
+
+- the active operator scripts were moved further toward llama-only:
+  - [clear_runtime.py](/home/bryan/llm_orchestration/scripts/clear_runtime.py)
+  - [dashboard/server.py](/home/bryan/llm_orchestration/scripts/dashboard/server.py)
+  - [scan_workers.py](/home/bryan/llm_orchestration/scripts/scan_workers.py)
+  - [kill_plan.py](/home/bryan/llm_orchestration/scripts/kill_plan.py)
+  - [batch_runtime_diag.py](/home/bryan/llm_orchestration/scripts/batch_runtime_diag.py)
+  - [batch_runtime_diag.py](/home/bryan/llm_orchestration/shared/scripts/batch_runtime_diag.py)
+  - [brain_watchdog.py](/home/bryan/llm_orchestration/shared/scripts/brain_watchdog.py)
+  - [agent-monitor.py](/home/bryan/llm_orchestration/scripts/agent-monitor.py)
+  - [chat-brain](/home/bryan/llm_orchestration/scripts/chat-brain)
+  - [chat-worker](/home/bryan/llm_orchestration/scripts/chat-worker)
+  - [chat_runtime.py](/home/bryan/llm_orchestration/scripts/chat_runtime.py)
+
+Remaining non-agent Ollama references are now mostly in benchmark/history tooling and older model-management scripts, not in the main agent control plane.
+
 ## Constraints
 
 - Shared GGUF files under `/mnt/shared/models/` remain the source of truth.
@@ -134,6 +195,14 @@ This groundwork is now required, not optional:
 - Default recovery paths must restart the service, not spawn detached competing launchers.
 - The service-owned startup path must run from `~/llm-orchestration-venv`, not `~/ml-env`.
 - Startup warm-up must prove one default worker reaches `ready_single` after service start and after reboot.
+
+Current rig status as of 2026-03-07:
+
+- `llm-orchestrator.service` is now the only default startup owner.
+- The service startup wrapper points at `~/llm-orchestration-venv/bin/python`.
+- Legacy `ollama.service` and `ollama-1060.service` autostarts were removed from the dependency graph and both units were masked to `/dev/null`.
+- `/etc/systemd/system/llm-orchestrator.service` no longer has `After=` or `Wants=` edges on `ollama.service`.
+- Dashboard fetch failure was traced to the dashboard process being down, not a backend API regression. Manual restart restored `GET /api/status` and the dashboard runtime surface now reads `runtime_api_base` / `runtime_healthy` instead of heartbeat `ollama_*` keys.
 
 Why this belongs in the llama migration plan:
 
@@ -212,6 +281,86 @@ Fill these in once proven on the rig:
 - [x] Completion-with-logprobs smoke test command
 - [ ] Kill/unload command
 
+## Current State (2026-03-07 Late Evening)
+
+- Dashboard API is healthy again at `http://127.0.0.1:8787/api/status`.
+- GPU heartbeat payload is now runtime-neutral:
+  - `runtime_api_base`
+  - `runtime_healthy`
+  - `runtime_health`
+- Dashboard worker rendering now uses `runtime_api_base` instead of `runtime_ollama_url`.
+- Default worker launcher now emits `--api-base ...` to worker subprocesses instead of `--ollama-url ...`.
+- `github_analyzer` got past the old `brain_strategy` 404 blocker after patching the shoulder scripts to use backend-neutral API resolution.
+- The `brain_strategy` JSON parser was hardened on 2026-03-08:
+  - plain balanced-object extraction is now used before failing
+  - same-model JSON repair fallback is now used if the brain wraps JSON in prose or markdown
+  - manual re-run against failed batch `20260307_234042` completed and wrote `brain_strategy.json`
+- `PLAN_FORMAT.md` now explicitly states the structured-output contract:
+  - scripts own schema enforcement and JSON recovery
+  - prompts should ask for one strict JSON object
+  - consumers must tolerate wrapper prose / fenced markdown and recover the first balanced JSON object when possible
+- On 2026-03-08 another control-plane stall was isolated:
+  - the brain could wedge in uninterruptible disk wait (`D` state) while scanning the global `/mnt/shared/tasks/complete` archive
+  - this showed up immediately after `prepare_repo` on batch `20260308_000056`, with heartbeat freezing even though the task itself had succeeded
+  - root cause was not llama inference; it was control-plane file scanning against a large historical task archive on the shared drive
+  - fix landed in the brain queue/control path:
+    - dependency satisfaction now prefers per-batch `logs/batch_events.jsonl` instead of scanning every file in `/mnt/shared/tasks/complete`
+    - stale-failure cleanup now uses active-batch event logs instead of a global completion scan
+    - goal validation completion discovery now prefers per-batch event logs as well
+  - operational cleanup was also applied:
+    - historical completion artifacts older than 2026-03-07 were archived out of the hot directory to `/mnt/shared/tasks/archive/complete_pre_20260307`
+    - this reduced the live `tasks/complete` hot set to recent artifacts only
+- Current active validation rerun is `github_analyzer` batch `20260308_000056` against `code-visualizer`.
+
+What remains:
+
+- Finish cleaning the remaining Ollama compatibility env names and comments in the active runtime path.
+- Continue watching `github_analyzer` for the next real blocker after `brain_strategy`.
+- Keep the compatibility bridge only where older shoulders still require it; do not add new Ollama-first surfaces.
+
+## 2026-03-08 Runtime Vocabulary Cleanup Consolidation
+
+The protected cleanup pass captured in:
+
+- [PROTECTED_LLAMA_CLEANUP_REPORT.md](/home/bryan/Desktop/Shared/workspace/archive/PROTECTED_LLAMA_CLEANUP_REPORT.md)
+
+has now been folded into this plan.
+
+Summary:
+
+- All targeted protected agent files listed in that report were cleaned on 2026-03-08.
+- The codebase now uses a unified runtime vocabulary with llama as the sole active backend in normal operation.
+- The dashboard/control layer was also cleaned so the operator surface now says `Clear Runtime` and routes through `clear_runtime.py`.
+
+Files confirmed cleaned in that pass:
+
+- [brain_dispatch.py](/home/bryan/llm_orchestration/shared/agents/brain_dispatch.py)
+- [gpu_workers.py](/home/bryan/llm_orchestration/shared/agents/gpu_workers.py)
+- [gpu.py](/home/bryan/llm_orchestration/shared/agents/gpu.py)
+- [gpu_tasks.py](/home/bryan/llm_orchestration/shared/agents/gpu_tasks.py)
+- [gpu_split.py](/home/bryan/llm_orchestration/shared/agents/gpu_split.py)
+- [gpu_llama.py](/home/bryan/llm_orchestration/shared/agents/gpu_llama.py)
+- [startup.py](/home/bryan/llm_orchestration/shared/agents/startup.py)
+- [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py)
+- [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py)
+- [setup.py](/home/bryan/llm_orchestration/shared/agents/setup.py)
+- [worker.py](/home/bryan/llm_orchestration/shared/agents/worker.py)
+- [launch.py](/home/bryan/llm_orchestration/shared/agents/launch.py)
+- [gpu_core.py](/home/bryan/llm_orchestration/shared/agents/gpu_core.py)
+- [brain.py](/home/bryan/llm_orchestration/shared/agents/brain.py)
+- [brain_resources.py](/home/bryan/llm_orchestration/shared/agents/brain_resources.py)
+- [brain_failures.py](/home/bryan/llm_orchestration/shared/agents/brain_failures.py)
+
+Intentionally retained transition shims:
+
+- `config.get("ollama_host")` compatibility reads where older config files may still exist
+- explicit cleanup of legacy `ollama serve` / `ollama runner` processes during resets and return-to-default flows
+- `scan_ollama()` wrapper in [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py)
+- deprecated `--ollama-host` alias in [setup.py](/home/bryan/llm_orchestration/shared/agents/setup.py)
+- retained filename [gpu_ollama.py](/home/bryan/llm_orchestration/shared/agents/gpu_ollama.py) even though the class inside is now runtime-generic
+
+This is the current line between "migration complete enough to run llama-first" and "final cleanup complete enough to delete transition scaffolding."
+
 Phase 0 findings so far:
 
 - Working local fallback runtime for experiments:
@@ -276,11 +425,11 @@ Purpose:
 - capture real commands and real constraints
 
 Checklist:
-- [ ] Build or install `llama-server`
+- [x] Build or install `llama-server`
 - [x] Run one single-GPU worker model manually
 - [ ] Run brain model manually
 - [ ] Run one split model manually with `--tensor-split`
-- [ ] Confirm health endpoint behavior
+- [x] Confirm health endpoint behavior
 - [x] Confirm model listing behavior
 - [x] Confirm inference payload compatibility
 - [x] Record startup times
@@ -316,7 +465,9 @@ Rollback:
 6. `GET /v1/models` is the reliable readiness probe observed so far.
 7. `--use_mlock True` does not block startup, but it emits a warning under the current memlock limit:
    - `warning: failed to mlock ... Try increasing RLIMIT_MEMLOCK`
-8. Startup for the 7B single-GPU worker case was slow but successful, roughly on the order of about 60-70 seconds to become reachable.
+8. Startup for the 7B single-GPU worker case was slow but successful.
+   - earlier direct-container proofs on the prior storage path were roughly on the order of about 60-70 seconds
+   - a clean orchestrator-owned cold load on 2026-03-07 from the current USB-attached shared drive path took about 3m50s to reach `GET /v1/models == 200`
 9. `docker run --gpus 'device=1' ...` correctly restricted the single-GPU case to one 1060.
 10. For split proof, using `NVIDIA_VISIBLE_DEVICES` alone was not sufficient for precise device control in this container path.
 11. A six-value tensor split mask did steer layer assignment correctly:
@@ -333,10 +484,33 @@ Rollback:
 
 - Single-worker fallback proof: proven
 - Logprobs on completions: proven
-- Host-side production binary availability: blocked
+- Host-side production binary availability: resolved (dedicated `llama-runtime:sm61-sm86` image built from llama.cpp b4837)
 - Split readiness on target 14B: partially proven only
 - Brain-model readiness on 32B: partially proven only
 - Service-owned orchestration baseline: proven
+
+### Dedicated Image Build And Smoke Test
+
+Completed: dedicated `llama-runtime:sm61-sm86` image built from llama.cpp `b4837` with CUDA architectures `61;86` and static linking (`-DBUILD_SHARED_LIBS=OFF`).
+
+Build fixes applied:
+- Removed COPY lines for `.so` files (not produced with static linking)
+- Fixed chat-templates path: `/src/llama.cpp/models/templates` (not `/src/llama.cpp/common/chat-templates`)
+
+Smoke test on GPU 1 (GTX 1060 6GB):
+```bash
+/mnt/shared/scripts/llama_runtime/run_runtime.sh \
+  --name llama-smoke-test \
+  --model /mnt/shared/models/qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
+  --port 11500 \
+  --gpus device=1
+```
+
+Results:
+- Container started and reached readiness
+- `/v1/chat/completions` smoke test passed
+- `/v1/completions` smoke test passed
+- Clean shutdown, GPU memory fully released
 
 ### Implications For The Migration
 
@@ -357,10 +531,10 @@ Phase 1 implementation status now:
 - [x] dedicated runtime image directory created
 - [x] host-side build helper created
 - [x] host-side run/stop/probe helpers created
-- [ ] dedicated image built locally on the rig
-- [ ] dedicated image proven with one real single-worker model
-- [ ] agent runtime mixin added
-- [ ] agent path switched from Ollama to llama
+- [x] dedicated image built locally on the rig (`llama-runtime:sm61-sm86`)
+- [x] dedicated image proven with one real single-worker model (smoke test passed on GPU 1, qwen2.5-coder-7b)
+- [x] agent runtime mixin added (`gpu_llama.py`)
+- [x] agent path switched from Ollama to llama (backend-aware dispatchers in gpu.py)
 
 Primary files:
 - [gpu_ollama.py](/home/bryan/llm_orchestration/shared/agents/gpu_ollama.py)
@@ -369,14 +543,14 @@ Primary files:
 
 Plan:
 - [x] create dedicated image and launcher helpers under `scripts/llama_runtime/`
-- [ ] add `gpu_llama.py`
-- [ ] implement server start
-- [ ] implement server stop
-- [ ] implement health check
-- [ ] implement readiness check
-- [ ] capture process PID and command line in runtime state
-- [ ] preserve strong runtime diagnostics on failure
-- [ ] remove dependency on Ollama `keep_alive` for worker lifecycle
+- [x] add `gpu_llama.py`
+- [x] implement server start
+- [x] implement server stop
+- [x] implement health check
+- [x] implement readiness check
+- [x] capture process PID and command line in runtime state
+- [x] preserve strong runtime diagnostics on failure
+- [x] remove dependency on Ollama `keep_alive` for worker lifecycle
 
 Notes:
 - Server start becomes the load operation.
@@ -386,13 +560,13 @@ Notes:
 - Use the new wrapper scripts as the canonical command source instead of embedding raw `docker run` strings in multiple places.
 
 Exit criteria:
-- [ ] one worker can start a model-backed runtime on demand
-- [ ] one worker can unload it by killing the process
-- [ ] failure logging shows real command/process/health information
+- [x] one worker can start a model-backed runtime on demand
+- [x] one worker can unload it by killing the process
+- [x] failure logging shows real command/process/health information
 
 Rollback:
-- [ ] keep `gpu_ollama.py` intact until Phase 6
-- [ ] allow worker path to switch back to Ollama during transition
+- [x] keep `gpu_ollama.py` intact until Phase 6
+- [x] allow worker path to switch back to Ollama during transition (`runtime_backend` config key)
 
 ### Phase 1 Canonical Commands
 
@@ -443,21 +617,21 @@ Primary files:
 - [worker.py](/home/bryan/llm_orchestration/shared/agents/worker.py)
 
 Checklist:
-- [ ] replace `/api/generate` assumptions
-- [ ] replace `/api/ps` readiness assumptions for single runtimes
-- [ ] rename worker URL variables from Ollama naming to llama naming where appropriate
-- [ ] keep task contract stable for `load_llm` and `unload_llm`
-- [ ] update heartbeats and runtime state fields as needed
-- [ ] verify existing observability fields still populate meaningful failure detail
+- [x] replace `/api/generate` assumptions (worker.py uses `/v1/chat/completions` for llama)
+- [x] replace `/api/ps` readiness assumptions for single runtimes (attestation uses `/v1/models`)
+- [x] rename worker URL variables from Ollama naming to llama naming where appropriate
+- [x] keep task contract stable for `load_llm` and `unload_llm`
+- [x] update heartbeats and runtime state fields as needed (`runtime_backend` in heartbeat)
+- [x] verify existing observability fields still populate meaningful failure detail
 
 Acceptance tests:
-- [ ] `load_llm` succeeds on a cold worker
-- [ ] `unload_llm` returns the worker to cold state
-- [ ] one real LLM task runs end-to-end on a worker
-- [ ] failed startup produces useful batch artifacts
+- [x] `load_llm` succeeds on a cold worker
+- [x] `unload_llm` returns the worker to cold state (clean `ready_single->unloading->cold`)
+- [x] one real LLM task runs end-to-end on a worker (gpu-1, task completed with result)
+- [x] failed startup produces useful batch artifacts (runtime_error_code/detail populated)
 
 Rollback:
-- [ ] revert worker mixin selection to Ollama path
+- [x] revert worker mixin selection to Ollama path (set `runtime_backend: "ollama"` in config.json)
 
 ## Phase 3: Brain Runtime Migration
 
@@ -467,16 +641,71 @@ Primary files:
 - [brain_dispatch.py](/home/bryan/llm_orchestration/shared/agents/brain_dispatch.py)
 
 Checklist:
-- [ ] replace brain startup from Ollama to `llama-server`
-- [ ] replace brain health checks
-- [ ] replace brain inference endpoint assumptions
-- [ ] update env var names and config keys
-- [ ] verify brain startup and shutdown behavior
+- [x] replace brain startup from Ollama to `llama-server`
+- [x] replace brain health checks
+- [x] replace brain inference endpoint assumptions
+- [x] update env var names and config keys
+- [x] verify brain startup and shutdown behavior
+
+Current note:
+
+- Brain startup is using `runtime_backend: "llama"` in [config.json](/home/bryan/llm_orchestration/shared/agents/config.json).
+- [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py) now starts the brain via `/mnt/shared/scripts/llama_runtime/run_runtime.sh` and probes `GET /v1/models`.
+- Backend-neutral aliases now exist for the brain path:
+  - config prefers `runtime_host` with fallback to `ollama_host`
+  - brain shell dispatch exports `BRAIN_API_BASE` / `WORKER_API_BASE`
+  - worker execution accepts `WORKER_API_BASE` with fallback to `WORKER_OLLAMA_URL`
+- On 2026-03-07, reboot verification showed the rig comes up under `llm-orchestrator.service` with both Ollama units still masked.
+- The earlier brain loading issue was storage-path related, not a broken brain model:
+  - old path: NFS-backed `/mnt/shared` from the Pi, too slow for clean 32B startup
+  - current path: local USB-attached shared drive mounted on the rig at `/mnt/shared`
+  - active brain model promoted to local hot-set at `/home/bryan/model-hotset/qwen2.5-coder-32b/`
+- Current live proof on 2026-03-07:
+  - `llama-brain` is running
+  - `GET /v1/models` returns `200`
+  - `brain.ready` is present
+  - `POST /v1/chat/completions` succeeded with `200`
+- Default runtime ownership has been hardened further on 2026-03-07:
+  - stale `model_load.global.json` owners are now reclaimed automatically by the worker load path
+  - `load_llm` / `load_split_llm` now auto-reset wedged or dirty local runtime state before retrying
+  - startup port reclaim now removes the canonical `llama-worker-gpu-*` container before falling back to `lsof` / `fuser`
+  - single-worker llama load budget increased from `180s` to `300s` for the default 7B worker path on GTX 1060s
+- Observability / cleanup findings from the live rig on 2026-03-07:
+  - legacy dashboard fields could still make a real `loading_single` worker look falsely `cold`
+  - stale manual llama runtimes can contaminate VRAM readings and make it look like the default worker is loaded when it is not
+  - stale split reservation files can keep producing `SPLIT_READY_REJECTED ... has_model=False has_owner=True` noise after the real split runtime is gone
+  - cleanup helper added for returning the rig to service-owned default state:
+    - [`cleanup_llama_runtime_state.py`](/media/bryan/shared/scripts/cleanup_llama_runtime_state.py)
+- Current default config expectation remains:
+  - brain: `qwen2.5:32b` on GPU `0`
+  - default hot worker target: `qwen2.5:7b` on `gpu-2`
+- Current acceptance target for final Phase 3 proof:
+  - run [`github_analyzer`](/home/bryan/Desktop/Shared/plans/shoulders/github_analyzer/plan.md)
+  - against [`code-visualizer`](/home/bryan/Desktop/Shared/plans/shoulders/code-visualizer)
+  - confirm starter-task consumption plus first worker task release under the default runtime state
+- Correct plan submission entrypoints:
+  - local operator wrapper: [`/home/bryan/llm_orchestration/scripts/submit.py`](/home/bryan/llm_orchestration/scripts/submit.py)
+  - rig-side implementation invoked by the wrapper: `/mnt/shared/agents/submit.py`
+  - the local wrapper does not queue locally by default; it SSHes to host alias `gpu` and runs the rig-side submit helper there
+  - config file paths passed to submit should be rig-visible paths (`/mnt/shared/...`) for files the rig must read directly
+  - shared aliases normalized by submit include:
+    - `/mnt/shared`
+    - `/home/bryan/llm_orchestration/shared`
+    - `/media/bryan/shared`
+- Clean default-worker proof on 2026-03-07 after stale-runtime cleanup:
+  - `llama-worker-gpu-2` reached `/v1/models == 200`
+  - heartbeat promoted to:
+    - `state=hot`
+    - `runtime_state=ready_single`
+    - `runtime_transition_phase=load_complete`
+    - `model_loaded=True`
+    - `loaded_model=qwen2.5:7b`
+  - real cold-load time from `/mnt/shared` on the rig was about `3m50s`
 
 Acceptance tests:
-- [ ] brain starts with the intended model
-- [ ] brain can process one plan from startup to initial task release
-- [ ] restart behavior works cleanly
+- [x] brain starts with the intended model
+- [x] brain can process one plan from startup to initial task release
+- [x] restart behavior works cleanly
 
 Rollback:
 - [ ] allow brain to continue on Ollama while workers use llama if needed
@@ -507,10 +736,10 @@ Checklist:
 - [ ] define canonical split startup command
 - [ ] define canonical split readiness criteria
 - [ ] update split reservation data model if needed
-- [ ] remove dual-Ollama assumptions
-- [ ] remove Ollama-specific warmup/load calls
+- [x] remove dual-Ollama assumptions from the active split code path
+- [x] remove Ollama-specific warmup/load calls from the active split code path
 - [ ] keep reservation and ownership logic only where still necessary
-- [ ] simplify cleanup around one runtime process
+- [x] simplify naming and cleanup mechanics around one runtime process
 - [ ] keep strong failure artifacts for split launch, readiness, and teardown
 
 Acceptance tests:
@@ -536,16 +765,16 @@ Primary files likely affected:
 - dashboard runtime recovery paths
 
 Checklist:
-- [ ] replace health scans using `/api/tags`
-- [ ] replace loaded-model scans using `/api/ps`
-- [ ] replace kill/unload logic that depends on Ollama semantics
-- [ ] keep `llm-orchestrator.service` as the single default startup owner
-- [ ] ensure `return_default.py` and any future reset path restart the service instead of launching detached runtimes
-- [ ] update setup guidance
+- [x] replace health/runtime operator surfaces so llama/runtime terminology is primary
+- [x] replace loaded-model scans in the active operator surface where the llama path is now primary
+- [ ] replace the remaining kill/unload logic that still exists only to reap legacy Ollama transition artifacts
+- [x] keep `llm-orchestrator.service` as the single default startup owner
+- [x] ensure `return_default.py` restarts the service instead of launching detached runtimes
+- [x] update setup guidance to runtime-first / llama-first terminology
 - [ ] update runtime diagnostics script
-- [ ] update startup readiness checks
-- [ ] update launch/cleanup behavior
-- [ ] update dashboard reset expectations if needed
+- [x] update startup readiness checks to runtime-first / llama-first terminology
+- [x] update launch/cleanup behavior to runtime-first / llama-first terminology
+- [x] update dashboard reset expectations and control-page wording
 
 Acceptance tests:
 - [ ] startup succeeds from clean rig state
@@ -578,33 +807,35 @@ Acceptance criteria:
 
 ### Core agent/runtime files
 
-- [ ] [gpu_ollama.py](/home/bryan/llm_orchestration/shared/agents/gpu_ollama.py)
-- [ ] [gpu.py](/home/bryan/llm_orchestration/shared/agents/gpu.py)
-- [ ] [gpu_split.py](/home/bryan/llm_orchestration/shared/agents/gpu_split.py)
-- [ ] [gpu_tasks.py](/home/bryan/llm_orchestration/shared/agents/gpu_tasks.py)
-- [ ] [gpu_workers.py](/home/bryan/llm_orchestration/shared/agents/gpu_workers.py)
-- [ ] [gpu_core.py](/home/bryan/llm_orchestration/shared/agents/gpu_core.py)
-- [ ] [worker.py](/home/bryan/llm_orchestration/shared/agents/worker.py)
-- [ ] [brain.py](/home/bryan/llm_orchestration/shared/agents/brain.py)
-- [ ] [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py)
-- [ ] [brain_dispatch.py](/home/bryan/llm_orchestration/shared/agents/brain_dispatch.py)
-- [ ] [brain_resources.py](/home/bryan/llm_orchestration/shared/agents/brain_resources.py)
+- [x] [gpu_ollama.py](/home/bryan/llm_orchestration/shared/agents/gpu_ollama.py)
+- [x] [gpu.py](/home/bryan/llm_orchestration/shared/agents/gpu.py)
+- [x] [gpu_split.py](/home/bryan/llm_orchestration/shared/agents/gpu_split.py)
+- [x] [gpu_tasks.py](/home/bryan/llm_orchestration/shared/agents/gpu_tasks.py)
+- [x] [gpu_workers.py](/home/bryan/llm_orchestration/shared/agents/gpu_workers.py)
+- [x] [gpu_core.py](/home/bryan/llm_orchestration/shared/agents/gpu_core.py)
+- [x] [worker.py](/home/bryan/llm_orchestration/shared/agents/worker.py)
+- [x] [brain.py](/home/bryan/llm_orchestration/shared/agents/brain.py)
+- [x] [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py)
+- [x] [brain_dispatch.py](/home/bryan/llm_orchestration/shared/agents/brain_dispatch.py)
+- [x] [brain_resources.py](/home/bryan/llm_orchestration/shared/agents/brain_resources.py)
+- [x] [brain_failures.py](/home/bryan/llm_orchestration/shared/agents/brain_failures.py)
 
 ### Support files
 
-- [ ] [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py)
-- [ ] [setup.py](/home/bryan/llm_orchestration/shared/agents/setup.py)
-- [ ] [startup.py](/home/bryan/llm_orchestration/shared/agents/startup.py)
-- [ ] [launch.py](/home/bryan/llm_orchestration/shared/agents/launch.py)
+- [x] [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py)
+- [x] [setup.py](/home/bryan/llm_orchestration/shared/agents/setup.py)
+- [x] [startup.py](/home/bryan/llm_orchestration/shared/agents/startup.py)
+- [x] [launch.py](/home/bryan/llm_orchestration/shared/agents/launch.py)
 - [ ] [kill_plan.py](/home/bryan/llm_orchestration/scripts/kill_plan.py)
 - [ ] [/media/bryan/shared/scripts/batch_runtime_diag.py](/media/bryan/shared/scripts/batch_runtime_diag.py)
+- [x] dashboard control-page/runtime reset surface
 
 ### Tests/docs
 
-- [ ] [test_split_runtime_hardening.py](/home/bryan/llm_orchestration/shared/agents/tests/test_split_runtime_hardening.py)
-- [ ] tests covering hardware/runtime scanning
+- [x] [test_split_runtime_hardening.py](/home/bryan/llm_orchestration/shared/agents/tests/test_split_runtime_hardening.py)
+- [x] tests covering hardware/runtime scanning
 - [ ] operator docs
-- [ ] dashboard notes if behavior changes
+- [x] dashboard notes if behavior changes
 
 ## Decision Points
 
@@ -814,3 +1045,117 @@ Required follow-up:
 - or do a proper cleanup/reconciliation pass before switching active development back to `main`
 
 Do not let the migration proceed with long-lived ambiguous divergence between the branch/worktree and the main operator path.
+
+## 2026-03-07 Runtime Validation Update
+
+Current live conclusions after the direct-attached shared-drive move and llama runtime hardening:
+
+- Worker and split paths were previously "serving but not really offloaded". Logs showed `offloaded 0/... layers to GPU` and large `CPU_Mapped model buffer` allocations.
+- The runtime launcher now passes explicit llama device selection based on visible GPUs, and worker/split defaults now force real GPU offload rather than the old `n_gpu_layers=-1` behavior.
+- Default worker policy remains `qwen2.5:7b` on `gpu-2`.
+- Default split review model remains `qwen2.5-coder:14b`.
+
+Validated full-offload profiles:
+
+- `qwen2.5:7b` on a single GTX 1060 6 GB:
+  - use `ctx_size=2048`
+  - use `batch_size=64`
+  - use `n_gpu_layers=999`
+  - this produces about `5.1 GiB` VRAM use and real full offload
+- `qwen2.5-coder:14b` split on two GTX 1060 6 GB cards:
+  - use `ctx_size=4096`
+  - use `batch_size=128`
+  - use `n_gpu_layers=999`
+  - use `tensor_split=1,1`
+  - validated with `49/49` layers offloaded and about `5.3 GiB` / `4.9 GiB` VRAM
+- `qwen2.5-coder:32b` brain on the RTX 3090 Ti:
+  - `brain_context_tokens=32768` is not viable for full GPU residency
+  - `brain_context_tokens=8192` is viable
+  - validated with `65/65` layers offloaded, about `18.5 GiB` model buffer on CUDA and `2.0 GiB` KV on CUDA
+
+Code/config updates made:
+
+- `run_runtime.sh` now maps Docker-visible GPUs to explicit llama `--device CUDA...` arguments
+- single-worker defaults updated to the validated 7B full-offload profile
+- default 7B worker profile now also uses `--no-warmup` because the GTX 1060 path was spending too long inside llama's empty warmup while already holding VRAM
+- split defaults/profile updated to the validated 14B full-offload profile
+- brain context default reduced to `8192` so the 32B brain can fully reside on the 3090
+- brain startup now reuses a ready preloaded llama runtime instead of restarting it during `--model-preloaded` startup
+- startup clears stale brain heartbeat files before a fresh launch
+- single-worker load now follows `check healthy matching runtime -> reuse -> otherwise reset/reload`
+- split member backfill now tolerates already-active split runtimes instead of self-resetting healthy members during `loading` / `ready_stabilizing`
+- llama health checks now probe the split runtime port when a worker is in `split_gpu` placement
+
+Focused test status:
+
+- `test_runtime_defaults.py`: passing
+- `test_split_runtime_hardening.py`: passing
+- `test_phase3_brain_runtime.py`: passing
+- `test_startup_idempotence.py`: passing
+
+Important remaining blocker:
+
+- The brain readiness/ready-flag handoff bug is fixed.
+- Fresh restart now publishes `brain.ready` and worker ready flags correctly.
+- The next live issue was worker load timing on the real orchestrator path.
+- That is now better understood:
+  - `gpu-2` was not falsely loaded; it was genuinely still in `load_tensors` during the long `503 Loading model` window
+  - after removing a stale manual GPU-2 benchmark runtime and clearing stale split reservation state, the default `gpu-2` worker reached `ready_single` cleanly
+  - the real current cold-load expectation for `qwen2.5:7b` from `/mnt/shared` is about `3m50s`, not the older shorter estimate
+- Another control-plane issue was also fixed:
+  - brain LLM demand accounting was counting orphaned private tasks from inactive old batches
+  - that could keep split demand timers artificially alive and cause unnecessary split-hot decisions
+  - demand accounting now counts private tasks only for currently active batches
+  - regression added:
+    - [`test_brain_llm_demand_window.py`](/media/bryan/shared/agents/tests/test_brain_llm_demand_window.py)
+- Split false-failure / heartbeat note:
+  - the split runtime itself could come up healthy, fully offloaded, and listening on the expected port while the reservation still flipped to `failed`
+  - when that happened, member heartbeats mirrored the failed reservation and dropped back to `cold`, which is why the dashboard showed low-trust `cold` / missing `host` even with real VRAM residency
+  - the fix is in the split launcher path now:
+    - if the expected split runtime is already healthy on the reserved port, reuse it instead of treating `port already in use before launch` as terminal
+    - llama offload verification now reads a deeper log tail so it can still see the real `offloaded 49/49 layers to GPU` lines for long startup logs
+  - focused regression coverage for split reuse remains in:
+    - [`test_split_runtime_hardening.py`](/media/bryan/shared/agents/tests/test_split_runtime_hardening.py)
+- Dashboard note:
+  - heartbeat updates are healthy
+  - the dashboard had been rendering legacy `state` / `host` fields, which made a real `loading_single` runtime look falsely `cold`
+  - dashboard rendering is now updated to prefer `runtime_state` and show the configured model while a worker is loading
+- Worker claim/readiness note:
+  - the next real orchestrated bug was not task release timing; it was worker self-awareness
+  - ordinary `llm` tasks were being claimed as soon as a worker looked model-capable, even when the runtime was still in `loading_single`
+  - that produced `model_unavailable` failures on the first `worker_review_slice_*` wave, followed by worker resets and sudden VRAM drops
+  - fix:
+    - ordinary `llm` work now requires `runtime_state` in `RUNTIME_STATES_READY`, not just `model_loaded=True`
+    - the same guard is enforced again at worker spawn time for defense in depth
+  - live validation after restart:
+    - fresh `github_analyzer` batch `20260308_002527` no longer lets cold workers opportunistically grab 7B work
+    - `gpu-2` stayed the only ready single-GPU worker and completed `worker_doc_claims_shard_0` and `worker_doc_claims_shard_1`
+    - remaining 7B shards stayed queued instead of failing immediately with `model_unavailable`
+  - regression added:
+    - [`test_worker_runtime_readiness.py`](/media/bryan/shared/agents/tests/test_worker_runtime_readiness.py)
+- Split orphan-reclaim note:
+  - the next real split blocker was not model fit; it was stale split listeners surviving without owner metadata
+  - when `pair_1_3` relaunched, the reservation failed fast with `split port 11440 already in use before launch`
+  - the deterministic container name was still present, but shared owner metadata was gone, so owner-based cleanup could not remove it
+  - fix:
+    - split startup now reclaims the deterministic split container name first, then rechecks the reserved port before failing
+    - the rig-side runtime launcher no longer rewrites multi-GPU launches to `--gpus all`; it keeps the explicit `device=...` request and still passes llama-visible ordinals for the remapped container view
+  - regression remains in:
+    - [`test_split_runtime_hardening.py`](/media/bryan/shared/agents/tests/test_split_runtime_hardening.py)
+- Batch `20260308_003554` lesson:
+  - this run proved the earlier worker-claim fix held: `worker_doc_claims_shard_*` completed cleanly on `gpu-2`, and the batch reached `brain_strategy`, `runtime_validation`, `build_scope_manifest`, and the review-wave release point
+  - the actual fatal event was later and different:
+    - a generic `load_llm` resource task on `gpu-5` timed out after the full llama readiness budget
+    - the brain treated that background warmup failure like a plan-verification failure and aborted the entire batch
+  - fix:
+    - generic resource meta tasks `load_llm` / `unload_llm` are now non-fatal when they exhaust retries
+    - they are marked abandoned locally instead of cloud-escalating and killing the whole batch
+    - this keeps the batch moving on already-hot workers instead of treating optional capacity expansion as a terminal plan failure
+  - regression added:
+    - [`test_brain_failure_incidents.py`](/media/bryan/shared/agents/tests/test_brain_failure_incidents.py)
+
+Phase read after this update:
+
+- Phase 3 runtime/storage migration: complete for startup, storage, default ownership, and first real plan-release proof
+- Phase 4 split llama runtime rewrite: runtime path and validated profile are substantially complete, but full orchestrated acceptance still depends on finishing the remaining shoulder-script Ollama cleanup and validating the real split task path end-to-end
+- Phase 5 should not start until the full `github_analyzer` acceptance path is proven under the llama-only defaults

@@ -8,10 +8,10 @@ For deeper detail, see [CONTEXT.md](CONTEXT.md), [architecture.md](architecture.
 
 ## Core Rules
 
-1. Start and run the system through the orchestrator, not by manually managing worker Ollama runtimes.
+1. Start and run the system through the orchestrator, not by manually managing worker runtimes.
 2. Submit plans through the wrapper submit script or the dashboard only.
 3. Let the brain decide when worker models load and unload through `meta` tasks.
-4. Treat manual `ollama serve`, manual task JSON insertion, and direct agent submit paths as debug-only recovery tools.
+4. Treat manual runtime processes (for example `docker run llama-server`), manual task JSON insertion, and direct agent submit paths as debug-only recovery tools.
 
 If a workflow bypasses queue-driven `meta` tasks, it is not the normal path.
 
@@ -24,8 +24,9 @@ If a workflow bypasses queue-driven `meta` tasks, it is not the normal path.
 - The brain inserts `load_llm` / `unload_llm` / split-runtime `meta` tasks when work requires a model change.
 - GPU agents handle those `meta` tasks directly and update heartbeat/runtime state.
 - Plans, the dashboard, and runtime management all use the same task lanes and state files.
+- The runtime backend is `llama` and is set explicitly in `config.json` via `runtime_backend`.
 
-That is the unified system. There should not be separate "plan loading", "dashboard loading", and "manual Ollama loading" pathways in normal operation.
+That is the unified system. There should not be separate "plan loading", "dashboard loading", and "manual runtime loading" pathways in normal operation.
 
 ---
 
@@ -33,14 +34,17 @@ That is the unified system. There should not be separate "plan loading", "dashbo
 
 ```bash
 pgrep -af "brain.py|gpu.py"
-curl -s http://localhost:11434/api/ps | jq -r '.models[].name'
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
 ls ~/llm_orchestration/shared/tasks/{queue,processing,complete}/ 2>/dev/null | head -20
+# Runtime-specific probe:
+#   active runtime: curl -s http://127.0.0.1:<port>/v1/models
+#                   curl -s http://127.0.0.1:<port>/health
+#                   docker ps --filter name=llama-worker
 ```
 
 What to expect:
 - `brain.py` and GPU agents are running
-- brain model responds on `11434`
+- brain model responds on its configured port
 - worker VRAM use matches actual queued/running orchestrator state
 
 ---
@@ -65,7 +69,7 @@ What `startup.py` is responsible for:
 Notes:
 - Brain model loading belongs to startup.
 - Worker model loading belongs to orchestrator `meta` tasks.
-- Keep always-on worker-specific Ollama services disabled so the orchestrator has single ownership of worker runtime ports.
+- Keep always-on worker-specific runtime services disabled so the orchestrator has single ownership of worker runtime ports.
 
 Use wrapper mode scripts only when you intentionally want that mode's startup behavior:
 
@@ -97,11 +101,11 @@ Why this matters:
 - heartbeats stay accurate
 - dashboard state stays accurate
 - runtime port ownership stays coherent
-- brain resource logic does not fight unmanaged Ollama instances
+- brain resource logic does not fight unmanaged runtime instances
 
 ### What Not To Do
 
-Do not use manual worker `ollama serve` processes in normal operation.
+Do not start manual worker runtime processes (`docker run llama-server`) in normal operation.
 
 Symptoms of bypassing the orchestrator:
 - VRAM is used but dashboard/runtime linkage is missing
@@ -133,6 +137,15 @@ What the wrapper adds:
 2. placeholder validation
 3. shared-path translation
 4. SSH proxy to rig when needed
+
+Path notes:
+- local operator entrypoint: `~/llm_orchestration/scripts/submit.py`
+- rig-side submit implementation: `/mnt/shared/agents/submit.py`
+- for file-based config values, prefer shared paths that the rig can open directly
+- the wrapper normalizes these shared aliases:
+  - `~/llm_orchestration/shared/...`
+  - `/media/bryan/shared/...`
+  - `/mnt/shared/...`
 
 ### Dashboard Path
 
@@ -411,7 +424,7 @@ Keep the system simple:
 - start with `startup.py` or an orchestration wrapper
 - submit plans with the wrapper or dashboard
 - let the brain drive worker model state through `meta` tasks
-- treat direct Ollama manipulation as debugging, not operations
+- treat direct runtime manipulation (manual containers, ad hoc local runtime commands) as debugging, not operations
 
 If reality does not match that model, fix the system back toward this flow instead of documenting another side path.
 

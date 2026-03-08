@@ -181,7 +181,9 @@ Hardware is auto-discovered by `setup.py` and stored in `config.json`. The syste
 
 Run `python setup.py` on any rig to scan hardware and generate `config.json`. See `config.template.json` for the schema.
 
-Models are stored on the shared drive and loaded into Ollama on demand. See [NETWORK_SETUP.md](NETWORK_SETUP.md) and [systems_prep.md](systems_prep.md) for rig-specific details.
+Models are stored as GGUF files on the shared drive under `/mnt/shared/models/`. The runtime backend is `llama` in `config.json`, and models are served via containerized `llama-server` (one container per loaded model).
+
+See [NETWORK_SETUP.md](NETWORK_SETUP.md) and [systems_prep.md](systems_prep.md) for rig-specific details.
 
 ---
 
@@ -194,7 +196,7 @@ Models are stored on the shared drive and loaded into Ollama on demand. See [NET
 │  • Runs cloud LLM (Claude Code)  │                  │  • NVIDIA GPUs (per config.json) │
 │  • Prepares plans                │                  │  • Runs brain + workers          │
 │  • Submits to shared folder      │                  │  • Executes plans                │
-│  • GitHub for version control    │                  │  • Ollama for local LLM inference │
+│  • GitHub for version control    │                  │  • Local LLM inference (llama-server) │
 └──────────────────────────────────┘                  └──────────────────────────────────┘
            │                                                      │
            │  USB                                                 │ NFS mount
@@ -493,7 +495,7 @@ Each GPU agent owns one physical GPU and manages concurrent worker subprocesses:
 | `id` | 1 | Physical GPU index (CUDA_VISIBLE_DEVICES) |
 | `name` | gpu-1 | Agent name for logging and signals |
 | `model` | (per config) | LLM model (for hot state) |
-| `port` | 11435 | Dedicated Ollama port |
+| `port` | 11435 | Dedicated `llama-server` runtime port |
 
 **Key boundary:** A GPU is either:
 - **Hot** (LLM loaded): Claims meta, llm, cpu tasks. LLM fills VRAM so no script tasks.
@@ -546,7 +548,7 @@ GPU Agent (gpu.py)           Worker Subprocess (worker.py)
 Each worker subprocess:
 - Receives task JSON as a command-line argument
 - Uses `PermissionExecutor` for sandboxed shell execution
-- Sends LLM requests to parent GPU agent's Ollama port
+- Sends LLM requests to parent GPU agent's runtime port (`/v1/chat/completions`)
 - Logs training samples for future fine-tuning
 - Prints result as JSON to stdout (GPU agent reads this)
 - Exits immediately after completing its single task
@@ -739,4 +741,4 @@ The system uses defense-in-depth to protect core agent instructions:
 
 ---
 
-*Last Updated: February 2026*
+*Last Updated: March 2026*

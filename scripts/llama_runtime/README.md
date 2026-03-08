@@ -1,7 +1,7 @@
 # llama-server Runtime Helpers
 
-This directory holds the concrete runtime artifacts for the Ollama to
-`llama-server` migration:
+This directory holds the concrete runtime artifacts for the active
+`llama-server` runtime path:
 
 - a dedicated CUDA image build
 - a deterministic container entrypoint

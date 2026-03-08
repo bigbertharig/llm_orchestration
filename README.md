@@ -5,7 +5,7 @@ Distributed task orchestration system for running local LLM workloads across GPU
 ## Architecture
 
 - **RPi 5** (10.0.0.2): Control plane, NFS server, internet gateway, Claude Code, plan authoring
-- **GPU rig** (10.0.0.3): RTX 3090 Ti, runs brain + GPU workers via Ollama
+- **GPU rig** (10.0.0.3): RTX 3090 Ti, runs brain + GPU workers via `llama-server`
 - **CPU workers** (10.0.0.10+): Orange Pi Prime cluster (ARM64, 2GB RAM), claim CPU tasks over NFS
 - **Brain (Qwen 32B)**: Coordinator — interprets plans, creates tasks, monitors workers, validates results
 - **GPU workers (Qwen 7B)**: Execute LLM and script tasks on GPU
@@ -38,18 +38,16 @@ pip install -r requirements.txt
 ```bash
 # Start the full system (on GPU rig via shared drive)
 cd ~/llm_orchestration/shared/agents
-source ~/ml-env/bin/activate
-python launch.py
+source ~/llm-orchestration-venv/bin/activate
+python3 startup.py
 
-# CPU workers auto-start via systemd (cpu-agent.service)
-# Plug in SD card + ethernet → worker joins cluster automatically
-
-# Submit a plan (from RPi)
+# Submit a plan (from control plane)
 cd ~/llm_orchestration
-python scripts/submit.py shared/plans/<plan_name> --config '{"VAR": "value"}'
+python3 scripts/submit.py ~/llm_orchestration/shared/plans/<plan_name> --config '{"VAR":"value"}'
 
 # Monitor via web dashboard
-python scripts/dashboard.py   # http://localhost:8080
+cd ~/llm_orchestration/scripts
+python3 -m dashboard --port 8787
 ```
 
 ## Plans

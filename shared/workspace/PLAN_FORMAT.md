@@ -116,7 +116,7 @@ Fields valid only for `llm` tasks:
 Brain-owned LLM tasks:
 - A task may be `executor: brain` with `task_class: llm` when it requires the brain model.
 - Do not add `llm_model` to brain-owned tasks.
-- Do not pass fixed brain model ids or fixed brain Ollama URLs in the task command.
+- Do not pass fixed brain model ids or fixed brain runtime URLs in the task command.
 - The shared runtime is the source of truth for brain model selection and endpoint binding.
 
 Fields valid only for `script` tasks:
@@ -136,7 +136,8 @@ Use:
 Important boundary:
 - `executor: brain` means "run this with the active brain runtime."
 - Plans must not choose the concrete brain model or brain endpoint.
-- Brain tasks should consume runtime-injected `BRAIN_MODEL` and `BRAIN_OLLAMA_URL`.
+- Brain tasks should consume runtime-injected `BRAIN_MODEL` and `BRAIN_API_BASE`.
+- Brain tasks should consume the runtime-injected llama variables only; do not depend on legacy Ollama-era env names.
 - Plans may still choose worker-side model demand when that is part of the workflow contract.
 
 ### Task Class Values
@@ -225,6 +226,19 @@ Rules:
 - or a comma-separated list of task ids
 
 A task is not released until all dependencies are complete.
+
+### LLM JSON Contract
+
+For `task_class: llm` tasks that expect structured output:
+- The script, not the plan markdown, owns schema enforcement and output recovery.
+- Prompts should ask for one strict JSON object only.
+- Consumers must tolerate wrapper prose or fenced markdown and recover the first balanced JSON object when possible.
+- Consumers must fail clearly when no valid JSON object can be recovered.
+- Plans should prefer writing structured artifacts to disk over depending on free-form model text in later tasks.
+
+Practical rule:
+- fix JSON reliability in the called script and prompt pair
+- do not assume plan wording alone will make model output deterministic
 
 ---
 
