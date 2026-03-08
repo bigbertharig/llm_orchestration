@@ -96,8 +96,12 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
         elif thermal_reasons:
             thermal_cause = classify_thermal_cause(thermal_reasons)
         loaded_model = str(hb.get("loaded_model") or "").strip()
+        configured_model = str(hb.get("configured_model") or "").strip()
         runtime_placement = str(hb.get("runtime_placement") or "").strip()
         runtime_group_id = str(hb.get("runtime_group_id") or "").strip()
+        runtime_state = str(hb.get("runtime_state") or "").strip()
+        runtime_phase = str(hb.get("runtime_transition_phase") or "").strip()
+        runtime_api_base = str(hb.get("runtime_api_base") or "").strip()
         model_loaded = bool(hb.get("model_loaded"))
         if model_loaded and loaded_model:
             if runtime_placement == "split_gpu":
@@ -109,14 +113,24 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
                 host_display = loaded_model
         elif model_loaded:
             host_display = "[loaded]"
+        elif runtime_state.startswith("loading"):
+            host_display = configured_model or runtime_api_base or "[loading]"
         else:
             host_display = "-"
+
+        if runtime_state and runtime_state != "cold":
+            state_display = runtime_state
+        else:
+            state_display = hb.get("state", "?")
+
+        if runtime_phase and runtime_phase not in held:
+            held.append(runtime_phase)
 
         rows.append({
             "name": name,
             "gpu_id": hb.get("gpu_id"),
             "type": "gpu",
-            "state": hb.get("state", "?"),
+            "state": state_display,
             "model_loaded": hb.get("model_loaded"),
             "loaded_model": hb.get("loaded_model"),
             "loaded_tier": hb.get("loaded_tier"),

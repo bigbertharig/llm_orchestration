@@ -2,8 +2,8 @@
 """Return the rig to its default startup state.
 
 This is the reusable local wrapper for the existing dashboard "return default"
-behavior. It clears worker/split Ollama runtimes, restarts the remote agents,
-and waits for GPU heartbeats to return.
+behavior. It clears worker/split runtimes, restarts the remote agents, and
+waits for GPU heartbeats to return.
 """
 
 from __future__ import annotations
@@ -164,8 +164,8 @@ def _wait_for_default_state(shared_dir: Path, config: dict, timeout_s: int, stal
     return last_result
 
 
-def _run_clear_ollama(timeout_s: int) -> tuple[bool, dict]:
-    script_path = BASE_DIR / "scripts" / "clear_ollama.py"
+def _run_clear_runtime(timeout_s: int) -> tuple[bool, dict]:
+    script_path = BASE_DIR / "scripts" / "clear_runtime.py"
     proc = subprocess.run(
         [sys.executable, str(script_path), "--json"],
         capture_output=True,
@@ -238,7 +238,7 @@ def main() -> int:
         if isinstance(gpu, dict) and gpu.get("id") is not None:
             gpu_ids.append(int(gpu["id"]))
 
-    clear_ok, clear_summary = _run_clear_ollama(timeout_s=min(args.timeout, 180))
+    clear_ok, clear_summary = _run_clear_runtime(timeout_s=min(args.timeout, 180))
     attempt_summaries: list[dict] = []
     restart_ok = False
     heartbeat_summary: dict = {"ok": False, "missing": [], "stale": []}
@@ -278,7 +278,7 @@ def main() -> int:
     result = {
         "ok": ok,
         "message": "Returned system to default startup state" if ok else "Failed to return system to default startup state",
-        "clear_ollama": clear_summary,
+        "clear_runtime": clear_summary,
         "restart": final_attempt.get("restart"),
         "heartbeats": final_attempt.get("heartbeats"),
         "default_state": default_summary,

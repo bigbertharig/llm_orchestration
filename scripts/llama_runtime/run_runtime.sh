@@ -92,7 +92,7 @@ CMD=(
   --name "${NAME}"
   --gpus "${GPUS}"
   --network host
-  -v /mnt/shared/models:/mnt/shared/models:ro
+  -v "$(dirname "${MODEL}")":"$(dirname "${MODEL}")":ro
   "${IMAGE_TAG}"
   llama-server
   --model "${MODEL}"

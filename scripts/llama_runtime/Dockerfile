@@ -39,9 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/llama.cpp/build/bin/llama-server /opt/llama/bin/llama-server
-COPY --from=build /src/llama.cpp/build/bin/libggml*.so /opt/llama/bin/
-COPY --from=build /src/llama.cpp/build/bin/libllama*.so /opt/llama/bin/
-COPY --from=build /src/llama.cpp/common/chat-templates /opt/llama/chat-templates
+COPY --from=build /src/llama.cpp/models/templates /opt/llama/chat-templates
 COPY entrypoint.sh /opt/llama/entrypoint.sh
 
 RUN chmod +x /opt/llama/entrypoint.sh

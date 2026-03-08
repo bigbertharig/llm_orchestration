@@ -99,6 +99,7 @@ HTTP server and handler:
 - `/api/control/kill_all_active` - Kill all batches
 - `/api/control/return_default` - Reset to startup defaults
 - `/api/control/reset_gpu` - Targeted hard reset for one GPU worker
+- `/api/control/clear_runtime` - Clear worker/split runtime containers and stale runtime artifacts
 - `/api/control/resume_plan` - Resume a batch
 - `/api/control/start_plan` - Submit a new plan
 - `/api/control/batch_outputs` - Get batch output files

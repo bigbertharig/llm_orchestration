@@ -45,7 +45,7 @@ Use the rig side for:
 - starting/stopping/restarting orchestrator services
 - submitting batches
 - resetting GPUs / return-to-default flows
-- checking live local Ollama ports and rig-local processes
+- checking live local runtime ports and rig-local processes
 
 The laptop side is still fine for:
 - reading shared history folders
@@ -77,9 +77,10 @@ python3 ~/llm_orchestration/scripts/start_custom_mode.py --brain-model ... --sin
 
 ```bash
 pgrep -af "brain.py|gpu.py"
-curl -s http://localhost:11434/api/ps | jq -r '.models[].name'
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
 python3 ~/llm_orchestration/scripts/status.py
+# Runtime-specific probe (depends on runtime_backend config):
+#   active runtime: curl -s http://127.0.0.1:<port>/v1/models
 ```
 
 Primary live log:
@@ -97,6 +98,15 @@ python3 ~/llm_orchestration/scripts/submit.py \
   ~/llm_orchestration/shared/plans/<shoulder-or-arm>/<plan_name> \
   --config '{"KEY":"VALUE"}'
 ```
+
+Submit path notes:
+- local operator entrypoint: `~/llm_orchestration/scripts/submit.py`
+- that wrapper proxies normal submissions to rig-side `python3 /mnt/shared/agents/submit.py`
+- config values that refer to files the rig must open should resolve to rig-visible shared paths
+- accepted shared aliases are normalized by the wrapper:
+  - `~/llm_orchestration/shared/...`
+  - `/media/bryan/shared/...`
+  - `/mnt/shared/...`
 
 Use the dashboard as the other normal front door:
 

@@ -457,8 +457,8 @@ async function cleanupStale() {
   await refreshOptions();
 }
 
-async function clearOllama() {
-  showResult(await api('/api/control/clear_ollama', {}));
+async function clearRuntime() {
+  showResult(await api('/api/control/clear_runtime', {}));
   await refreshOptions();
 }
 
