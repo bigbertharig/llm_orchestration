@@ -175,6 +175,29 @@ Follow-up after the second cleanup pass:
 
 Remaining non-agent Ollama references are now mostly in benchmark/history tooling and older model-management scripts, not in the main agent control plane.
 
+## Non-Benchmark Sweep Progress (2026-03-08)
+
+Completed in this pass:
+
+- [quickstart.md](/home/bryan/llm_orchestration/shared/workspace/quickstart.md), [architecture.md](/home/bryan/llm_orchestration/shared/workspace/architecture.md), [PLAN_FORMAT.md](/home/bryan/llm_orchestration/shared/workspace/PLAN_FORMAT.md), and [README.md](/home/bryan/llm_orchestration/README.md) now present llama as the only active runtime path in normal operator docs.
+- [scripts/llama_runtime/README.md](/home/bryan/llm_orchestration/scripts/llama_runtime/README.md) now describes the directory as the active runtime surface instead of a migration-only bridge.
+- [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py), [NETWORK_SETUP.md](/home/bryan/llm_orchestration/shared/workspace/NETWORK_SETUP.md), [systems_prep.md](/home/bryan/llm_orchestration/shared/workspace/systems_prep.md), and [brain-behavior.md](/home/bryan/llm_orchestration/shared/workspace/brain-behavior.md) no longer describe the old Ollama path as current operator behavior.
+- Obsolete tracked helper [clear_ollama.py](/home/bryan/llm_orchestration/scripts/clear_ollama.py) was removed from the repo.
+
+Phase status after this pass:
+
+- Phase 1, core agent/control plane cleanup: effectively done
+- Phase 2, operator/runtime tooling cleanup: mostly done
+- Phase 3, repo-wide non-benchmark doc/support cleanup: in progress
+- Phase 4, benchmark/history-specific cleanup: intentionally deferred for now
+- Phase 5, broad validation/testing: deferred until the remaining non-benchmark runtime leftovers are removed
+
+Still intentionally deferred in this pass:
+
+- benchmark-adjacent runtime prep/model-management helpers such as [prepare_llm_runtimes.py](/home/bryan/llm_orchestration/shared/scripts/prepare_llm_runtimes.py) and [manage_model_hotset.py](/home/bryan/llm_orchestration/shared/scripts/manage_model_hotset.py)
+- historical/archive material under `shared/workspace/archive/`, `shared/brain/escalations/`, and related old reports
+- anything under `shared/plans/` or benchmark-specific trees
+
 ## Constraints
 
 - Shared GGUF files under `/mnt/shared/models/` remain the source of truth.

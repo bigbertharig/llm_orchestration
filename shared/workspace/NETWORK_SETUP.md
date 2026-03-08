@@ -136,7 +136,7 @@ SSH here is an operator/control-plane tool, not the main runtime data plane.
 
 ## Runtime Ownership Note
 
-This doc should not be read as “the rig is driven by fixed always-on Ollama
+This doc should not be read as “the rig is driven by fixed always-on runtime
 services.”
 
 Current normal runtime model is:
@@ -147,7 +147,7 @@ Current normal runtime model is:
 - worker model load/unload happens through orchestrator `meta` tasks or explicit
   startup-mode wrappers
 
-Older host-specific Ollama service layouts are historical infrastructure notes,
+Older host-specific runtime service layouts are historical infrastructure notes,
 not the primary operator workflow.
 
 Relevant startup entrypoints:
@@ -204,7 +204,7 @@ artifacts as trustworthy until the mount is healthy again.
 These topics still matter historically, but they are not the main operator
 story anymore:
 
-- host-specific dual-Ollama service experiments
+- host-specific dual-runtime service experiments
 - old fixed worker/brain service pinning
 - desktop convenience shortcuts on the GPU rig
 

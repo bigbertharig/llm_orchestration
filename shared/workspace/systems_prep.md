@@ -121,7 +121,7 @@ Current orchestration behavior should be understood as:
 - worker model state is not supposed to be maintained primarily by ad hoc
   always-on host services
 
-Historical host notes about fixed Ollama instances are useful context, but they
+Historical host notes about fixed runtime instances are useful context, but they
 do not define the normal operator path anymore.
 
 ---

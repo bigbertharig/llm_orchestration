@@ -397,7 +397,7 @@ def _try_fix_definition_error(task: dict) -> bool:
 
         if any(kw in command for kw in ["whisper", "transcrib", "embed", "cuda", "gpu"]):
             task["task_class"] = "script"  # GPU compute
-        elif any(kw in command for kw in ["ollama", "generate", "llm"]):
+        elif any(kw in command for kw in ["llama", "chat/completions", "llm"]):
             task["task_class"] = "llm"     # Needs LLM model
         else:
             task["task_class"] = "cpu"     # Default

@@ -316,7 +316,7 @@ def suggest_assignment(gpus, runtime, preferences=None):
     if len(top_gpus) >= 2 and top_gpus[0]["name"] == top_gpus[1]["name"]:
         # Pair the first two identical top-VRAM GPUs for brain
         brain_gpu_indices = [top_gpus[0]["index"], top_gpus[1]["index"]]
-        brain_vram = max_vram  # Each card's VRAM (Ollama handles multi-GPU)
+        brain_vram = max_vram  # Each card's VRAM; the split runtime spans both GPUs
         worker_gpus = [g for g in sorted_gpus if g["index"] not in brain_gpu_indices]
     else:
         # Single largest GPU for brain
