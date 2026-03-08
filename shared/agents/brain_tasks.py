@@ -120,20 +120,54 @@ class BrainTaskQueueMixin:
                 pass
         return tasks
 
+    def _batch_events_log_path(self, batch_id: str) -> Path | None:
+        batch_meta = self.active_batches.get(batch_id, {}) if hasattr(self, "active_batches") else {}
+        batch_dir = Path(str(batch_meta.get("batch_dir", "")).strip())
+        if not batch_dir:
+            return None
+        return batch_dir / "logs" / "batch_events.jsonl"
+
     def get_completed_task_ids(self, batch_id: str) -> set:
         """Get set of completed task names for a batch."""
         completed = set()
+
+        # Prefer the batch-local event log. It is scoped, append-only, and avoids
+        # a full scan across every historical completion artifact on the shared drive.
+        events_log = self._batch_events_log_path(batch_id)
+        if events_log and events_log.exists():
+            try:
+                with open(events_log, encoding="utf-8") as f:
+                    for line in f:
+                        raw = str(line or "").strip()
+                        if not raw:
+                            continue
+                        event = json.loads(raw)
+                        if event.get("batch_id") != batch_id:
+                            continue
+                        if event.get("event") != "task_succeeded":
+                            continue
+                        task_name = str(event.get("task_name") or "").strip()
+                        if task_name:
+                            completed.add(task_name)
+                return completed
+            except Exception:
+                # Fall back to the legacy global completion scan when the per-batch
+                # history file is missing or malformed.
+                completed.clear()
+
         for task_file in self.complete_path.glob("*.json"):
             try:
                 with open(task_file) as f:
                     task = json.load(f)
-                    if task.get("batch_id") == batch_id:
-                        # Check if task succeeded
-                        result = task.get("result", {})
-                        if result.get("success", False):
-                            completed.add(task.get("name", ""))
-            except:
-                pass
+                if task.get("batch_id") != batch_id:
+                    continue
+                result = task.get("result", {})
+                if result.get("success", False):
+                    name = str(task.get("name", "")).strip()
+                    if name:
+                        completed.add(name)
+            except Exception:
+                continue
         return completed
 
     def _complete_private_task_noop(self, task: Dict[str, Any], output: str):

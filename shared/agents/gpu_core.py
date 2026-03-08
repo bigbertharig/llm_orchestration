@@ -18,12 +18,11 @@ class GPUCoreMixin:
     """Mixin providing config loading and utility methods."""
 
     def _effective_keep_alive(self) -> str:
-        """Return an Ollama-compatible keep_alive duration."""
+        """Return a keep_alive duration for runtime compatibility."""
         raw = str(self.worker_keep_alive or "").strip()
         if not raw:
             return "30m"
         if raw == "-1":
-            # Newer Ollama rejects "-1"; use a long finite duration instead.
             return "24h"
         return raw
 
@@ -107,10 +106,14 @@ class GPUCoreMixin:
                     gid = f"group_{'_'.join(sorted(members))}"
                     groups.append({"id": gid, "members": members, "port": None})
 
+            # GGUF path for llama-server backend
+            gguf_path = str(item.get("gguf_path", "")).strip() or None
+
             model_meta[model_id] = {
                 "placement": placement,
                 "split_groups": groups,
                 "tier": int(self.model_tier_by_id.get(model_id, DEFAULT_LLM_MIN_TIER)),
+                "gguf_path": gguf_path,
             }
         return model_meta
 

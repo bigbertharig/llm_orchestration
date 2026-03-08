@@ -806,26 +806,48 @@ class BrainGoalMixin:
 
             # Find newly completed tracked tasks
             new_completions = []
-            for task_file in self.complete_path.glob("*.json"):
+            events_log = self._batch_events_log_path(batch_id)
+            if events_log and events_log.exists():
                 try:
-                    with open(task_file) as f:
-                        task = json.load(f)
-                    if task.get("batch_id") != batch_id:
-                        continue
-                    task_name = task.get("name", "")
-                    task_id = task.get("task_id", "")
-                    if not task_name.startswith(f"{tracked_task}_"):
-                        continue
-                    if task_id in validated_task_ids:
-                        continue
-                    # Check if task succeeded
-                    result = task.get("result", {})
-                    if not result.get("success", False):
-                        new_completions.append((task_id, task_name, False))
-                    else:
-                        new_completions.append((task_id, task_name, True))
+                    with open(events_log, encoding="utf-8") as f:
+                        for line in f:
+                            raw = str(line or "").strip()
+                            if not raw:
+                                continue
+                            event = json.loads(raw)
+                            if event.get("batch_id") != batch_id:
+                                continue
+                            if event.get("event") not in {"task_succeeded", "task_failed"}:
+                                continue
+                            task_name = str(event.get("task_name") or "").strip()
+                            task_id = str(event.get("task_id") or "").strip()
+                            if not task_name.startswith(f"{tracked_task}_"):
+                                continue
+                            if task_id in validated_task_ids:
+                                continue
+                            new_completions.append(
+                                (task_id, task_name, event.get("event") == "task_succeeded")
+                            )
                 except Exception:
-                    continue
+                    new_completions = []
+
+            if not new_completions:
+                for task_file in self.complete_path.glob("*.json"):
+                    try:
+                        with open(task_file) as f:
+                            task = json.load(f)
+                        if task.get("batch_id") != batch_id:
+                            continue
+                        task_name = task.get("name", "")
+                        task_id = task.get("task_id", "")
+                        if not task_name.startswith(f"{tracked_task}_"):
+                            continue
+                        if task_id in validated_task_ids:
+                            continue
+                        result = task.get("result", {})
+                        new_completions.append((task_id, task_name, bool(result.get("success", False))))
+                    except Exception:
+                        continue
 
             # Even with zero completed tracked tasks we still need to run
             # scheduling/exhaustion checks below (for zero-candidate rounds).

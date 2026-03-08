@@ -219,6 +219,12 @@ JSON only:"""
             return str(workers[-1]).strip()
         return ""
 
+    def _is_nonfatal_resource_meta_task(self, task: Dict[str, Any]) -> bool:
+        if str(task.get("task_class", "")).lower() != "meta":
+            return False
+        command = str(task.get("command", "")).strip()
+        return command in {"load_llm", "unload_llm"}
+
     def _clear_retry_runtime_fields(self, task: Dict[str, Any]) -> None:
         self._prepare_task_for_requeue(task, "worker_retry")
 
@@ -827,6 +833,25 @@ JSON only:"""
                          "workers_attempted": workers, "attempts": attempts,
                          "incident_id": incident.get("incident_id")})
 
+                    if self._is_nonfatal_resource_meta_task(task):
+                        task["status"] = "abandoned"
+                        task["abandoned_reason"] = "resource_meta_exhausted_nonfatal"
+                        task["result"]["error_type"] = "resource_meta_nonfatal"
+                        with open(task_file, 'w') as f:
+                            json.dump(task, f, indent=2)
+                        self.log_decision(
+                            "RESOURCE_META_ABANDON",
+                            f"Resource meta task exhausted retries without aborting batch: {task.get('name', '')}",
+                            {
+                                "task_id": task["task_id"][:8],
+                                "command": task.get("command", ""),
+                                "batch_id": task.get("batch_id", ""),
+                                "worker": self._failed_task_worker(task),
+                            },
+                        )
+                        self._save_brain_state()
+                        continue
+
                     # Brain gets up to N fix revisions before cloud escalation.
                     if int(incident.get("brain_fix_attempts", 0)) < self.max_brain_fix_attempts:
                         fixed = self._try_fix_missing_module(task, result)
@@ -1062,7 +1087,7 @@ JSON only:"""
             inferred_class = None
             if any(kw in command for kw in ["whisper", "transcrib", "embed", "cuda", "gpu"]):
                 inferred_class = "script"  # GPU compute task
-            elif any(kw in command for kw in ["ollama", "generate", "prompt", "llm"]):
+            elif any(kw in command for kw in ["llama", "generate", "prompt", "llm"]):
                 inferred_class = "llm"  # Needs LLM model
             else:
                 inferred_class = "cpu"  # Default to CPU

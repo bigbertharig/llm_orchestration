@@ -64,19 +64,21 @@ class GPUWorkerMixin:
         ]
 
         # Pass active runtime endpoint if available (for LLM tasks).
-        if self.runtime_ollama_url:
-            worker_cmd.extend(["--ollama-url", self.runtime_ollama_url])
+        if self.runtime_api_base:
+            worker_cmd.extend(["--api-base", self.runtime_api_base])
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
+        # Pass runtime backend so worker uses correct inference API
+        env["WORKER_RUNTIME_BACKEND"] = str(getattr(self, 'runtime_backend', 'llama'))
         # Ensure script-style worker tasks can self-identify and self-route.
         env["WORKER_NAME"] = self.name
         if self.loaded_model:
             env["WORKER_MODEL"] = str(self.loaded_model)
         elif self.model:
             env["WORKER_MODEL"] = str(self.model)
-        if self.runtime_ollama_url:
-            env["WORKER_OLLAMA_URL"] = self.runtime_ollama_url
+        if self.runtime_api_base:
+            env["WORKER_API_BASE"] = self.runtime_api_base
         if self.runtime_placement:
             env["WORKER_RUNTIME_PLACEMENT"] = str(self.runtime_placement)
         if self.runtime_group_id:

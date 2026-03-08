@@ -7,6 +7,7 @@
       "id": "qwen2.5:7b",
       "tier": 1,
       "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
       "tags": [
         "general",
         "fast"
@@ -16,6 +17,7 @@
       "id": "qwen2.5:14b",
       "tier": 2,
       "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/qwen2.5-coder-14b/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
       "split_groups": [
         {
           "id": "pair_1_3",
@@ -42,6 +44,7 @@
       "id": "qwen2.5-coder:14b",
       "tier": 2,
       "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/qwen2.5-coder-14b/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
       "split_groups": [
         {
           "id": "pair_1_3",

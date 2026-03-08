@@ -39,6 +39,12 @@ from gpu_workers import WorkerResult
 class GPUTaskMixin:
     """Mixin providing task claiming and meta task handling methods."""
 
+    def _clear_runtime_mismatch_tracking(self) -> None:
+        """Clear mismatch circuit-breaker tracking after explicit recovery."""
+        self.mismatch_timestamps = []
+        self.runtime_mismatch_count = 0
+        self.runtime_recovery_cooldown_until = None
+
     def _safe_meta_detail(self, value: Any, limit: int = 400) -> str:
         text = str(value or "").strip()
         if not text:
@@ -135,6 +141,8 @@ class GPUTaskMixin:
         """
         if str(task.get("task_class", "")).strip() != "llm":
             return True, ""
+        if self.runtime_state not in RUNTIME_STATES_READY:
+            return False, f"runtime_not_ready:{self.runtime_state}"
         if not self.model_loaded:
             return False, "model_not_loaded"
 
@@ -167,10 +175,10 @@ class GPUTaskMixin:
         return True, ""
 
     def _attest_runtime_reality(self) -> Dict[str, Any]:
-        """Probe actual Ollama runtime state (not cached heartbeat fields).
+        """Probe actual runtime state (not cached heartbeat fields).
 
         Used for claim-time attestation to detect state drift between
-        heartbeat/runtime fields and actual Ollama /api/ps.
+        heartbeat/runtime fields and actual runtime /v1/models.
 
         Returns:
             {
@@ -207,17 +215,19 @@ class GPUTaskMixin:
             # No port to probe - can't attest
             return result
 
-        # Probe actual Ollama state
+        # Probe actual runtime state (backend-aware)
         actual_models = []
+        backend = getattr(self, 'runtime_backend', 'llama')
         try:
-            r = requests.get(f"http://127.0.0.1:{probe_port}/api/ps", timeout=2)
+            # llama-server: /v1/models returns model list; port alive = model loaded.
+            # The model ID from /v1/models is the GGUF file path, not the
+            # config-style model name. Since llama-server serves exactly one
+            # model, a 200 response means our expected model is loaded.
+            r = requests.get(f"http://127.0.0.1:{probe_port}/v1/models", timeout=2)
             if r.status_code == 200:
-                models = r.json().get("models", [])
-                actual_models = [
-                    str(m.get("name", "")).strip()
-                    for m in models
-                    if isinstance(m, dict) and str(m.get("name", "")).strip()
-                ]
+                # Use our internal model name as the actual model so attestation
+                # comparison works correctly.
+                actual_models = [str(self.loaded_model or "unknown")]
         except requests.exceptions.ConnectionError:
             # Port not responding - interpret as no models loaded
             actual_models = []
@@ -331,19 +341,11 @@ class GPUTaskMixin:
                 target_model = str(reservation.get("target_model", "")).strip()
                 if target_model:
                     try:
-                        r = requests.get(f"http://127.0.0.1:{self.runtime_port}/api/ps", timeout=2)
+                        # llama-server: port responding = model loaded
+                        r = requests.get(f"http://127.0.0.1:{self.runtime_port}/v1/models", timeout=2)
                         if r.status_code == 200:
-                            models = r.json().get("models", [])
-                            actual_models = [
-                                str(m.get("name", "")).strip()
-                                for m in models
-                                if isinstance(m, dict) and str(m.get("name", "")).strip()
-                            ]
+                            actual_models = [target_model]  # llama-server serves exactly one model
                             result["details"]["actual_models"] = actual_models
-                            if target_model not in actual_models:
-                                result["ok"] = False
-                                result["reason"] = f"target_model_missing:expected={target_model},actual={actual_models}"
-                                return result
                         else:
                             result["ok"] = False
                             result["reason"] = f"probe_failed:status={r.status_code}"
@@ -437,7 +439,7 @@ class GPUTaskMixin:
                 # or different model (attestation needed)
                 pass
             if not self.model_loaded and actual_models:
-                # State says cold but Ollama has models - mismatch
+                # State says cold but runtime has models - mismatch
                 result["ok"] = False
                 result["mismatch_reason"] = f"load_llm:expected_cold_but_models_present:{actual_models}"
                 result["allow_continue"] = True
@@ -514,7 +516,12 @@ class GPUTaskMixin:
         except Exception as e:
             self.logger.error(f"Failed to release task {task_id}: {e}")
 
-    def _full_local_reset(self, reason: str) -> None:
+    def _full_local_reset(
+        self,
+        reason: str,
+        *,
+        count_toward_circuit_breaker: bool = True,
+    ) -> None:
         """Perform full local reset when runtime state drift is detected.
 
         Called after releasing a task due to claim-time runtime mismatch.
@@ -522,41 +529,44 @@ class GPUTaskMixin:
 
         Uses shared _runtime_reset_port_and_state() core plus circuit breaker logic.
 
-        NOTE: Reset ends in verified cold state. Ollama is NOT auto-restarted.
+        NOTE: Reset ends in verified cold state. Runtime is NOT auto-restarted.
         Re-warm happens through normal task flow (load_llm) to prevent thrashing.
 
         Circuit breaker: If too many mismatches in short window, worker enters wedged state.
         """
-        self.logger.warning(f"FULL_LOCAL_RESET worker={self.name} reason={reason}")
+        self.logger.warning(
+            f"FULL_LOCAL_RESET worker={self.name} reason={reason} "
+            f"count_toward_circuit_breaker={count_toward_circuit_breaker}"
+        )
 
-        # Track mismatch timestamps for circuit breaker
         now = datetime.now()
-        mismatch_timestamps = getattr(self, 'mismatch_timestamps', [])
-        mismatch_timestamps.append(now)
-        # Keep only timestamps within window
-        cutoff = now.timestamp() - MISMATCH_CIRCUIT_BREAKER_WINDOW_SECONDS
-        mismatch_timestamps = [t for t in mismatch_timestamps if t.timestamp() > cutoff]
-        self.mismatch_timestamps = mismatch_timestamps
-        self.runtime_mismatch_count = len(mismatch_timestamps)
+        if count_toward_circuit_breaker:
+            mismatch_timestamps = getattr(self, 'mismatch_timestamps', [])
+            mismatch_timestamps.append(now)
+            cutoff = now.timestamp() - MISMATCH_CIRCUIT_BREAKER_WINDOW_SECONDS
+            mismatch_timestamps = [t for t in mismatch_timestamps if t.timestamp() > cutoff]
+            self.mismatch_timestamps = mismatch_timestamps
+            self.runtime_mismatch_count = len(mismatch_timestamps)
 
-        # Circuit breaker: too many mismatches -> wedge
-        if self.runtime_mismatch_count >= MISMATCH_CIRCUIT_BREAKER_COUNT:
-            self.logger.error(
-                f"MISMATCH_CIRCUIT_BREAKER_TRIGGERED worker={self.name} "
-                f"count={self.runtime_mismatch_count} within {MISMATCH_CIRCUIT_BREAKER_WINDOW_SECONDS}s"
-            )
-            self.runtime_recovery_cooldown_until = (
-                now.timestamp() + MISMATCH_WEDGE_COOLDOWN_SECONDS
-            )
-            self._set_runtime_state(
-                RUNTIME_STATE_WEDGED,
-                phase=f"circuit_breaker:{reason}",
-            )
-            try:
-                self._write_heartbeat()
-            except Exception as e:
-                self.logger.warning(f"Heartbeat write after wedge failed: {e}")
-            return
+            if self.runtime_mismatch_count >= MISMATCH_CIRCUIT_BREAKER_COUNT:
+                self.logger.error(
+                    f"MISMATCH_CIRCUIT_BREAKER_TRIGGERED worker={self.name} "
+                    f"count={self.runtime_mismatch_count} within {MISMATCH_CIRCUIT_BREAKER_WINDOW_SECONDS}s"
+                )
+                self.runtime_recovery_cooldown_until = (
+                    now.timestamp() + MISMATCH_WEDGE_COOLDOWN_SECONDS
+                )
+                self._set_runtime_state(
+                    RUNTIME_STATE_WEDGED,
+                    phase=f"circuit_breaker:{reason}",
+                )
+                try:
+                    self._write_heartbeat()
+                except Exception as e:
+                    self.logger.warning(f"Heartbeat write after wedge failed: {e}")
+                return
+        else:
+            self._clear_runtime_mismatch_tracking()
 
         # Build list of ports to clean (local worker port + split port if different)
         ports_to_clean = []
@@ -572,7 +582,7 @@ class GPUTaskMixin:
             reason=f"mismatch:{reason}",
             task_id=None,
             stop_split_runtime=True,
-            stop_local_ollama=True,
+            stop_local_runtime=True,
         )
 
         self.logger.info(
@@ -584,11 +594,11 @@ class GPUTaskMixin:
     def _get_preferred_classes(self) -> List[str]:
         """Get task classes this GPU should claim based on current state.
 
-        Circuit breaker: if Ollama is unhealthy, exclude LLM tasks to prevent
-        burning through timeouts on a broken Ollama instance.
+        Circuit breaker: if runtime is unhealthy, exclude LLM tasks to prevent
+        burning through timeouts on a broken runtime instance.
         """
-        if not self.ollama_healthy:
-            self.logger.debug("Ollama unhealthy - excluding LLM tasks from claim")
+        if not self.runtime_healthy:
+            self.logger.debug("Runtime unhealthy - excluding LLM tasks from claim")
             return ['meta', 'script']
         if self.state == "hot":
             return ['meta', 'llm']
@@ -713,6 +723,18 @@ class GPUTaskMixin:
                     and _is_targeted_to_self()
                 ):
                     return True, ""
+                if reason == "wedged_requires_reclaim":
+                    self.logger.warning(
+                        f"LOAD_META_AUTO_RESET command={command} worker={self.name} "
+                        f"reason={reason}"
+                    )
+                    self._full_local_reset(
+                        f"auto_reclaim_before_{command}",
+                        count_toward_circuit_breaker=False,
+                    )
+                    can_load, reason = self._can_accept_load_task()
+                    if can_load:
+                        return True, ""
                 return False, f"preflight_{reason}"
             if self.model_loaded:
                 return False, "model_already_loaded"
@@ -751,6 +773,18 @@ class GPUTaskMixin:
             # Strict: No load while in ready state
             can_load, reason = self._can_accept_load_task()
             if not can_load:
+                if reason == "wedged_requires_reclaim":
+                    self.logger.warning(
+                        f"LOAD_META_AUTO_RESET command={command} worker={self.name} "
+                        f"reason={reason}"
+                    )
+                    self._full_local_reset(
+                        f"auto_reclaim_before_{command}",
+                        count_toward_circuit_breaker=False,
+                    )
+                    can_load, reason = self._can_accept_load_task()
+                    if can_load:
+                        return True, ""
                 return False, f"preflight_{reason}"
             target_model = str(task.get("target_model", "")).strip()
             target_tier = int(self.model_tier_by_id.get(target_model, DEFAULT_LLM_MIN_TIER))
@@ -1021,16 +1055,28 @@ class GPUTaskMixin:
                         meta_cmd = str(task.get("command", ""))
                         if meta_cmd in ("load_llm", "unload_llm", "load_split_llm", "unload_split_llm"):
                             attestation = self._attest_meta_task_precondition(task)
-                            if not attestation["ok"] and not attestation.get("allow_continue", False):
-                                self.logger.warning(
-                                    f"RUNTIME_ATTESTATION_FAIL meta={meta_cmd} task={task['task_id'][:8]} "
-                                    f"worker={self.name} reason={attestation['mismatch_reason']}"
-                                )
-                                self._release_task_for_mismatch(
-                                    task, task_file, attestation["mismatch_reason"]
-                                )
-                                self._full_local_reset(attestation["mismatch_reason"])
-                                return claimed
+                            if not attestation["ok"]:
+                                if (
+                                    attestation.get("allow_continue", False)
+                                    and meta_cmd in ("load_llm", "load_split_llm")
+                                ):
+                                    self.logger.warning(
+                                        f"RUNTIME_ATTESTATION_AUTO_RESET meta={meta_cmd} "
+                                        f"task={task['task_id'][:8]} worker={self.name} "
+                                        f"reason={attestation['mismatch_reason']}"
+                                    )
+                                    self._full_local_reset(attestation["mismatch_reason"])
+                                    attestation = self._attest_meta_task_precondition(task)
+                                if not attestation["ok"]:
+                                    self.logger.warning(
+                                        f"RUNTIME_ATTESTATION_FAIL meta={meta_cmd} task={task['task_id'][:8]} "
+                                        f"worker={self.name} reason={attestation['mismatch_reason']}"
+                                    )
+                                    self._release_task_for_mismatch(
+                                        task, task_file, attestation["mismatch_reason"]
+                                    )
+                                    self._full_local_reset(attestation["mismatch_reason"])
+                                    return claimed
                         # Keep attempt bookkeeping consistent with worker-claimed tasks.
                         task["attempts"] = task.get("attempts", 0) + 1
                         task["workers_attempted"] = task.get("workers_attempted", [])
@@ -1100,7 +1146,7 @@ class GPUTaskMixin:
                             )
                             continue
 
-                        # Claim-time runtime attestation: verify actual Ollama state
+                        # Claim-time runtime attestation: verify actual runtime state
                         # matches our cached state before committing to claim
                         attestation = self._attest_runtime_reality()
                         if not attestation["ok"]:
@@ -1255,10 +1301,11 @@ class GPUTaskMixin:
             task_id = task.get("task_id")
             target_model = str(task.get("target_model", "")).strip() or None
             self._touch_meta_task(phase="load_llm")
-            self._full_local_reset(f"pre_load_llm:{target_model or 'unknown'}")
-            if self.port:
-                self._touch_meta_task(phase="restart_ollama_after_reset")
-                self.start_ollama()
+            self._full_local_reset(
+                f"pre_load_llm:{target_model or 'unknown'}",
+                count_toward_circuit_breaker=False,
+            )
+            # llama backend: load_model handles container start internally
             self.load_model(model_id=target_model, task_id=task_id)
             load_success = bool(self.model_loaded)
             result = self._build_meta_result(
@@ -1565,7 +1612,7 @@ class GPUTaskMixin:
                 while time.time() < wait_deadline and self._split_runtime_has_any_listener(split_port):
                     time.sleep(0.2)
                 # If a listener or runner residue remains, do one orphan-runner sweep (scoped to this port).
-                orphan_runners_killed = self._kill_orphan_ollama_runners(target_port=split_port)
+                orphan_runners_killed = self._kill_orphan_runtime_processes(target_port=split_port)
 
             # Postcondition verification
             split_listener_still_up = bool(split_port and self._split_runtime_has_any_listener(split_port))
@@ -1620,7 +1667,7 @@ class GPUTaskMixin:
                     self.runtime_placement = "single_gpu"
                     self.runtime_group_id = None
                     self.runtime_port = self.port
-                    self.runtime_ollama_url = f"http://localhost:{self.port}" if self.port else None
+                    self.runtime_api_base = f"http://localhost:{self.port}" if self.port else None
                     self.split_runtime_owner = False
 
             result = self._build_meta_result(
@@ -1715,7 +1762,7 @@ class GPUTaskMixin:
             self._write_heartbeat_now()
 
             self._touch_meta_task(phase="reset_gpu_runtime")
-            self._full_local_reset(reason)
+            self._full_local_reset(reason, count_toward_circuit_breaker=False)
 
             # Verify we ended up in cold state
             if self.runtime_state != RUNTIME_STATE_COLD:
@@ -1767,7 +1814,7 @@ class GPUTaskMixin:
 
             # Stop split runtime and reset state
             self._stop_split_runtime()
-            self._full_local_reset(reason)
+            self._full_local_reset(reason, count_toward_circuit_breaker=False)
 
             # Verify we ended up in cold state
             if self.runtime_state != RUNTIME_STATE_COLD:

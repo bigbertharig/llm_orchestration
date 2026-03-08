@@ -35,7 +35,11 @@ from filelock import FileLock, Timeout
 
 from brain_goal import BrainGoalMixin
 from brain_constants import DEFAULT_LLM_MIN_TIER
-from brain_core import BrainCoreMixin, resolve_auto_default_target
+from brain_core import (
+    BrainCoreMixin,
+    resolve_auto_default_target,
+    resolve_runtime_chat_endpoint,
+)
 from brain_dispatch import BrainDispatchMixin
 from brain_plan import BrainPlanMixin
 from brain_failures import BrainFailureMixin
@@ -123,16 +127,18 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
 
         self.model = self.brain_config["model"]
         self.gpus = self.brain_config["gpus"]
-        self.api_url = f"{self.config['ollama_host']}/api/generate"
         self.brain_keep_alive = str(self.config.get("brain_keep_alive", "-1"))
         self.brain_num_ctx = int(self.config.get("brain_context_tokens", 8192))
+
+        # Set API URL based on runtime backend
+        self.api_url = resolve_runtime_chat_endpoint(self.config)
 
         self.poll_interval = self.config["timeouts"]["poll_interval_seconds"]
         self.think_timeout = self.config["timeouts"]["brain_think_seconds"]
 
         self.gpu_agents = {g["name"]: g for g in self.config.get("gpus", [])}
         self.brain_only = len(self.gpu_agents) == 0
-        self.ollama_process: Optional[subprocess.Popen] = None
+        self.runtime_process: Optional[subprocess.Popen] = None
         self.running = True
 
         # Track active batches: batch_id -> {plan, started_at, config}
@@ -265,26 +271,27 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
         """
         successful_task_ids = set()
 
-        for task_file in self.complete_path.glob("*.json"):
+        # Prefer active-batch event logs over a full global scan of tasks/complete.
+        # The shared drive can hold a large historical archive, and walking it on
+        # every loop or restart is both unnecessary and fragile.
+        for batch_id in list(self.active_batches.keys()):
+            events_log = self._batch_events_log_path(batch_id)
+            if not events_log or not events_log.exists():
+                continue
             try:
-                with open(task_file) as f:
-                    task = json.load(f)
-                task_id = task.get("task_id")
-                if not task_id:
-                    continue
-
-                # Treat explicit success as authoritative.
-                # If result is absent, keep backward-compat behavior and consider complete as success.
-                result = task.get("result")
-                is_success = (
-                    task.get("status") == "complete"
-                    and (
-                        not isinstance(result, dict)
-                        or result.get("success", True) is True
-                    )
-                )
-                if is_success:
-                    successful_task_ids.add(task_id)
+                with open(events_log, encoding="utf-8") as f:
+                    for line in f:
+                        raw = str(line or "").strip()
+                        if not raw:
+                            continue
+                        event = json.loads(raw)
+                        if event.get("batch_id") != batch_id:
+                            continue
+                        if event.get("event") != "task_succeeded":
+                            continue
+                        task_id = str(event.get("task_id") or "").strip()
+                        if task_id:
+                            successful_task_ids.add(task_id)
             except Exception:
                 continue
 
@@ -364,9 +371,25 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
         self.logger.info(f"GPU agents: {list(self.gpu_agents.keys())}")
 
         try:
-            self.logger.info("[STARTUP] Phase 1: Connecting to Ollama...")
-            self.start_ollama()
-            self.logger.info(f"[STARTUP] Ollama ready ({_time.time() - start_time:.1f}s)")
+            _backend = str(self.config.get("runtime_backend", "llama"))
+            if model_preloaded:
+                self.logger.info(
+                    f"[STARTUP] Phase 1: Reusing preloaded runtime (backend={_backend})..."
+                )
+                if self._brain_runtime_is_ready(timeout_seconds=15):
+                    self.logger.info(
+                        f"[STARTUP] Reused existing runtime ({_time.time() - start_time:.1f}s)"
+                    )
+                else:
+                    self.logger.warning(
+                        "[STARTUP] Preloaded runtime was not ready; starting runtime normally"
+                    )
+                    self.start_runtime()
+                    self.logger.info(f"[STARTUP] Runtime ready ({_time.time() - start_time:.1f}s)")
+            else:
+                self.logger.info(f"[STARTUP] Phase 1: Starting runtime (backend={_backend})...")
+                self.start_runtime()
+                self.logger.info(f"[STARTUP] Runtime ready ({_time.time() - start_time:.1f}s)")
 
             # Preload model with progress logging (skip if already loaded)
             if model_preloaded:
@@ -432,7 +455,7 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
                 )
             self._save_brain_state()
             self._write_brain_heartbeat()
-            self.stop_ollama()
+            self.stop_runtime()
 
     def stop(self):
         self.running = False
@@ -444,7 +467,7 @@ def main():
     parser.add_argument("--config", default=str(default_config),
                         help="Path to config file")
     parser.add_argument("--model-preloaded", action="store_true",
-                        help="Skip model warmup (model already loaded in Ollama)")
+                        help="Skip model warmup (model already loaded in runtime)")
     args = parser.parse_args()
 
     brain = Brain(args.config)

@@ -25,6 +25,10 @@ class MockBrainFailures(BrainFailureMixin, BrainSummaryMixin, BrainTaskQueueMixi
         self.failed_path = root / "tasks" / "failed"
         self.private_tasks_path = root / "brain" / "private_tasks"
         self.batch_event_index = {}
+        self.config = {"retry_policy": {"max_attempts": 3}}
+        self.max_brain_fix_attempts = 0
+        self.model_meta_by_id = {}
+        self.gpu_agents = {}
         self.active_batches = {
             "batch-1": {
                 "batch_dir": str(root / "plans" / "demo" / "history" / "batch-1"),
@@ -43,9 +47,53 @@ class MockBrainFailures(BrainFailureMixin, BrainSummaryMixin, BrainTaskQueueMixi
             root / "plans" / "demo" / "history" / "batch-1",
         ):
             path.mkdir(parents=True, exist_ok=True)
+        self.aborted_batches = []
+        self.escalations = []
+        self.saved_state = 0
 
     def log_decision(self, event, message, details):
         self.logged.append({"event": event, "message": message, "details": details})
+
+    def _get_or_create_incident(self, task, result):
+        incident_id = str(task.get("incident_id") or "incident-1")
+        return {
+            "incident_id": incident_id,
+            "history": [],
+            "brain_fix_attempts": 0,
+            "worker_cycles": 0,
+        }
+
+    def _abort_batch(self, batch_id, reason, task):
+        self.aborted_batches.append({"batch_id": batch_id, "reason": reason, "task": task.get("name")})
+
+    def emit_cloud_escalation(self, escalation_type, title, details, source_task):
+        self.escalations.append(
+            {
+                "type": escalation_type,
+                "title": title,
+                "details": details,
+                "task": source_task.get("name"),
+            }
+        )
+        return "esc-1"
+
+    def _save_brain_state(self):
+        self.saved_state += 1
+
+    def _try_json_repair_escalation(self, task, result, task_file):
+        return False
+
+    def _try_fix_missing_module(self, task, result):
+        return False
+
+    def _is_recoverable_llm_timeout(self, task, result):
+        return False
+
+    def _is_missing_scraped_file(self, result):
+        return False
+
+    def _try_fix_permission_denied(self, task, result):
+        return False
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -96,6 +144,40 @@ class BrainFailureIncidentTests(unittest.TestCase):
         self.assertEqual(task["status"], "pending")
         self.assertNotIn("incident_id", task)
         self.assertEqual(task["requeue_reason"], "definition_fix")
+
+    def test_nonfatal_resource_meta_exhaustion_does_not_abort_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            brain = MockBrainFailures(root)
+            task = {
+                "task_id": "task-meta",
+                "batch_id": "batch-1",
+                "name": "load_llm",
+                "command": "load_llm",
+                "task_class": "meta",
+                "executor": "worker",
+                "status": "failed",
+                "attempts": 3,
+                "workers_attempted": ["gpu-5", "gpu-5", "gpu-5"],
+                "assigned_to": "gpu-5",
+                "result": {
+                    "success": False,
+                    "error": "load timeout",
+                    "error_type": "meta_runtime_failure",
+                },
+            }
+            task_file = brain.failed_path / "task-meta.json"
+            _write_json(task_file, task)
+
+            brain.handle_failed_tasks()
+
+            updated = json.loads(task_file.read_text(encoding="utf-8"))
+            self.assertEqual(updated["status"], "abandoned")
+            self.assertEqual(updated["abandoned_reason"], "resource_meta_exhausted_nonfatal")
+            self.assertEqual(updated["result"]["error_type"], "resource_meta_nonfatal")
+            self.assertEqual(brain.aborted_batches, [])
+            self.assertEqual(brain.escalations, [])
+            self.assertTrue(any(x["event"] == "RESOURCE_META_ABANDON" for x in brain.logged))
 
 
 if __name__ == "__main__":

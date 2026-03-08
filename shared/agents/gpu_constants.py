@@ -13,7 +13,8 @@ DEFAULT_LLM_MIN_TIER = 1
 # Split Runtime Configuration
 # =============================================================================
 # Single-GPU load budget: lock wait + warmup request + readiness probe.
-SINGLE_META_TIMEOUT_SECONDS = 180
+# The default 7B worker model on a 1060 can exceed 180s during cold loads.
+SINGLE_META_TIMEOUT_SECONDS = 300
 # Split loads can spend significant time waiting on the global load lock and then
 # warming a large model on the shared split runtime.
 SPLIT_META_TIMEOUT_SECONDS = 300
