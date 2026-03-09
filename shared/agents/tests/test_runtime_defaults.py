@@ -154,6 +154,8 @@ class RuntimeDefaultTargetTests(unittest.TestCase):
                         "batch_size": 96,
                         "parallel": 1,
                         "tensor_split": "1,1",
+                        "extra_args": ["--no-warmup"],
+                        "meta_timeout_seconds": 600,
                     }
                 },
             },
@@ -169,6 +171,8 @@ class RuntimeDefaultTargetTests(unittest.TestCase):
                 "n_gpu_layers": 999,
                 "parallel": 1,
                 "tensor_split": "1,1",
+                "extra_args": ["--no-warmup"],
+                "meta_timeout_seconds": 600,
             },
         )
 

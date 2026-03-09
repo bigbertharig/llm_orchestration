@@ -46,6 +46,7 @@ NAME=""
 MODEL=""
 PORT=""
 GPUS=""
+DOCKER_GPUS_ARG=""
 TENSOR_SPLIT=""
 DRY_RUN=0
 EXTRA_ARGS=()
@@ -87,10 +88,16 @@ if ! [[ "${PORT}" =~ ^[0-9]+$ ]]; then
   exit 64
 fi
 
+DOCKER_GPUS_ARG="${GPUS}"
+if [[ "${GPUS}" == device=* ]] && [[ "${GPUS#device=}" == *,* ]]; then
+  # Docker expects a quoted device request for multi-GPU selections.
+  DOCKER_GPUS_ARG="\"${GPUS}\""
+fi
+
 CMD=(
   docker run --rm --detach
   --name "${NAME}"
-  --gpus "${GPUS}"
+  --gpus "${DOCKER_GPUS_ARG}"
   --network host
   -v "$(dirname "${MODEL}")":"$(dirname "${MODEL}")":ro
   "${IMAGE_TAG}"

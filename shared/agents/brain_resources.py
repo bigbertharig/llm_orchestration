@@ -296,6 +296,47 @@ class BrainResourceMixin:
         except Exception:
             return 0
 
+    def _choose_single_model_for_demand(
+        self,
+        model_demand: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        requested = model_demand if isinstance(model_demand, dict) else {}
+        ranked: List[Tuple[int, int, str]] = []
+        for model_id, count in requested.items():
+            candidate = str(model_id or "").strip()
+            if not candidate:
+                continue
+            meta = self.model_meta_by_id.get(candidate, {}) if hasattr(self, "model_meta_by_id") else {}
+            if str(meta.get("placement", "single_gpu")).strip() != "single_gpu":
+                continue
+            try:
+                demand_count = int(count or 0)
+            except Exception:
+                demand_count = 0
+            try:
+                tier = int(self.model_tier_by_id.get(candidate, self.default_llm_min_tier))
+            except Exception:
+                tier = int(getattr(self, "default_llm_min_tier", 1) or 1)
+            ranked.append((-demand_count, tier, candidate))
+
+        if ranked:
+            ranked.sort()
+            return ranked[0][2]
+
+        fallback: List[Tuple[int, str]] = []
+        for model_id, meta in getattr(self, "model_meta_by_id", {}).items():
+            if str(meta.get("placement", "single_gpu")).strip() != "single_gpu":
+                continue
+            try:
+                tier = int(meta.get("tier", self.default_llm_min_tier))
+            except Exception:
+                tier = int(getattr(self, "default_llm_min_tier", 1) or 1)
+            fallback.append((tier, str(model_id)))
+        if not fallback:
+            return None
+        fallback.sort()
+        return fallback[0][1]
+
     def _collect_llm_demand_window_snapshot(self) -> Dict[str, Any]:
         """Aggregate LLM demand across queue, processing, and private tasks.
 
@@ -439,8 +480,20 @@ class BrainResourceMixin:
                 )
                 return
 
+        task_meta = dict(meta) if isinstance(meta, dict) else {}
+        if command == "load_llm":
+            if not str(task_meta.get("target_model", "")).strip():
+                chosen_model = self._choose_single_model_for_demand(
+                    getattr(self, "_last_queue_llm_model_demand", None)
+                )
+                if chosen_model:
+                    task_meta["target_model"] = chosen_model
+            task_meta.setdefault("load_mode", "single")
+        elif command == "load_split_llm":
+            task_meta.setdefault("load_mode", "split")
+
         # Dedup: check if this exact command already exists
-        if self._has_existing_meta_task(command, meta=meta):
+        if self._has_existing_meta_task(command, meta=task_meta):
             self.log_decision("RESOURCE_DEDUP",
                 f"Skipping {command} — already exists in queue/processing", {})
             return
@@ -449,7 +502,6 @@ class BrainResourceMixin:
         BRAIN_SYSTEM_COMMANDS = {"orchestrator_full_reset"}
 
         is_brain_command = command in BRAIN_SYSTEM_COMMANDS
-        task_meta = dict(meta) if isinstance(meta, dict) else {}
 
         explicit_source_batch_id = str(
             task_meta.get("source_batch_id")
@@ -796,6 +848,22 @@ class BrainResourceMixin:
                     if gid and gid in wanted:
                         pending.add(gid)
         return pending
+
+    def _collect_pending_meta_commands(self) -> set[str]:
+        commands: set[str] = set()
+        for lane in (self.queue_path, self.processing_path):
+            for task_file in lane.glob("*.json"):
+                try:
+                    with open(task_file) as f:
+                        task = json.load(f)
+                except Exception:
+                    continue
+                if task.get("task_class") != "meta":
+                    continue
+                command = str(task.get("command", "")).strip()
+                if command:
+                    commands.add(command)
+        return commands
 
     def _split_reservation_file(self, group_id: str) -> Path:
         return self.signals_path / "split_llm" / f"{group_id}.json"
@@ -2331,6 +2399,7 @@ class BrainResourceMixin:
 
     def _make_resource_decisions(self, gpu_status: List[Dict], running_gpus: Dict, queue_stats: Dict):
         """Make decisions about GPU resource allocation based on current state."""
+        self._last_queue_llm_model_demand = dict(queue_stats.get("llm_model_demand", {}) or {})
         # Process any pending recovery fallback signals first
         self._process_recovery_fallback_signals()
 
@@ -2714,6 +2783,7 @@ class BrainResourceMixin:
                                         "load_split_llm",
                                         meta={
                                             "target_model": split_model,
+                                            "load_mode": "split",
                                             "candidate_groups": [target_group],
                                         },
                                     )
@@ -2766,20 +2836,11 @@ class BrainResourceMixin:
                     )
                     inserted_resource_task = True
 
-        # Check if there's already a meta task in queue OR processing
-        has_pending_resource = queue_stats.get("meta", 0) > 0 or inserted_resource_task
-
-        if not has_pending_resource:
-            for task_file in self.processing_path.glob("*.json"):
-                try:
-                    with open(task_file) as f:
-                        task = json.load(f)
-                    if task.get("task_class") == "meta":
-                        has_pending_resource = True
-                        self.logger.debug(f"Meta task already in processing: {task.get('command')}")
-                        break
-                except Exception:
-                    pass
+        pending_meta_commands = self._collect_pending_meta_commands()
+        pending_load_meta_commands = {
+            command for command in pending_meta_commands if command.startswith("load_")
+        }
+        has_pending_resource = bool(pending_load_meta_commands) or inserted_resource_task
 
         if not has_pending_resource:
             # Suppress generic load_llm when ALL LLM demand (queue+processing+private)

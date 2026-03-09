@@ -295,7 +295,8 @@ class PermissionExecutor:
             if returncode != 0:
                 output += f"\n[stderr: {stderr}]"
             self.logger.debug(f"ALLOWED bash: {command}")
-            return ExecutionResult(returncode == 0, output, action)
+            reason = "deferred_model_load" if returncode == 75 else ""
+            return ExecutionResult(returncode == 0, output, action, reason)
         except Exception as e:
             self.active_process = None
             return ExecutionResult(False, str(e), ActionResult.ALLOWED, f"Execution error: {e}")

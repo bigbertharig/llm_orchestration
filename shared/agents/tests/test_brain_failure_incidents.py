@@ -179,6 +179,43 @@ class BrainFailureIncidentTests(unittest.TestCase):
             self.assertEqual(brain.escalations, [])
             self.assertTrue(any(x["event"] == "RESOURCE_META_ABANDON" for x in brain.logged))
 
+    def test_deferred_model_load_requeues_without_abort_or_escalation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            brain = MockBrainFailures(root)
+            task = {
+                "task_id": "task-deferred",
+                "batch_id": "batch-1",
+                "name": "worker_review_slice_001",
+                "task_class": "llm",
+                "executor": "worker",
+                "llm_model": "qwen2.5:7b",
+                "status": "failed",
+                "attempts": 3,
+                "workers_attempted": ["gpu-2", "gpu-5"],
+                "assigned_to": "gpu-5",
+                "result": {
+                    "success": False,
+                    "output": "DEFERRED_MODEL_LOAD: model_unavailable: model 'qwen2.5:7b' is not available; queued_load_llm=True",
+                    "reason": "deferred_model_load",
+                    "worker": "gpu-5",
+                },
+            }
+            task_file = brain.failed_path / "task-deferred.json"
+            _write_json(task_file, task)
+
+            brain.handle_failed_tasks()
+
+            self.assertFalse(task_file.exists())
+            queued = json.loads((brain.queue_path / "task-deferred.json").read_text(encoding="utf-8"))
+            self.assertEqual(queued["status"], "pending")
+            self.assertEqual(queued["requeue_reason"], "deferred_model_load")
+            self.assertEqual(queued["attempts"], 0)
+            self.assertEqual(queued["workers_attempted"], [])
+            self.assertEqual(brain.aborted_batches, [])
+            self.assertEqual(brain.escalations, [])
+            self.assertTrue(any(x["event"] == "DEFERRED_MODEL_LOAD" for x in brain.logged))
+
 
 if __name__ == "__main__":
     unittest.main()

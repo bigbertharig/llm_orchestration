@@ -51,7 +51,11 @@
       "batch_size": 128,
       "parallel": 1,
       "n_gpu_layers": 999,
-      "tensor_split": "1,1"
+      "tensor_split": "1,1",
+      "extra_args": [
+        "--no-warmup"
+      ],
+      "meta_timeout_seconds": 600
     }
   },
   "review_lap_models": {

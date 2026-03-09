@@ -252,7 +252,7 @@ def _prepare_runtime_plan_dir(plan_root: Path, starter_file: Path) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(description="Submit plan to brain")
-    parser.add_argument("plan", help="Path to plan folder or plan.md")
+    parser.add_argument("plan", help="Path to plan folder or markdown plan file")
     parser.add_argument(
         "--plan-file",
         type=str,

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-if "filelock" not in sys.modules:
+if "filelock" not in sys.modules or not hasattr(sys.modules["filelock"], "Timeout"):
     sys.modules["filelock"] = types.SimpleNamespace(FileLock=object, Timeout=Exception)
 if "requests" not in sys.modules:
     sys.modules["requests"] = types.SimpleNamespace()
@@ -36,6 +36,7 @@ class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
     def __init__(self, tmpdir: Path):
         self.name = "gpu-3"
         self.logger = MagicMock()
+        self.config = {}
         self.split_state_dir = tmpdir / "split_llm"
         self.split_state_dir.mkdir(parents=True, exist_ok=True)
         self.shared_path = tmpdir
@@ -238,10 +239,13 @@ class MockLoadClaimGpu(GPUTaskMixin):
 class SplitRuntimeHardeningTests(unittest.TestCase):
     def setUp(self):
         self._orig_lock = gpu_tasks.FileLock
+        self._orig_split_lock = gpu_split.FileLock
         gpu_tasks.FileLock = DummyLock
+        gpu_split.FileLock = DummyLock
 
     def tearDown(self):
         gpu_tasks.FileLock = self._orig_lock
+        gpu_split.FileLock = self._orig_split_lock
 
     def test_load_split_reservation_disappearance_forces_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,6 +326,25 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
 
         self.assertEqual(gpu._split_runtime_start_budget_seconds(), 270)
 
+    def test_split_runtime_start_budget_honors_profile_timeout(self):
+        gpu = MockSplitGpu(Path(tempfile.mkdtemp()))
+        gpu.config = {
+            "llama_split_profiles": {
+                "qwen2.5-coder:14b": {
+                    "meta_timeout_seconds": 600,
+                    "extra_args": ["--no-warmup"],
+                }
+            }
+        }
+
+        timeout_seconds = gpu._split_meta_timeout_seconds(model_id="qwen2.5-coder:14b")
+
+        self.assertEqual(timeout_seconds, 600)
+        self.assertEqual(
+            gpu._split_runtime_start_budget_seconds(meta_timeout_seconds=timeout_seconds),
+            570,
+        )
+
     def test_split_warmup_failure_classifier_marks_terminal_failures(self):
         gpu = MockSplitGpu(Path(tempfile.mkdtemp()))
 
@@ -349,6 +372,8 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
         can_claim, reason = gpu._can_claim_meta_task(
             {
                 "command": "load_llm",
+                "target_model": "qwen2.5:7b",
+                "load_mode": "single",
                 "candidate_workers": ["gpu-2"],
             }
         )
@@ -495,6 +520,131 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
                 updated["member_clean"]["gpu-3"]["details"]["backfilled_from_active_runtime"]
             )
 
+    def test_service_split_reservations_does_not_rejoin_during_loading(self):
+        class LoadingJoinGuardGpu(MockSplitGpu):
+            def __init__(self, tmpdir: Path):
+                super().__init__(tmpdir)
+                self.join_calls = 0
+
+            def _join_split_reservation(self, reservation, reservation_path):
+                self.join_calls += 1
+                return reservation
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = LoadingJoinGuardGpu(Path(tmp))
+            gpu.runtime_state = gpu_split.RUNTIME_STATE_LOADING_SPLIT
+            reservation_path = gpu._split_reservation_path("pair_3_4")
+            reservation_path.write_text(
+                json.dumps(
+                    {
+                        "group_id": "pair_3_4",
+                        "status": "loading",
+                        "target_model": "model-a",
+                        "members": ["gpu-3", "gpu-4"],
+                        "launcher": "gpu-3",
+                        "port": 11441,
+                        "joined": {
+                            "gpu-3": {"joined_at": "now"},
+                            "gpu-4": {"joined_at": "now"},
+                        },
+                        "member_clean": {
+                            "gpu-3": {"verified_at": "now", "details": {}},
+                            "gpu-4": {"verified_at": "now", "details": {}},
+                        },
+                        "prepared": {
+                            "gpu-3": {"prepared_at": "now"},
+                            "gpu-4": {"prepared_at": "now"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            gpu._service_split_reservations()
+
+            self.assertEqual(gpu.join_calls, 0)
+
+    def test_service_split_reservations_does_not_restart_runtime_while_loading(self):
+        class LoadingRestartGuardGpu(MockSplitGpu):
+            def __init__(self, tmpdir: Path):
+                super().__init__(tmpdir)
+                self.start_calls = 0
+
+            def _start_split_runtime(self, group, model_id, task_id=None):
+                self.start_calls += 1
+                return True, False
+
+            def _is_gpu_heartbeat_fresh(self, _gpu_name, max_age_seconds=0):
+                return True
+
+            def _split_runtime_has_model_loaded(self, port, model_id):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = LoadingRestartGuardGpu(Path(tmp))
+            gpu.runtime_state = gpu_split.RUNTIME_STATE_LOADING_SPLIT
+            gpu.active_meta_task = {"task_id": "task-1"}
+            reservation_path = gpu._split_reservation_path("pair_3_4")
+            reservation_path.write_text(
+                json.dumps(
+                    {
+                        "group_id": "pair_3_4",
+                        "status": "loading",
+                        "target_model": "model-a",
+                        "members": ["gpu-3", "gpu-4"],
+                        "launcher": "gpu-3",
+                        "port": 11441,
+                        "joined": {
+                            "gpu-3": {"joined_at": "now"},
+                            "gpu-4": {"joined_at": "now"},
+                        },
+                        "member_clean": {
+                            "gpu-3": {"verified_at": "now", "details": {}},
+                            "gpu-4": {"verified_at": "now", "details": {}},
+                        },
+                        "prepared": {
+                            "gpu-3": {"prepared_at": "now"},
+                            "gpu-4": {"prepared_at": "now"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            gpu._service_split_reservations()
+
+            self.assertEqual(gpu.start_calls, 0)
+
+    def test_service_split_reservations_ignores_runtime_owner_metadata_files(self):
+        class RuntimeOwnerScanGuardGpu(MockSplitGpu):
+            def __init__(self, tmpdir: Path):
+                super().__init__(tmpdir)
+                self.join_calls = 0
+
+            def _join_split_reservation(self, reservation, reservation_path):
+                self.join_calls += 1
+                return reservation
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = RuntimeOwnerScanGuardGpu(Path(tmp))
+            (gpu.split_state_dir / "pair_3_4.runtime_owner.json").write_text(
+                json.dumps(
+                    {
+                        "group_id": "pair_3_4",
+                        "launcher": "gpu-3",
+                        "members": ["gpu-3", "gpu-4"],
+                        "model_id": "model-a",
+                        "port": 11441,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            gpu._service_split_reservations()
+
+            self.assertEqual(gpu.join_calls, 0)
+            self.assertFalse(gpu._has_pending_split_coordination())
+
     def test_split_runtime_reuses_existing_healthy_listener(self):
         with tempfile.TemporaryDirectory() as tmp:
             gpu = MockSplitGpu(Path(tmp))
@@ -600,6 +750,20 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
             self.assertEqual(len(gpu.load_model_calls), 1)
             self.assertEqual(gpu.load_model_calls[0]["model_id"], "new-model")
             self.assertEqual(gpu.loaded_model, "new-model")
+            self.assertEqual(result.get("error_code", ""), "")
+
+    def test_load_llm_missing_target_model_fails_loud(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = MockSplitGpu(Path(tmp))
+
+            result = gpu._execute_meta_command(
+                {"task_id": "task-3"},
+                "load_llm",
+            )
+
+            self.assertFalse(result["success"])
+            self.assertEqual(result["error_code"], "missing_target_model")
+            self.assertEqual(gpu.load_model_calls, [])
 
     def test_load_meta_attestation_mismatch_allows_execution_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -400,8 +400,8 @@ def _count_existing_meta_tasks(shared_path: Path, command: str) -> int:
     return count
 
 
-def _purge_stale_startup_load_tasks(shared_path: Path) -> int:
-    """Remove startup-created load_llm tasks left behind from prior runs."""
+def _purge_stale_startup_meta_tasks(shared_path: Path) -> int:
+    """Remove startup-created load meta tasks left behind from prior runs."""
     removed = 0
     for folder in ("queue", "processing"):
         path = shared_path / "tasks" / folder
@@ -415,7 +415,10 @@ def _purge_stale_startup_load_tasks(shared_path: Path) -> int:
                     task = json.load(f)
             except Exception:
                 continue
-            if task.get("task_class") != "meta" or task.get("command") != "load_llm":
+            if task.get("task_class") != "meta":
+                continue
+            command = str(task.get("command", "")).strip()
+            if command not in {"load_llm", "load_split_llm"}:
                 continue
             created_by = str(task.get("created_by", "")).strip()
             batch_id = str(task.get("batch_id", "")).strip()
@@ -424,6 +427,8 @@ def _purge_stale_startup_load_tasks(shared_path: Path) -> int:
                 created_by == "startup"
                 or batch_id == "system"
                 or name.startswith("load_llm_startup_")
+                or name.startswith("load_split_llm_startup_")
+                or name.startswith("startup_")
             ):
                 try:
                     task_file.unlink()
@@ -484,7 +489,7 @@ def _enqueue_startup_load_llm(
     queue_path = shared_path / "tasks" / "queue"
     queue_path.mkdir(parents=True, exist_ok=True)
 
-    removed = _purge_stale_startup_load_tasks(shared_path)
+    removed = _purge_stale_startup_meta_tasks(shared_path)
     if removed:
         print(f"Removed {removed} stale startup load_llm task(s) before enqueue.")
 
@@ -565,6 +570,73 @@ def _enqueue_startup_load_llm(
         f"Queued {to_add} startup load_llm task(s) "
         f"(target={count}, existing={existing})."
     )
+
+
+def _enqueue_startup_meta_tasks(
+    shared_path: Path,
+    created_by: str,
+    startup_meta_tasks: list[dict] | None,
+):
+    """Insert configured startup meta tasks into the public queue.
+
+    Tasks are queued through the same public meta-task path used elsewhere.
+    Later startup tasks are serialized behind earlier ones via depends_on.
+    """
+    if not isinstance(startup_meta_tasks, list) or not startup_meta_tasks:
+        return
+
+    queue_path = shared_path / "tasks" / "queue"
+    queue_path.mkdir(parents=True, exist_ok=True)
+
+    removed = _purge_stale_startup_meta_tasks(shared_path)
+    if removed:
+        print(f"Removed {removed} stale startup meta task(s) before enqueue.")
+
+    previous_task_id = None
+    queued = 0
+    for idx, raw_task in enumerate(startup_meta_tasks, start=1):
+        if not isinstance(raw_task, dict):
+            continue
+        command = str(raw_task.get("command", "")).strip()
+        if command not in {"load_llm", "load_split_llm"}:
+            continue
+
+        task = {
+            "task_id": str(uuid.uuid4()),
+            "type": "meta",
+            "command": command,
+            "batch_id": "system",
+            "name": str(raw_task.get("name", "")).strip()
+            or f"{command}_startup_{idx}",
+            "priority": int(raw_task.get("priority", 10) or 10),
+            "task_class": "meta",
+            "depends_on": [previous_task_id] if previous_task_id else [],
+            "executor": "worker",
+            "status": "pending",
+            "created_at": datetime.now().isoformat(),
+            "created_by": created_by,
+            "retry_count": 0,
+        }
+
+        for key in (
+            "target_model",
+            "load_mode",
+            "candidate_workers",
+            "candidate_groups",
+            "target_worker",
+            "split_group_id",
+        ):
+            if key in raw_task:
+                task[key] = raw_task[key]
+
+        task_file = queue_path / f"{task['task_id']}.json"
+        with open(task_file, "w", encoding="utf-8") as f:
+            json.dump(task, f, indent=2)
+        previous_task_id = task["task_id"]
+        queued += 1
+
+    if queued:
+        print(f"Queued {queued} startup meta task(s) from config.")
 
 
 # =============================================================================
@@ -1086,23 +1158,33 @@ def main():
                 processes=processes,
             )
 
-    # Optional startup warm-up: queue load_llm meta tasks.
-    # Workers still start cold; these tasks selectively heat up N workers.
-    if args.initial_hot_workers is not None:
-        initial_hot_workers = max(0, int(args.initial_hot_workers))
-    else:
-        initial_hot_workers = int(config.get("initial_hot_workers", 0))
-    if initial_hot_workers > 0 and gpus_to_start:
-        warm_target = min(initial_hot_workers, len(gpus_to_start))
-        print(f"\nQueueing startup warm-up: {warm_target} worker(s)")
-        _enqueue_startup_load_llm(
+    # Optional startup warm-up: queue normal meta tasks through the public lane.
+    startup_meta_tasks = config.get("startup_meta_tasks")
+    if isinstance(startup_meta_tasks, list) and startup_meta_tasks:
+        print(f"\nQueueing startup meta tasks: {len(startup_meta_tasks)}")
+        _enqueue_startup_meta_tasks(
             shared_path=Path(config["shared_path"]),
             created_by="startup",
-            count=warm_target,
-            available_workers=gpus_to_start,
-            agents_dir=agents_dir,
-            preferred_workers=config.get("startup_warm_workers"),
+            startup_meta_tasks=startup_meta_tasks,
         )
+    else:
+        # Legacy fallback: queue load_llm meta tasks.
+        # Workers still start cold; these tasks selectively heat up N workers.
+        if args.initial_hot_workers is not None:
+            initial_hot_workers = max(0, int(args.initial_hot_workers))
+        else:
+            initial_hot_workers = int(config.get("initial_hot_workers", 0))
+        if initial_hot_workers > 0 and gpus_to_start:
+            warm_target = min(initial_hot_workers, len(gpus_to_start))
+            print(f"\nQueueing startup warm-up: {warm_target} worker(s)")
+            _enqueue_startup_load_llm(
+                shared_path=Path(config["shared_path"]),
+                created_by="startup",
+                count=warm_target,
+                available_workers=gpus_to_start,
+                agents_dir=agents_dir,
+                preferred_workers=config.get("startup_warm_workers"),
+            )
 
     # --- Running ---
     total_workers = len(config.get("gpus", []))

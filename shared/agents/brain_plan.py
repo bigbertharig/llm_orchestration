@@ -18,6 +18,16 @@ from brain_constants import PRIORITY_TIER_TO_VALUE, VALID_TASK_CLASSES, VALID_VR
 
 
 class BrainPlanMixin:
+    def _batch_display_name(self, plan_name: str, config: Dict[str, Any]) -> str:
+        base = str(plan_name or "").strip() or "unknown_plan"
+        repo_path = str((config or {}).get("REPO_PATH", "") or "").strip()
+        if not repo_path:
+            return base
+        repo_name = Path(repo_path).name.strip()
+        if not repo_name:
+            return base
+        return f"{base} - {repo_name}"
+
     def _extract_explicit_model_flags_from_command(self, command: str) -> Dict[str, str]:
         out: Dict[str, str] = {}
         try:
@@ -831,6 +841,7 @@ Required JSON format:
         # Track this batch (include paths for foreach expansion)
         batch_meta = {
             "plan": plan_dir.name,
+            "display_name": self._batch_display_name(plan_dir.name, config),
             "plan_dir": str(plan_dir.resolve()),
             # Effective data batch path (respects RUN_MODE + BATCH_ID overrides).
             "batch_dir": str(effective_batch_dir.resolve()),

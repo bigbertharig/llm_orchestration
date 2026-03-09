@@ -30,6 +30,13 @@ class MockBrainResources(BrainResourceMixin):
         self.resource_task_cooldown_seconds = 0
         self.load_llm_requests = {}
         self.active_batches = {}
+        self.default_llm_min_tier = 1
+        self.model_tier_by_id = {"qwen2.5:7b": 1, "qwen2.5-coder:14b": 2}
+        self.model_meta_by_id = {
+            "qwen2.5:7b": {"placement": "single_gpu", "tier": 1},
+            "qwen2.5-coder:14b": {"placement": "split_gpu", "tier": 2},
+        }
+        self._last_queue_llm_model_demand = {"qwen2.5:7b": 3}
         self.logged = []
         for path in (self.queue_path, self.processing_path, self.failed_path):
             path.mkdir(parents=True, exist_ok=True)
@@ -62,6 +69,8 @@ class ResourceTaskBatchIdTests(unittest.TestCase):
             task = json.loads(files[0].read_text(encoding="utf-8"))
             self.assertEqual(task["batch_id"], "batch-1")
             self.assertEqual(task["source_batch_id"], "batch-1")
+            self.assertEqual(task["target_model"], "qwen2.5:7b")
+            self.assertEqual(task["load_mode"], "single")
 
     def test_explicit_source_batch_id_wins(self):
         with tempfile.TemporaryDirectory() as tmp:

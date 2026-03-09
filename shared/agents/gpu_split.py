@@ -125,7 +125,11 @@ class GPUSplitMixin:
     def _has_pending_split_coordination(self) -> bool:
         """Return True when this worker should stay on a fast coordination loop."""
         for res_file in self.split_state_dir.glob("*.json"):
-            if str(res_file).endswith(".lock") or str(res_file).endswith(".partner_nudge.json"):
+            if (
+                str(res_file).endswith(".lock")
+                or str(res_file).endswith(".partner_nudge.json")
+                or ".runtime_owner." in res_file.name
+            ):
                 continue
             try:
                 with open(res_file, "r", encoding="utf-8") as f:
@@ -1701,9 +1705,33 @@ class GPUSplitMixin:
         remaining_budget = max(1, int(warmup_deadline - time.time()))
         return max(1, min(SPLIT_WARMUP_REQUEST_TIMEOUT_SECONDS, remaining_budget))
 
-    def _split_runtime_start_budget_seconds(self) -> int:
+    def _split_meta_timeout_seconds(
+        self,
+        *,
+        model_id: str = "",
+        group: Optional[dict[str, Any]] = None,
+    ) -> int:
+        profile = resolve_llama_runtime_profile(
+            getattr(self, "config", {}) or {},
+            model_id=model_id,
+            split=True,
+            override=group.get("llama_runtime") if isinstance(group, dict) else None,
+        )
+        try:
+            configured = int(profile.get("meta_timeout_seconds", SPLIT_META_TIMEOUT_SECONDS))
+        except Exception:
+            configured = SPLIT_META_TIMEOUT_SECONDS
+        return max(30, configured)
+
+    def _split_runtime_start_budget_seconds(self, *, meta_timeout_seconds: Optional[int] = None) -> int:
         """Reserve most of the split meta budget for initial model readiness."""
-        return max(20, SPLIT_META_TIMEOUT_SECONDS - 30)
+        timeout_budget = SPLIT_META_TIMEOUT_SECONDS
+        if meta_timeout_seconds is not None:
+            try:
+                timeout_budget = int(meta_timeout_seconds)
+            except Exception:
+                timeout_budget = SPLIT_META_TIMEOUT_SECONDS
+        return max(20, timeout_budget - 30)
 
     def _split_warmup_failure_is_terminal(
         self,
@@ -1839,6 +1867,10 @@ class GPUSplitMixin:
                     split=True,
                     override=group.get("llama_runtime"),
                 )
+                split_meta_timeout_seconds = self._split_meta_timeout_seconds(
+                    model_id=model_id,
+                    group=group,
+                )
                 cmd = [
                     str(_LLAMA_SCRIPTS_DIR / "run_runtime.sh"),
                     "--name", container_name,
@@ -1905,7 +1937,9 @@ class GPUSplitMixin:
             )
 
             ready_url = f"http://127.0.0.1:{port}/v1/models"
-            startup_ready_budget = self._split_runtime_start_budget_seconds()
+            startup_ready_budget = self._split_runtime_start_budget_seconds(
+                meta_timeout_seconds=split_meta_timeout_seconds,
+            )
             deadline = time.time() + startup_ready_budget
             ready = False
             while time.time() < deadline:
@@ -1959,7 +1993,7 @@ class GPUSplitMixin:
                 f"backend={runtime_backend} startup_ms={int((time.time() - startup_started) * 1000)}"
             )
 
-            split_load_deadline = time.time() + SPLIT_META_TIMEOUT_SECONDS
+            split_load_deadline = time.time() + split_meta_timeout_seconds
 
             def _warm_split_runtime():
                 warmup_deadline = split_load_deadline
@@ -2012,7 +2046,7 @@ class GPUSplitMixin:
                 self._run_with_global_model_load_lock(
                     phase="split_model_load",
                     fn=_warm_split_runtime,
-                    max_wait_seconds=SPLIT_META_TIMEOUT_SECONDS,
+                    max_wait_seconds=split_meta_timeout_seconds,
                 )
                 if self._split_runtime_log_file:
                     try:
@@ -2966,7 +3000,11 @@ class GPUSplitMixin:
     def _service_split_reservations(self):
         """Background sync so non-claiming partner can join and mirror split state."""
         for res_file in self.split_state_dir.glob("*.json"):
-            if str(res_file).endswith(".lock") or str(res_file).endswith(".partner_nudge.json"):
+            if (
+                str(res_file).endswith(".lock")
+                or str(res_file).endswith(".partner_nudge.json")
+                or ".runtime_owner." in res_file.name
+            ):
                 continue
             lock = FileLock(str(res_file) + ".lock", timeout=1)
             start_runtime = None
@@ -2984,9 +3022,37 @@ class GPUSplitMixin:
                     if self.name not in members:
                         continue
 
-                    reservation = self._join_split_reservation(reservation, res_file)
-
                     status = str(reservation.get("status", "")).strip()
+                    joined = reservation.get("joined", {}) if isinstance(reservation.get("joined"), dict) else {}
+                    member_clean = reservation.get("member_clean", {}) if isinstance(reservation.get("member_clean"), dict) else {}
+
+                    should_attempt_join = False
+                    if status in {"waiting_partner", "joining"}:
+                        should_attempt_join = not (
+                            bool(joined.get(self.name)) and bool(member_clean.get(self.name))
+                        )
+                    elif (
+                        status in {"ready_stabilizing", "ready"}
+                        and bool(joined.get(self.name))
+                        and not bool(member_clean.get(self.name))
+                    ):
+                        # Allow post-load backfill only after the split runtime has reached a
+                        # stable-ready phase. Re-running join/reset while the launcher is still
+                        # warming the pair can corrupt reservation state mid-load.
+                        should_attempt_join = True
+                    elif status == "loading" and not (
+                        bool(joined.get(self.name)) and bool(member_clean.get(self.name))
+                    ):
+                        self.logger.warning(
+                            f"SPLIT_LOADING_JOIN_SKIP group={reservation.get('group_id')} "
+                            f"member={self.name} joined={bool(joined.get(self.name))} "
+                            f"member_clean={bool(member_clean.get(self.name))}"
+                        )
+
+                    if should_attempt_join:
+                        reservation = self._join_split_reservation(reservation, res_file)
+                        status = str(reservation.get("status", "")).strip()
+
                     model_id = str(reservation.get("target_model", "")).strip()
                     group = {
                         "id": reservation.get("group_id"),
@@ -3082,34 +3148,21 @@ class GPUSplitMixin:
                     # 3. all_members_clean - both members verified cold/unloaded via _verify_local_split_member_clean_precondition
                     can_advance_to_loading = all_joined and all_prepared and all_members_clean
 
-                    if status in {"waiting_partner", "joining", "loading"} and can_advance_to_loading:
+                    if status in {"waiting_partner", "joining"} and can_advance_to_loading:
                         launcher_needs_election = False
                         if launcher not in members:
                             launcher_needs_election = True
                         elif status in {"waiting_partner", "joining"} and not self._is_gpu_heartbeat_fresh(launcher):
                             launcher_needs_election = True
-                        elif status == "loading":
-                            # Be conservative once loading has started. Re-election while the split
-                            # runtime is warming can race with success and corrupt reservation state.
-                            if (
-                                not self._is_gpu_heartbeat_fresh(launcher)
-                                and not self._split_runtime_has_model_loaded(port=port, model_id=model_id)
-                            ):
-                                owner = self._read_global_model_load_owner() or {}
-                                owner_worker = str(owner.get("worker", "")).strip()
-                                owner_phase = str(owner.get("phase", "")).strip()
-                                if owner_worker not in members or owner_phase != "split_model_load":
-                                    launcher_needs_election = True
                         if launcher_needs_election:
                             reservation["launcher"] = self.name
                             launcher = self.name
                         if self.name == launcher:
-                            if status != "loading":
-                                reservation = self._set_reservation_status(
-                                    reservation,
-                                    "loading",
-                                    reason="launcher_starting_runtime",
-                                )
+                            reservation = self._set_reservation_status(
+                                reservation,
+                                "loading",
+                                reason="launcher_starting_runtime",
+                            )
                             with open(res_file, "w", encoding="utf-8") as f:
                                 json.dump(reservation, f, indent=2)
                             start_runtime = {
@@ -3119,7 +3172,7 @@ class GPUSplitMixin:
                             }
                         else:
                             continue
-                    elif status in {"waiting_partner", "joining", "loading"} and all_joined and not can_advance_to_loading:
+                    elif status in {"waiting_partner", "joining"} and all_joined and not can_advance_to_loading:
                         # Identify what's blocking progress
                         missing_prepared = [m for m in members if m in joined and not prepared.get(m)]
                         missing_clean = [m for m in members if m in joined and not member_clean.get(m)]

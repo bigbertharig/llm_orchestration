@@ -16,6 +16,7 @@ from filelock import FileLock, Timeout
 
 import requests
 
+from brain_core import resolve_llama_runtime_profile
 from gpu_constants import (
     ATTESTATION_MISS_HARD_FAIL_THRESHOLD,
     ATTESTATION_MISS_SOFT_FAIL_THRESHOLD,
@@ -708,6 +709,12 @@ class GPUTaskMixin:
             return False
 
         if command == "load_llm":
+            target_model = str(task.get("target_model", "")).strip()
+            if not target_model:
+                return False, "missing_target_model"
+            load_mode = str(task.get("load_mode", "")).strip()
+            if load_mode and load_mode not in {"single", "either"}:
+                return False, f"invalid_load_mode:{load_mode}"
             # Strict: Only cold workers should claim load commands.
             # Reject if in any ready, transitioning, or wedged state.
             can_load, reason = self._can_accept_load_task()
@@ -770,6 +777,9 @@ class GPUTaskMixin:
             return True, ""
 
         if command == "load_split_llm":
+            load_mode = str(task.get("load_mode", "")).strip()
+            if load_mode and load_mode not in {"split", "either"}:
+                return False, f"invalid_load_mode:{load_mode}"
             # Strict: No load while in ready state
             can_load, reason = self._can_accept_load_task()
             if not can_load:
@@ -1300,6 +1310,16 @@ class GPUTaskMixin:
         if command == "load_llm":
             task_id = task.get("task_id")
             target_model = str(task.get("target_model", "")).strip() or None
+            if not target_model:
+                return self._build_meta_result(
+                    command,
+                    task,
+                    success=False,
+                    output="Model failed to load",
+                    error="load_llm missing target_model",
+                    error_code="missing_target_model",
+                    diagnostic="target_model= runtime_error_code=missing_target_model",
+                )
             self._touch_meta_task(phase="load_llm")
             self._full_local_reset(
                 f"pre_load_llm:{target_model or 'unknown'}",
@@ -1317,7 +1337,7 @@ class GPUTaskMixin:
                     f"Model failed to load: "
                     f"{self._safe_meta_detail(self.runtime_error_detail or self.runtime_error_code or 'unknown')}"
                 ) if not load_success else "",
-                error_code=str(self.runtime_error_code or "load_failed"),
+                error_code="" if load_success else str(self.runtime_error_code or "load_failed"),
                 diagnostic=(
                     f"target_model={target_model or ''} "
                     f"runtime_error_code={self.runtime_error_code or ''} "
@@ -1478,7 +1498,21 @@ class GPUTaskMixin:
                             diagnostic=f"group_id={group_id} reservation_lock_timeout=30s",
                         )
 
-                    deadline = time.time() + SPLIT_META_TIMEOUT_SECONDS
+                    split_profile = resolve_llama_runtime_profile(
+                        getattr(self, "config", {}) or {},
+                        model_id=target_model,
+                        split=True,
+                        override=chosen.get("llama_runtime") if isinstance(chosen, dict) else None,
+                    )
+                    try:
+                        split_meta_timeout_seconds = int(
+                            split_profile.get("meta_timeout_seconds", SPLIT_META_TIMEOUT_SECONDS)
+                        )
+                    except Exception:
+                        split_meta_timeout_seconds = SPLIT_META_TIMEOUT_SECONDS
+                    split_meta_timeout_seconds = max(30, split_meta_timeout_seconds)
+
+                    deadline = time.time() + split_meta_timeout_seconds
                     success = False
                     failure_reason = ""
                     while time.time() < deadline:

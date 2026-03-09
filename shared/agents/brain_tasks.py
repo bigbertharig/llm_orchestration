@@ -25,10 +25,20 @@ class BrainTaskQueueMixin:
         if command not in self._SUPPORTED_META_COMMANDS:
             return f"unsupported_meta_command:{command or 'missing'}"
 
+        load_mode = str(task.get("load_mode", "")).strip()
+        if command == "load_llm":
+            target_model = str(task.get("target_model", "")).strip()
+            if not target_model:
+                return "load_llm:missing_target_model"
+            if load_mode and load_mode not in {"single", "either"}:
+                return f"load_llm:invalid_load_mode:{load_mode}"
+
         if command == "load_split_llm":
             target_model = str(task.get("target_model", "")).strip()
             if not target_model:
                 return "load_split_llm:missing_target_model"
+            if load_mode and load_mode not in {"split", "either"}:
+                return f"load_split_llm:invalid_load_mode:{load_mode}"
             groups = task.get("candidate_groups")
             if not isinstance(groups, list) or not groups:
                 return "load_split_llm:missing_candidate_groups"

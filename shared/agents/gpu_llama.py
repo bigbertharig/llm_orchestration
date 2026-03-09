@@ -53,6 +53,28 @@ _LLAMA_OFFLOAD_RE = re.compile(r"offloaded\s+(\d+)/(\d+)\s+layers to GPU")
 class GPULlamaMixin:
     """Mixin providing containerized llama-server runtime management."""
 
+    def load_model(self, model_id: Optional[str] = None, task_id: Optional[str] = None):
+        """Load a model through the llama-server container runtime."""
+        return self._llama_load_model(model_id=model_id, task_id=task_id)
+
+    def unload_model(self, model_id: Optional[str] = None, task_id: Optional[str] = None):
+        """Unload a model by stopping the llama-server container runtime."""
+        return self._llama_unload_model(model_id=model_id, task_id=task_id)
+
+    def _wait_for_model_ready(self, model_id: str, max_wait_seconds: int = 90) -> bool:
+        """Use llama-specific readiness checks for the active runtime."""
+        return self._llama_wait_for_model_ready(
+            model_id=model_id,
+            max_wait_seconds=max_wait_seconds,
+        )
+
+    def _wait_for_model_unloaded(self, model_id: str, max_wait_seconds: int = 30) -> bool:
+        """Use llama-specific unload checks for the active runtime."""
+        return self._llama_wait_for_model_unloaded(
+            model_id=model_id,
+            max_wait_seconds=max_wait_seconds,
+        )
+
     def _llama_container_name(self) -> str:
         """Canonical container name for this GPU's single-worker runtime."""
         return f"llama-worker-{self.name}"

@@ -188,6 +188,85 @@ class StartupIdempotenceTests(unittest.TestCase):
             self.assertEqual(payload["candidate_workers"], ["gpu-2"])
             self.assertEqual(payload["target_model"], "qwen2.5:7b")
 
+    def test_enqueue_startup_meta_tasks_serializes_split_after_single(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+
+            startup._enqueue_startup_meta_tasks(
+                shared_path=shared,
+                created_by="startup",
+                startup_meta_tasks=[
+                    {
+                        "name": "startup_single_default",
+                        "command": "load_llm",
+                        "target_model": "qwen2.5:7b",
+                        "load_mode": "single",
+                        "candidate_workers": ["gpu-2"],
+                    },
+                    {
+                        "name": "startup_split_pair_1_3",
+                        "command": "load_split_llm",
+                        "target_model": "qwen2.5-coder:14b",
+                        "load_mode": "split",
+                        "candidate_groups": [
+                            {
+                                "id": "pair_1_3",
+                                "members": ["gpu-1", "gpu-3"],
+                                "port": 11440,
+                            }
+                        ],
+                    },
+                ],
+            )
+
+            queue_files = list((shared / "tasks" / "queue").glob("*.json"))
+            self.assertEqual(len(queue_files), 2)
+            queued = {
+                payload["name"]: payload
+                for payload in (
+                    json.loads(path.read_text(encoding="utf-8"))
+                    for path in queue_files
+                )
+            }
+            first = queued["startup_single_default"]
+            second = queued["startup_split_pair_1_3"]
+
+            self.assertEqual(first["command"], "load_llm")
+            self.assertEqual(first["candidate_workers"], ["gpu-2"])
+            self.assertEqual(first["target_model"], "qwen2.5:7b")
+            self.assertEqual(first["depends_on"], [])
+
+            self.assertEqual(second["command"], "load_split_llm")
+            self.assertEqual(second["target_model"], "qwen2.5-coder:14b")
+            self.assertEqual(second["load_mode"], "split")
+            self.assertEqual(second["depends_on"], [first["task_id"]])
+            self.assertEqual(second["candidate_groups"][0]["id"], "pair_1_3")
+
+    def test_purge_stale_startup_meta_tasks_removes_split_and_single(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            queue = shared / "tasks" / "queue"
+            queue.mkdir(parents=True, exist_ok=True)
+
+            for name, command in (
+                ("startup_single_default", "load_llm"),
+                ("startup_split_pair_1_3", "load_split_llm"),
+            ):
+                payload = {
+                    "task_id": name,
+                    "task_class": "meta",
+                    "command": command,
+                    "created_by": "startup",
+                    "batch_id": "system",
+                    "name": name,
+                }
+                (queue / f"{name}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            removed = startup._purge_stale_startup_meta_tasks(shared)
+
+            self.assertEqual(removed, 2)
+            self.assertEqual(list(queue.glob("*.json")), [])
+
     def test_clear_stale_heartbeats_removes_brain_and_worker_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             shared = Path(tmp)

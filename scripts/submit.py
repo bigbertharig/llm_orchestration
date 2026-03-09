@@ -324,7 +324,7 @@ def _run_worker_preflight() -> tuple[bool, dict]:
 
 def main():
     parser = argparse.ArgumentParser(description="Submit plan to brain")
-    parser.add_argument("plan", help="Path to plan folder or plan.md")
+    parser.add_argument("plan", help="Path to plan folder or markdown plan file")
     parser.add_argument(
         "--plan-file",
         type=str,
@@ -444,6 +444,11 @@ def main():
     if not args.local:
         remote_plan = _to_rig_path(plan_path)
         remote_plan_file = args.plan_file
+        if plan_arg.is_file() and not remote_plan_file:
+            try:
+                remote_plan_file = str(starter_file.relative_to(plan_path))
+            except ValueError:
+                remote_plan_file = str(starter_file)
         if remote_plan_file:
             pf = Path(remote_plan_file)
             if pf.is_absolute():

@@ -74,7 +74,14 @@ def _normalize_llama_profile(raw: Any) -> dict[str, Any]:
         return {}
 
     normalized: dict[str, Any] = {}
-    for field in ("ctx_size", "n_gpu_layers", "batch_size", "parallel", "threads"):
+    for field in (
+        "ctx_size",
+        "n_gpu_layers",
+        "batch_size",
+        "parallel",
+        "threads",
+        "meta_timeout_seconds",
+    ):
         value = raw.get(field)
         if value in (None, ""):
             continue

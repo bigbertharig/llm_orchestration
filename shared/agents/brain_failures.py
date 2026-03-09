@@ -195,6 +195,15 @@ JSON only:"""
         text = self._result_text({}, result)
         return "scraped file not found" in text
 
+    def _is_deferred_model_load(self, task: Dict[str, Any], result: Dict[str, Any]) -> bool:
+        if str(task.get("task_class", "")).lower() != "llm":
+            return False
+        reason = str(result.get("reason", "")).strip().lower()
+        if reason == "deferred_model_load":
+            return True
+        text = self._result_text(task, result)
+        return "deferred_model_load" in text and "queued_load_llm=true" in text
+
     def _reset_split_groups_for_gpu(self, gpu_name: str) -> List[Dict[str, Any]]:
         groups: List[Dict[str, Any]] = []
         seen: set[str] = set()
@@ -767,6 +776,26 @@ JSON only:"""
                         }
                     )
                     self._save_brain_state()
+
+                elif self._is_deferred_model_load(task, result):
+                    self._save_requeued_task(
+                        task_file,
+                        task,
+                        "deferred_model_load",
+                        reset_attempts=True,
+                    )
+                    self.log_decision(
+                        "DEFERRED_MODEL_LOAD",
+                        f"Re-queued task after deferred model load signal: {task.get('name', '')}",
+                        {
+                            "task_id": task["task_id"][:8],
+                            "name": task.get("name", ""),
+                            "worker": self._failed_task_worker(task),
+                            "model": task.get("llm_model", ""),
+                        },
+                    )
+                    self._save_brain_state()
+                    continue
 
                 elif attempts < max_attempts:
                     # Worker failure - retry
