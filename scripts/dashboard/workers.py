@@ -62,6 +62,23 @@ def classify_thermal_cause(reasons: Any) -> str:
     return "none"
 
 
+def _is_active_runtime_holding_phase(phase: str) -> bool:
+    """Return True only for in-progress runtime transition phases."""
+    text = str(phase or "").strip()
+    if not text:
+        return False
+    terminal_markers = (
+        "load_complete",
+        "split_load_complete",
+        "unload_complete",
+    )
+    if text in terminal_markers:
+        return False
+    if text.startswith("split_cleared"):
+        return False
+    return True
+
+
 def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Load worker status rows from heartbeat files."""
     by_worker: dict[str, list[str]] = {}
@@ -123,7 +140,7 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
         else:
             state_display = hb.get("state", "?")
 
-        if runtime_phase and runtime_phase not in held:
+        if _is_active_runtime_holding_phase(runtime_phase) and runtime_phase not in held:
             held.append(runtime_phase)
 
         rows.append({

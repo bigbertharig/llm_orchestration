@@ -534,8 +534,12 @@ def summarize(
         plan_name = str(meta.get("plan") or "").strip() if isinstance(meta, dict) else ""
         if not plan_name:
             plan_name = _resolve_batch_plan(shared_path, batch_id, active_batches)
+        display_name = str(meta.get("display_name") or "").strip() if isinstance(meta, dict) else ""
+        if not display_name:
+            display_name = plan_name
         batch_info: dict[str, Any] = {
             "plan": plan_name or None,
+            "display_name": display_name or None,
             "started_at": meta.get("started_at") if isinstance(meta, dict) else None,
             "completed_at": meta.get("completed_at") if isinstance(meta, dict) else None,
             "total_hint": meta.get("total_tasks") if isinstance(meta, dict) else None,

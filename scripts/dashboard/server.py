@@ -273,21 +273,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not isinstance(meta, dict):
                 continue
             plan_name = str(meta.get("plan", "")).strip() or "unknown_plan"
+            display_name = str(meta.get("display_name", "")).strip() or plan_name
             active_meta.append(
                 {
                     "batch_id": batch_id,
                     "plan": plan_name,
+                    "display_name": display_name,
                     "scope": "arms" if "/plans/arms/" in str(meta.get("plan_dir", "")) else "shoulders",
                     "started_at": meta.get("started_at", ""),
                 }
             )
-            batch_labels[batch_id] = f"{plan_name} | {batch_id}"
+            batch_labels[batch_id] = f"{display_name} | {batch_id}"
         for row in recent_batches:
             batch_id = str(row.get("batch_id", "")).strip()
             if not batch_id:
                 continue
-            plan_name = str(row.get("plan", "")).strip() or "unknown_plan"
-            batch_labels.setdefault(batch_id, f"{plan_name} | {batch_id}")
+            display_name = str(row.get("display_name", "")).strip() or str(row.get("plan", "")).strip() or "unknown_plan"
+            batch_labels.setdefault(batch_id, f"{display_name} | {batch_id}")
         active_meta.sort(key=lambda x: str(x.get("started_at") or ""), reverse=True)
         return {
             "ok": True,

@@ -15,6 +15,65 @@ def collapse_stage_name(name: str) -> str:
         build_strategy_round_0002 -> build_strategy
         execute_searches_round_0005 -> execute_searches
     """
+    # Hide ad hoc manual smoke/debug tasks from high-level batch chain headers.
+    if name.startswith("manual_"):
+        return ""
+
+    # github_analyzer high-level stage families
+    if name == "prepare_repo":
+        return "prepare_repo"
+    if name == "project_workload":
+        return "prepare_repo"
+    if name == "build_doc_claim_manifest":
+        return "docs_claims"
+    if name == "warm_workers":
+        return "runtime_prep"
+    if name.startswith("load_split_llm") or name.startswith("unload_split_llm"):
+        return "runtime_prep"
+    if name.startswith("load_llm") or name.startswith("unload_llm"):
+        return "runtime_prep"
+    if name.startswith("worker_doc_claims_"):
+        return "docs_claims"
+    if name == "brain_strategy":
+        return "docs_claims"
+    if name in {
+        "build_scope_manifest",
+        "build_extract_benchmark_manifest",
+        "extract_repo_structure",
+        "summarize_json_data",
+        "link_claim_evidence",
+        "score_slice_complexity",
+        "runtime_validation",
+        "classify_runtime_probes",
+    }:
+        return "analysis_manifest"
+    if name == "build_verify_manifest":
+        return "review_verify"
+    if name == "summarize_scaling_benchmark":
+        return "benchmark_analysis"
+    if name == "normalize_worker_reviews":
+        return "backfill_gap"
+    if name.startswith("worker_review_"):
+        return "review_extract"
+    if name.startswith("worker_review_verify_"):
+        return "review_verify"
+    if name == "build_phase_backfill_manifest":
+        return "backfill_gap"
+    if name.startswith("worker_phase_backfill_") or name.startswith("worker_backfill_"):
+        return "backfill_gap"
+    if name == "build_gap_manifest" or name == "prefilter_contradictions":
+        return "backfill_gap"
+    if name.startswith("worker_gap_review_verify_"):
+        return "backfill_gap"
+    if name.startswith("worker_gap_review_"):
+        return "backfill_gap"
+    if name.startswith("preflight_"):
+        return "runtime_prep"
+    if name in {"brain_final_report", "iterative_final_report", "report_quality_gate"}:
+        return "final_report"
+    if name == "analyze_batch_timeline":
+        return "final_report"
+
     # Normalize heavy fan-out stage families for readable chain headers.
     if name.startswith("worker_review_verify_"):
         return "worker_review_verify"
@@ -41,6 +100,8 @@ def collapse_stage_order(stage_order: list[str]) -> list[str]:
     result: list[str] = []
     for stage in stage_order:
         base = collapse_stage_name(stage)
+        if not base:
+            continue
         if base not in seen:
             seen.add(base)
             result.append(base)
@@ -195,6 +256,8 @@ def build_batch_chain(tasks_by_lane: dict[str, list[dict[str, Any]]], batch_id: 
     collapsed_map: dict[str, str] = {}
     for s in stage_order:
         base = collapse_stage_name(s)
+        if not base:
+            continue
         collapsed_map[s] = base
         collapsed_counts[base] = collapsed_counts.get(base, 0) + 1
         if base not in collapsed_types:
