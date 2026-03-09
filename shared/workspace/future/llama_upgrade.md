@@ -120,26 +120,21 @@ Current implementation artifacts:
 - [smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/smoke_test.sh)
 - [build_and_smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/build_and_smoke_test.sh)
 
-## Remaining Cleanup Gaps Found In Code Review (2026-03-08)
+## Verification Pass (2026-03-08)
 
-The runtime vocabulary cleanup is not complete. The report claiming completion overstates the current state of the codebase.
+The earlier cleanup-gap report in this document is now stale.
 
-Still needs to be changed or fixed:
+Current repo verification from this pass:
 
-- [gpu_split.py](/home/bryan/llm_orchestration/shared/agents/gpu_split.py) still contains active legacy branches using `/api/ps` and `/api/tags` at lines 415, 1691, 1941, and 2382. This is not just a passive compatibility shim; split runtime control flow is still backend-branching.
-- [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py) still implements legacy Ollama-native probes with `/api/tags` and `/api/ps`, and still exposes `scan_ollama()` at line 150. If the goal is to remove Ollama as a runtime concept rather than hide it, the primary scan logic still needs a llama-only end state.
-- [startup.py](/home/bryan/llm_orchestration/shared/agents/startup.py) still documents and executes the legacy `/api/ps` probe path in `check_loaded_models()` around lines 576 and 606. Startup is still backend-branching rather than fully llama-only.
-- [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py) still has active legacy startup and readiness flow using `/api/tags` and `["ollama", "serve"]` around lines 691, 721, 733, and 741. The cleanup report described these as transition aliases, but they are still executable control-path logic.
-- [brain_resources.py](/home/bryan/llm_orchestration/shared/agents/brain_resources.py) still probes split runtime models via `/api/ps` for the non-llama branch at line 907. That means brain-side split reconciliation is not yet llama-only.
-- [gpu_ollama.py](/home/bryan/llm_orchestration/shared/agents/gpu_ollama.py) still contains legacy model-state probing via `/api/ps` at line 592. The filename was intentionally kept, but the implementation surface is still partly legacy-specific.
-- [setup.py](/home/bryan/llm_orchestration/shared/agents/setup.py) still writes `ollama_host` into generated config at line 225 and still falls back to `scan_runtime(..., runtime_backend="ollama")` at line 348. If config generation is supposed to be runtime-neutral first, this is not finished.
-- [config.json](/home/bryan/llm_orchestration/shared/agents/config.json), [config.template.json](/home/bryan/llm_orchestration/shared/agents/config.template.json), and [config.benchmark.json](/home/bryan/llm_orchestration/shared/agents/config.benchmark.json) still carry `ollama_host`. That may be an intentional transition choice, but it contradicts any claim that the codebase has only one runtime vocabulary now.
-- [brain_dispatch.py](/home/bryan/llm_orchestration/shared/agents/brain_dispatch.py), [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py), and [launch.py](/home/bryan/llm_orchestration/shared/agents/launch.py) still read `config.get("ollama_host")` as active fallback. Keep this only if backward compatibility is still explicitly required; otherwise remove it and fail fast on missing `runtime_host`.
-- [tests](/home/bryan/llm_orchestration/shared/agents/tests) are not clean. Multiple test files still reference `GPUOllamaMixin`, `start_ollama`, `runtime_ollama_url`, `ollama_healthy`, `ollama_host`, and legacy backend expectations. The report statement that tests were already clean is false.
+- targeted grep against active agent/runtime code under [shared/agents](/home/bryan/llm_orchestration/shared/agents) and [scripts](/home/bryan/llm_orchestration/scripts) found no active `ollama`, `/api/ps`, `/api/tags`, `scan_ollama`, or `ollama serve` references in the current control-plane files
+- spot checks of [gpu_split.py](/home/bryan/llm_orchestration/shared/agents/gpu_split.py), [brain_core.py](/home/bryan/llm_orchestration/shared/agents/brain_core.py), [startup.py](/home/bryan/llm_orchestration/shared/agents/startup.py), [brain_resources.py](/home/bryan/llm_orchestration/shared/agents/brain_resources.py), and [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py) show llama-only runtime probes and llama-only backend enforcement on the active path
+- the older report of active Ollama branches should be treated as historical context, not current repo state
 
-Practical next step:
+What is still not proven by this verification pass:
 
-- Decide whether the project is still in a compatibility transition or whether Ollama removal is now mandatory. If removal is mandatory, delete the remaining backend branches instead of preserving them behind `if runtime_backend != "llama"` paths.
+- clean-rig operator acceptance from a full reboot
+- end-to-end split inference on the live rig during a real orchestrated batch
+- shoulder-plan runtime behavior outside the unit/regression surface
 
 ## Llama-Only Conversion Progress (2026-03-08)
 
@@ -1111,10 +1106,18 @@ Code/config updates made:
 
 Focused test status:
 
-- `test_runtime_defaults.py`: passing
-- `test_split_runtime_hardening.py`: passing
-- `test_phase3_brain_runtime.py`: passing
-- `test_startup_idempotence.py`: passing
+- 2026-03-08 focused llama migration suite:
+  - `test_runtime_defaults.py`: passing
+  - `test_split_runtime_hardening.py`: passing
+  - `test_phase3_brain_runtime.py`: passing
+  - `test_startup_idempotence.py`: passing
+  - `test_brain_llm_demand_window.py`: passing
+  - `test_worker_runtime_readiness.py`: passing
+  - `test_brain_failure_incidents.py`: passing
+  - `shared/plans/shoulders/github_analyzer/tests/test_warm_workers.py`: passing
+- 2026-03-08 broader orchestrator unit surface:
+  - `python -m unittest discover -s shared/agents/tests -p 'test_*.py'`
+  - result: `151` tests passed
 
 Important remaining blocker:
 
@@ -1179,6 +1182,52 @@ Important remaining blocker:
 
 Phase read after this update:
 
-- Phase 3 runtime/storage migration: complete for startup, storage, default ownership, and first real plan-release proof
-- Phase 4 split llama runtime rewrite: runtime path and validated profile are substantially complete, but full orchestrated acceptance still depends on finishing the remaining shoulder-script Ollama cleanup and validating the real split task path end-to-end
-- Phase 5 should not start until the full `github_analyzer` acceptance path is proven under the llama-only defaults
+- Phase 3 runtime/storage migration: complete and re-verified in repo plus focused tests
+- Phase 4 split llama runtime rewrite: live acceptance is now proven both in isolated load testing and in a completed fresh `github_analyzer` batch under the restarted service
+- Phase 5 support scripts/operator surface: startup, reboot, submit preflight, dashboard/runtime diagnostics, and fresh full-batch acceptance are now proven on the rig
+
+## Live Rig Acceptance Update (2026-03-08 Late)
+
+This pass moved from full-batch debugging to isolated split-load acceptance first.
+
+What was proven live on the rig:
+
+- local SSD split load for `qwen2.5-coder:14b` succeeded in about `70s` to ready
+- shared-drive split load for the same model succeeded in about `109s` to ready from a cold post-reboot state
+- the earlier multi-minute split failures were primarily timeout/config/coordination problems, not an unavoidable shared-drive bottleneck
+- clean reboot startup worked:
+  - brain cold start reached ready in about `73s`
+  - startup warm load on the default worker completed in about `53s`
+
+Operational fix landed on the rig:
+
+- `/etc/systemd/system/llm-orchestrator.service` now uses `Restart=on-failure` instead of `Restart=always`
+- reason: `startup.py` intentionally exits `0` when it detects an already-healthy orchestrator, and `Restart=always` turned that benign exit into a duplicate relaunch loop
+- post-change verification showed `NRestarts=0` and no repeated `skipping duplicate startup` churn after the service restart
+
+Model path state after this pass:
+
+- [models.catalog.json](/home/bryan/llm_orchestration/shared/agents/models.catalog.json) remains pinned to the shared-drive 14B GGUF for live split testing
+- the SSD copy was kept on local disk but moved out of the hotset search roots to avoid accidental auto-resolution during shared-path validation:
+  - `/home/bryan/model-archive-disabled/qwen2.5-coder-14b/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf`
+
+What changed after this pass:
+
+- completed fresh `github_analyzer` batch `20260308_194140` against `code-visualizer`
+  - batch status: complete
+  - split pairs `1/3` and `4/5` both served real 14B review work during the run
+  - final report artifacts were produced under `/media/bryan/shared/plans/shoulders/github_analyzer/history/20260308_194140/output/`
+- dashboard holding-state cleanup landed so terminal runtime transitions such as `load_complete` and `split_cleared:unload_complete` no longer linger in the Holding column
+- the active bottleneck has shifted from runtime ownership/split startup correctness to workload-shape tuning in `github_analyzer`
+- next benchmark phase should focus on scaling behavior:
+  - docs-task sizing by doc corpus
+  - manifest sizing by repo complexity
+  - verify promotion by extractor density / contradiction risk
+  - conditional backfill/gap instead of fixed extra work
+- legacy tuning plans under `shared/plans/shoulders/github_analyzer/` are now marked `ARCHIVE`, and the replacement direction is documented in:
+  - [github_analyzer_scaling_tuning_plan_20260308.md](/home/bryan/llm_orchestration/shared/plans/shoulders/github_analyzer/notes/future/github_analyzer_scaling_tuning_plan_20260308.md)
+
+What is still open after this pass:
+
+- confirm the batch-level split preflight/review wave behaves as cleanly as the isolated `load_split_llm` tasks
+- decide whether any stale split-reservation cleanup should be folded into startup normalization rather than left to targeted recovery paths

@@ -63,8 +63,14 @@ The brain substitutes only:
 Important rules:
 - If a command references `{MISSING_VAR}`, it remains literal and can break the run.
 - Text like `(default: ...)` in `## Inputs` is documentation only unless the command or script actually enforces that default.
+- The submit wrapper validates unresolved placeholders before enqueueing the batch.
+- If a plan documents a default but still leaves `{VAR}` in task commands, the submitter must still provide that key in `--config` unless the plan or called script resolves it first.
 - If you want dynamic behavior such as `auto`, the called script must explicitly support it.
 - Wrapper-level preflight behavior is controlled by the submit tool, not by plan variables, unless the submit tool explicitly exposes a switch.
+
+Practical rule:
+- documented defaults are not implicit submit-time defaults
+- either pass the value explicitly in submission config or encode the default literally in the command/script path that consumes it
 
 ### Task Fields Required In Every Task
 

@@ -275,15 +275,28 @@ tail -n 20 /media/bryan/shared/plans/<shoulder-or-arm>/<plan_name>/history/_summ
 
 If the batch looks like a load/unload or GPU ownership problem, use:
 
+Prefer the rig side for this tool. Laptop-side runs can read shared heartbeat
+state, but localhost runtime probes and `nvidia-smi` will usually be wrong or missing.
+
 ```bash
+# preferred:
+#   ssh 10.0.0.3
+#   python3 /mnt/shared/scripts/batch_runtime_diag.py --batch-id <batch_id> --shared-path /mnt/shared
+#
+# laptop-side fallback:
 python3 /media/bryan/shared/scripts/batch_runtime_diag.py \
-  /media/bryan/shared/plans/<shoulder-or-arm>/<plan_name>/history/<batch_id>
+  --batch-id <batch_id> \
+  --shared-path /media/bryan/shared
 ```
 
 Use this after:
 - repeated `load_llm` failures
 - split-runtime preflight timeouts
 - dashboard state that does not match task history
+
+What it writes:
+- `history/<batch_id>/diagnostics/runtime_diag_<timestamp>.json` when the batch is still resolvable from task lanes
+- otherwise use `--output <path>` explicitly
 
 ### Script Location Rule
 
@@ -293,6 +306,7 @@ Use the exact script paths below:
 - `/media/bryan/shared/scripts/batch_runtime_diag.py` for runtime diagnosis
 
 Do not guess the path or omit required flags. The one-batch summarizer requires `--history-dir`.
+The runtime diagnostic helper requires `--batch-id`.
 
 ---
 

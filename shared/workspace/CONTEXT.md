@@ -153,9 +153,18 @@ python3 ~/llm_orchestration/scripts/rollup_history.py \
 
 Optional runtime-focused diagnostics for one batch:
 
+Run this on the rig side when possible. Laptop-side runs can still read shared
+heartbeats, but local runtime port probes and GPU telemetry will be degraded.
+
 ```bash
+# preferred:
+#   ssh 10.0.0.3
+#   python3 /mnt/shared/scripts/batch_runtime_diag.py --batch-id <batch_id> --shared-path /mnt/shared
+#
+# laptop-side fallback:
 python3 /media/bryan/shared/scripts/batch_runtime_diag.py \
-  /media/bryan/shared/plans/<shoulder-or-arm>/<plan_name>/history/<batch_id>
+  --batch-id <batch_id> \
+  --shared-path /media/bryan/shared
 ```
 
 Where results land:
