@@ -168,10 +168,18 @@ class GPUTaskMixin:
             if self.loaded_tier < required_tier:
                 return False, f"tier_insufficient:{self.loaded_tier}<{required_tier}"
 
-        # 3. Placement is advisory only - no hard gating for normal LLM work
-        # Placement may still be used by brain for scheduling preferences,
-        # but workers should not reject based on placement mismatch alone.
-        # (Meta tasks like load_split_llm/unload_split_llm handle placement explicitly)
+        # 3. Placement gate
+        task_placement = str(task.get("llm_placement", "") or "").strip()
+        runtime_placement = str(self.runtime_placement or "").strip()
+
+        # Split-linked workers must not claim independent single-GPU tasks.
+        # A split pair is one shared capacity unit and should only accept
+        # split-routed work while linked.
+        if task_placement == "single_gpu" and runtime_placement == "split_gpu":
+            return False, "placement_mismatch:split_runtime_cannot_take_single_gpu_task"
+
+        # For all other normal LLM work, placement remains mostly advisory.
+        # Exact split-task attestation is handled separately via the split-ready token.
 
         return True, ""
 
@@ -715,6 +723,10 @@ class GPUTaskMixin:
             load_mode = str(task.get("load_mode", "")).strip()
             if load_mode and load_mode not in {"single", "either"}:
                 return False, f"invalid_load_mode:{load_mode}"
+            # Enforce target_worker when present
+            target_worker = task.get("target_worker") or task.get("target_gpu")
+            if target_worker and str(target_worker).strip() != self.name:
+                return False, f"target_mismatch:{target_worker}"
             # Strict: Only cold workers should claim load commands.
             # Reject if in any ready, transitioning, or wedged state.
             can_load, reason = self._can_accept_load_task()
@@ -757,6 +769,10 @@ class GPUTaskMixin:
             return True, ""
 
         if command == "unload_llm":
+            # Enforce target_worker when present
+            target_worker = task.get("target_worker") or task.get("target_gpu")
+            if target_worker and str(target_worker).strip() != self.name:
+                return False, f"target_mismatch:{target_worker}"
             # Only single-GPU hot workers should claim generic unload_llm commands.
             # Split runtimes use unload_split_llm so the shared split listener can be
             # reclaimed correctly across both members.

@@ -2348,6 +2348,57 @@ class GPUSplitMixin:
         except Exception:
             return False
 
+    def _check_active_split_partner_health(self) -> None:
+        """Abort local split-backed work if the linked partner disappears.
+
+        This covers the active-runtime case, not just reservation startup. If a
+        split member resets or its heartbeat disappears mid-task, the remaining
+        member must stop its active LLM workers and reset to cold so the pair can
+        be rebuilt cleanly.
+        """
+        if str(self.runtime_placement or "").strip() != "split_gpu":
+            return
+        group_id = str(self.runtime_group_id or "").strip()
+        if not group_id or not getattr(self, "active_workers", None):
+            return
+
+        reservation = self._read_json_file(self._split_reservation_path(group_id))
+        if not isinstance(reservation, dict):
+            reason = f"split_partner_lost:reservation_missing:{group_id}"
+        else:
+            status = str(reservation.get("status", "")).strip()
+            if status not in {"loading", "warming", "ready_stabilizing", "ready"}:
+                reason = f"split_partner_lost:reservation_status:{status or 'missing'}"
+            else:
+                members = [str(m).strip() for m in reservation.get("members", []) if str(m).strip()]
+                partner_members = [member for member in members if member != self.name]
+                stale_partner = next(
+                    (member for member in partner_members if not self._is_gpu_heartbeat_fresh(member)),
+                    "",
+                )
+                if not stale_partner:
+                    return
+                reason = f"split_partner_lost:heartbeat_stale:{stale_partner}"
+
+        failed_workers = self._fail_active_llm_workers(reason, error_code="split_partner_lost")
+        if failed_workers <= 0:
+            return
+
+        self.logger.warning(
+            f"SPLIT_ACTIVE_PEER_LOSS worker={self.name} group={group_id} "
+            f"failed_workers={failed_workers} reason={reason}"
+        )
+        try:
+            self._runtime_reset_port_and_state(
+                ports_to_clean=[p for p in {self.port, self.runtime_port} if p],
+                reason=reason,
+                task_id=None,
+                stop_split_runtime=True,
+                stop_local_runtime=True,
+            )
+        except Exception as e:
+            self.logger.warning(f"Split peer-loss reset failed: {e}")
+
     def _split_runtime_has_model_loaded(self, port: Any, model_id: str) -> bool:
         try:
             port_int = int(port)

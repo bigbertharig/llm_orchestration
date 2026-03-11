@@ -3,7 +3,7 @@
 
 Flow:
 1) Start benchmark mode (cold workers, auto-default disabled)
-2) Prepare/load requested brain/single/split models sequentially
+2) Load requested models sequentially via brain-managed meta tasks
 """
 
 from __future__ import annotations
@@ -27,16 +27,17 @@ def _run(cmd: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Start custom runtime mode with explicit model targets")
-    ap.add_argument("--brain-model", default="qwen2.5:32b")
-    ap.add_argument("--single-model", default="qwen2.5:7b")
-    ap.add_argument("--split-model", default="qwen2.5:14b")
-    ap.add_argument("--split-candidate-group", default="pair_4_5")
-    ap.add_argument("--keep-alive", default="30m")
+    ap.add_argument("--models", nargs="+", required=True,
+                     help="Model IDs to load onto workers (from models.catalog.json)")
     ap.add_argument("--shared-root", default="/mnt/shared")
+    ap.add_argument("--config", default="config.benchmark.json",
+                     help="Orchestrator config file name (relative to shared/agents/)")
     ap.add_argument("--skip-benchmark-start", action="store_true")
-    ap.add_argument("--no-force-unload-first", action="store_true")
+    ap.add_argument("--force-unload-first", action="store_true",
+                     help="Unload all currently loaded workers before loading")
     ap.add_argument("--strict-processing-empty", action="store_true")
-    ap.add_argument("--timeout", type=int, default=240)
+    ap.add_argument("--load-timeout-seconds", type=int, default=300)
+    ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -47,16 +48,15 @@ def main() -> int:
         "ok": False,
         "mode": "custom",
         "requested": {
-            "brain_model": args.brain_model,
-            "single_model": args.single_model,
-            "split_model": args.split_model,
-            "split_candidate_group": args.split_candidate_group,
-            "keep_alive": args.keep_alive,
+            "models": args.models,
         },
     }
 
     if not args.skip_benchmark_start:
-        bench = _run([sys.executable, str(benchmark_script), "--json", "--timeout", str(args.timeout)], timeout=args.timeout)
+        bench = _run(
+            [sys.executable, str(benchmark_script), "--json", "--timeout", str(args.timeout)],
+            timeout=args.timeout,
+        )
         bench_json: dict[str, object] = {
             "ok": bench.returncode == 0,
             "returncode": bench.returncode,
@@ -78,28 +78,20 @@ def main() -> int:
 
     prep_cmd = [
         "ssh",
-        "-o",
-        "BatchMode=yes",
+        "-o", "BatchMode=yes",
         "gpu",
         "/home/bryan/llm-orchestration-venv/bin/python",
         "/mnt/shared/scripts/prepare_llm_runtimes.py",
-        "--shared-root",
-        args.shared_root,
+        "--shared-root", args.shared_root,
+        "--config", args.config,
         "--clear-orphan-queue-locks",
-        "--brain-model",
-        args.brain_model,
-        "--single-model",
-        args.single_model,
-        "--split-model",
-        args.split_model,
-        "--split-candidate-group",
-        args.split_candidate_group,
-        "--keep-alive",
-        args.keep_alive,
-    ]
+        "--load-timeout-seconds", str(args.load_timeout_seconds),
+        "--models",
+    ] + args.models
+
     if args.strict_processing_empty:
         prep_cmd.append("--strict-processing-empty")
-    if not args.no_force_unload_first:
+    if args.force_unload_first:
         prep_cmd.append("--force-unload-first")
 
     prep = _run(prep_cmd, timeout=args.timeout)
@@ -117,7 +109,7 @@ def main() -> int:
         return 1
 
     result["ok"] = True
-    result["message"] = "Custom mode active with requested models loaded"
+    result["message"] = f"Custom mode active with {len(args.models)} models loaded"
     _emit(result, args.json)
     return 0
 

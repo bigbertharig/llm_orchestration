@@ -170,6 +170,30 @@ class WorkerRuntimeReadinessTests(unittest.TestCase):
             self.assertFalse(task_file.exists())
             self.assertTrue((gpu.processing_path / "task-1.json").exists())
 
+    def test_split_runtime_refuses_single_gpu_task_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = MockClaimGpu(Path(tmp), runtime_state="ready_split")
+            gpu.runtime_placement = "split_gpu"
+            gpu.runtime_group_id = "pair_1_3"
+            gpu.loaded_model = "qwen2.5-coder:14b"
+            gpu.loaded_tier = 2
+            gpu.model_tier_by_id["qwen2.5-coder:14b"] = 2
+            task = {
+                "task_id": "task-1",
+                "task_class": "llm",
+                "llm_model": "qwen2.5:7b",
+                "llm_min_tier": 1,
+                "llm_placement": "single_gpu",
+                "priority": 5,
+            }
+            task_file = gpu.queue_path / "task-1.json"
+            task_file.write_text(json.dumps(task), encoding="utf-8")
+
+            claimed = gpu.claim_tasks()
+
+            self.assertEqual(claimed, [])
+            self.assertTrue(task_file.exists())
+
     def test_spawn_worker_refuses_llm_when_runtime_is_loading(self):
         gpu = MockSpawnGpu(runtime_state="loading_single")
         task = {

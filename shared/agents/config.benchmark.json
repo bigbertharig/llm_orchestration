@@ -8,35 +8,65 @@
   },
   "shared_path": "../",
   "permissions_path": "permissions/",
+  "runtime_backend": "llama",
   "model_search_roots": [
+    "/home/bryan/model-hotset",
     "/mnt/shared/models"
   ],
   "runtime_host": "http://localhost:11434",
-  "runtime_backend": "llama",
   "brain_keep_alive": "30m",
   "worker_keep_alive": "30m",
   "brain_context_tokens": 8192,
   "worker_context_tokens": 8192,
   "auto_default_gpu": "gpu-2",
   "auto_default_model": "qwen2.5:7b",
-  "startup_warm_workers": [
-    "gpu-2"
-  ],
+  "startup_warm_workers": [],
+  "startup_meta_tasks": [],
   "llama_single_defaults": {
-    "ctx_size": 2048,
+    "ctx_size": 16384,
     "batch_size": 64,
     "parallel": 1,
     "n_gpu_layers": 999
   },
   "llama_split_defaults": {
-    "ctx_size": 4096,
+    "ctx_size": 16384,
     "batch_size": 128,
     "parallel": 1,
     "n_gpu_layers": 999
   },
   "llama_single_profiles": {
+    "mistral:7b-instruct": {
+      "ctx_size": 12288,
+      "batch_size": 64,
+      "parallel": 1,
+      "n_gpu_layers": 999
+    },
+    "qwen2.5-coder:7b": {
+      "ctx_size": 16384,
+      "batch_size": 64,
+      "parallel": 1,
+      "n_gpu_layers": 999
+    },
+    "qwen3.5:4b": {
+      "ctx_size": 16384,
+      "batch_size": 64,
+      "parallel": 1,
+      "n_gpu_layers": 999
+    },
+    "qwen3.5:9b-q3km": {
+      "ctx_size": 16384,
+      "batch_size": 64,
+      "parallel": 1,
+      "n_gpu_layers": 999
+    },
+    "deepseek-r1:7b": {
+      "ctx_size": 16384,
+      "batch_size": 64,
+      "parallel": 1,
+      "n_gpu_layers": 999
+    },
     "qwen2.5:7b": {
-      "ctx_size": 2048,
+      "ctx_size": 16384,
       "batch_size": 64,
       "parallel": 1,
       "n_gpu_layers": 999,
@@ -47,7 +77,7 @@
   },
   "llama_split_profiles": {
     "qwen2.5-coder:14b": {
-      "ctx_size": 4096,
+      "ctx_size": 16384,
       "batch_size": 128,
       "parallel": 1,
       "n_gpu_layers": 999,

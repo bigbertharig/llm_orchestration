@@ -400,6 +400,40 @@ def _count_existing_meta_tasks(shared_path: Path, command: str) -> int:
     return count
 
 
+def _startup_meta_enqueue_blockers(shared_path: Path) -> list[str]:
+    """Return reasons startup warm tasks should not be enqueued now."""
+    reasons: list[str] = []
+    saw_non_system_work = False
+    saw_load_meta = False
+
+    for folder in ("queue", "processing"):
+        path = shared_path / "tasks" / folder
+        if not path.exists():
+            continue
+        for task_file in path.glob("*.json"):
+            if str(task_file).endswith(".lock"):
+                continue
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+            except Exception:
+                continue
+            batch_id = str(task.get("batch_id", "")).strip()
+            command = str(task.get("command", "")).strip()
+            task_class = str(task.get("task_class", "")).strip()
+
+            if task_class == "meta" and command in {"load_llm", "load_split_llm"}:
+                saw_load_meta = True
+            if batch_id and batch_id != "system":
+                saw_non_system_work = True
+
+    if saw_non_system_work:
+        reasons.append("active_non_system_tasks")
+    if saw_load_meta:
+        reasons.append("load_meta_in_flight")
+    return reasons
+
+
 def _purge_stale_startup_meta_tasks(shared_path: Path) -> int:
     """Remove startup-created load meta tasks left behind from prior runs."""
     removed = 0
@@ -425,10 +459,14 @@ def _purge_stale_startup_meta_tasks(shared_path: Path) -> int:
             name = str(task.get("name", "")).strip()
             if (
                 created_by == "startup"
-                or batch_id == "system"
-                or name.startswith("load_llm_startup_")
-                or name.startswith("load_split_llm_startup_")
-                or name.startswith("startup_")
+                or (
+                    batch_id == "system"
+                    and (
+                        name.startswith("load_llm_startup_")
+                        or name.startswith("load_split_llm_startup_")
+                        or name.startswith("startup_")
+                    )
+                )
             ):
                 try:
                     task_file.unlink()
@@ -591,6 +629,14 @@ def _enqueue_startup_meta_tasks(
     removed = _purge_stale_startup_meta_tasks(shared_path)
     if removed:
         print(f"Removed {removed} stale startup meta task(s) before enqueue.")
+
+    blockers = _startup_meta_enqueue_blockers(shared_path)
+    if blockers:
+        print(
+            "Skipping startup meta task enqueue: "
+            + ", ".join(blockers)
+        )
+        return
 
     previous_task_id = None
     queued = 0

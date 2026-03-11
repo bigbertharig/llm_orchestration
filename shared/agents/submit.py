@@ -242,7 +242,17 @@ def _prepare_runtime_plan_dir(plan_root: Path, starter_file: Path) -> Path:
     runtime_dir.mkdir(parents=True, exist_ok=False)
 
     shutil.copy2(starter_file, runtime_dir / "plan.md")
-    for name in ("scripts", "input", "history"):
+    scripts_src = plan_root / "scripts"
+    scripts_dst = runtime_dir / "scripts"
+    if scripts_src.exists() and scripts_src.is_dir() and not scripts_dst.exists():
+        shutil.copytree(
+            scripts_src,
+            scripts_dst,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            symlinks=False,
+        )
+
+    for name in ("input", "history"):
         src = plan_root / name
         dst = runtime_dir / name
         if src.exists() and not dst.exists():

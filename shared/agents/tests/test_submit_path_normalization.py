@@ -80,6 +80,45 @@ class TestSubmitPathNormalization(unittest.TestCase):
             finally:
                 scripts_submit.SHARED_ALIASES = original_aliases
 
+    def test_prepare_runtime_plan_dir_copies_scripts_for_alt_plan(self):
+        agent_submit = _load_module("agent_submit_runtime_copy", AGENT_SUBMIT)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan_root = Path(temp_dir) / "plan"
+            scripts_dir = plan_root / "scripts"
+            input_dir = plan_root / "input"
+            history_dir = plan_root / "history"
+            scripts_dir.mkdir(parents=True)
+            input_dir.mkdir(parents=True)
+            history_dir.mkdir(parents=True)
+
+            (plan_root / "plan.md").write_text(
+                "## Tasks\n\n### t1\n- **command**: `echo default`\n",
+                encoding="utf-8",
+            )
+            starter = plan_root / "plan.alt.md"
+            starter.write_text(
+                "## Tasks\n\n### t1\n- **command**: `echo alt`\n",
+                encoding="utf-8",
+            )
+            (scripts_dir / "worker.py").write_text(
+                "from helper import x\n",
+                encoding="utf-8",
+            )
+            (scripts_dir / "helper.py").write_text(
+                "x = 1\n",
+                encoding="utf-8",
+            )
+
+            runtime_dir = agent_submit._prepare_runtime_plan_dir(plan_root, starter)
+
+            self.assertTrue((runtime_dir / "plan.md").exists())
+            self.assertTrue((runtime_dir / "scripts").is_dir())
+            self.assertFalse((runtime_dir / "scripts").is_symlink())
+            self.assertTrue((runtime_dir / "scripts" / "worker.py").exists())
+            self.assertTrue((runtime_dir / "scripts" / "helper.py").exists())
+            self.assertTrue((runtime_dir / "input").is_symlink())
+            self.assertTrue((runtime_dir / "history").is_symlink())
+
 
 class TestSubmitPathValidationCLI(unittest.TestCase):
     def test_invalid_query_file_produces_clean_error(self):

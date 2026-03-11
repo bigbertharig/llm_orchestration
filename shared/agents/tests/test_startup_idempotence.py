@@ -267,6 +267,72 @@ class StartupIdempotenceTests(unittest.TestCase):
             self.assertEqual(removed, 2)
             self.assertEqual(list(queue.glob("*.json")), [])
 
+    def test_enqueue_startup_meta_tasks_skips_when_non_system_work_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            queue = shared / "tasks" / "queue"
+            queue.mkdir(parents=True, exist_ok=True)
+            (queue / "batch-task.json").write_text(
+                json.dumps(
+                    {
+                        "task_id": "batch-task",
+                        "task_class": "llm",
+                        "command": "worker_review",
+                        "batch_id": "20260309_142748",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            startup._enqueue_startup_meta_tasks(
+                shared_path=shared,
+                created_by="startup",
+                startup_meta_tasks=[
+                    {
+                        "name": "startup_single_default",
+                        "command": "load_llm",
+                        "target_model": "qwen2.5:7b",
+                        "candidate_workers": ["gpu-2"],
+                    }
+                ],
+            )
+
+            queue_files = sorted(path.name for path in queue.glob("*.json"))
+            self.assertEqual(queue_files, ["batch-task.json"])
+
+    def test_enqueue_startup_meta_tasks_skips_when_load_meta_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            processing = shared / "tasks" / "processing"
+            processing.mkdir(parents=True, exist_ok=True)
+            (processing / "load.json").write_text(
+                json.dumps(
+                    {
+                        "task_id": "load",
+                        "task_class": "meta",
+                        "command": "load_split_llm",
+                        "batch_id": "system",
+                        "created_by": "brain",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            startup._enqueue_startup_meta_tasks(
+                shared_path=shared,
+                created_by="startup",
+                startup_meta_tasks=[
+                    {
+                        "name": "startup_single_default",
+                        "command": "load_llm",
+                        "target_model": "qwen2.5:7b",
+                        "candidate_workers": ["gpu-2"],
+                    }
+                ],
+            )
+
+            self.assertEqual(list((shared / "tasks" / "queue").glob("*.json")), [])
+
     def test_clear_stale_heartbeats_removes_brain_and_worker_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             shared = Path(tmp)

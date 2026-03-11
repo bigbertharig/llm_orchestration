@@ -50,7 +50,13 @@ class MockBrainResources(BrainResourceMixin):
         self.model_tier_by_id = {"qwen2.5:7b": 1, "qwen2.5-coder:14b": 2}
         self.model_meta_by_id = {
             "qwen2.5:7b": {"placement": "single_gpu", "tier": 1},
-            "qwen2.5-coder:14b": {"placement": "split_gpu", "tier": 2},
+            "qwen2.5-coder:14b": {
+                "placement": "split_gpu",
+                "tier": 2,
+                "split_groups": [
+                    {"id": "pair_1_3", "members": ["gpu-1", "gpu-3"], "port": 11440},
+                ],
+            },
         }
         self.logged = []
         self.inserted = []
@@ -97,6 +103,12 @@ class MockBrainResources(BrainResourceMixin):
 
     def _get_gpu_states(self):
         return dict(self._gpu_states)
+
+    def _reconcile_split_group_state(self, group, split_model):
+        return {
+            "group_id": str(group.get("id", "")).strip(),
+            "classification": "cold",
+        }
 
 
 class BrainResourceMetaBlockingTests(unittest.TestCase):
@@ -158,6 +170,60 @@ class BrainResourceMetaBlockingTests(unittest.TestCase):
             brain._make_resource_decisions(self.gpu_status, brain.gpu_agents, self.queue_stats)
 
             self.assertEqual(brain.inserted, [])
+
+    def test_pending_split_load_does_not_block_targeted_unloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = MockBrainResources(Path(tmp))
+            brain._gpu_states = {
+                "gpu-1": {
+                    "model_loaded": True,
+                    "runtime_healthy": True,
+                    "runtime_placement": "single_gpu",
+                    "loaded_model": "qwen2.5:7b",
+                    "loaded_tier": 1,
+                },
+                "gpu-2": {"model_loaded": False, "runtime_healthy": True},
+                "gpu-3": {
+                    "model_loaded": True,
+                    "runtime_healthy": True,
+                    "runtime_placement": "single_gpu",
+                    "loaded_model": "qwen2.5:7b",
+                    "loaded_tier": 1,
+                },
+            }
+            brain._demand_window = {"total_llm": 1, "split_llm": 1, "min_tier": 2}
+            split_queue_stats = dict(self.queue_stats)
+            split_queue_stats.update(
+                {
+                    "llm": 1,
+                    "llm_split_required": 1,
+                    "llm_max_tier": 2,
+                    "llm_model_demand": {},
+                    "llm_split_model_demand": {"qwen2.5-coder:14b": 1},
+                }
+            )
+            _write_task(
+                brain.queue_path / "load_split_retry.json",
+                {
+                    "task_id": "load-split",
+                    "task_class": "meta",
+                    "command": "load_split_llm",
+                    "target_model": "qwen2.5-coder:14b",
+                    "candidate_groups": [
+                        {"id": "pair_1_3", "members": ["gpu-1", "gpu-3"], "port": 11440}
+                    ],
+                },
+            )
+
+            brain._make_resource_decisions(self.gpu_status, brain.gpu_agents, split_queue_stats)
+
+            self.assertEqual(
+                brain.inserted,
+                [
+                    {"command": "unload_llm", "meta": {"candidate_workers": ["gpu-1"]}},
+                    {"command": "unload_llm", "meta": {"candidate_workers": ["gpu-3"]}},
+                ],
+            )
 
 
 if __name__ == "__main__":

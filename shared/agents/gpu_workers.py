@@ -274,6 +274,48 @@ class GPUWorkerMixin:
         for worker_id in list(self.active_workers.keys()):
             self._kill_worker(worker_id, reason="shutdown", force=True)
 
+    def _fail_active_llm_workers(self, reason: str, error_code: str = "runtime_lost") -> int:
+        """Force-fail active LLM workers and move their results to the outbox.
+
+        Used when the owning runtime becomes invalid underneath a live task,
+        for example when a split partner disappears and the local member must
+        stop work immediately.
+        """
+        failed = 0
+        for worker_id in list(self.active_workers.keys()):
+            info = self.active_workers.get(worker_id)
+            if not info:
+                continue
+            task = info.get("task", {})
+            if str(task.get("task_class", "")).strip() != "llm":
+                continue
+
+            self._kill_worker(worker_id, reason=reason, force=True)
+            peak_vram = int(info.get("peak_vram_mb", 0) or 0)
+            self.claimed_vram -= int(info.get("vram_estimate", 0) or 0)
+            self.claimed_vram = max(0, self.claimed_vram)
+
+            self.outbox.append(
+                WorkerResult(
+                    task_id=task["task_id"],
+                    task=task,
+                    result={
+                        "success": False,
+                        "error": reason,
+                        "error_type": "runtime_invalidated",
+                        "error_code": error_code,
+                        "worker": self.name,
+                        "max_vram_used_mb": peak_vram,
+                    },
+                    peak_vram_mb=peak_vram,
+                )
+            )
+            self.stats["tasks_failed"] += 1
+            del self.active_workers[worker_id]
+            failed += 1
+
+        return failed
+
     def _has_active_work(self) -> bool:
         """Return True when the rig appears to be in an active batch."""
         if self.active_workers or self.outbox or self.active_meta_task:

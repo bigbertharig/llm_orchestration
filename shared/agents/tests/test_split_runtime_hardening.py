@@ -19,6 +19,7 @@ import gpu_split
 from gpu import GPUAgent
 from gpu_split import GPUSplitMixin
 from gpu_tasks import GPUTaskMixin
+from gpu_workers import GPUWorkerMixin
 
 
 class DummyLock:
@@ -32,7 +33,7 @@ class DummyLock:
         return False
 
 
-class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
+class MockSplitGpu(GPUSplitMixin, GPUTaskMixin, GPUWorkerMixin):
     def __init__(self, tmpdir: Path):
         self.name = "gpu-3"
         self.logger = MagicMock()
@@ -58,10 +59,13 @@ class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
         self.split_runtime_port_model_miss_timestamps = []
         self.split_runtime_ready_at = None
         self.active_meta_task = None
-        self.active_workers = []
+        self.active_workers = {}
+        self.outbox = []
+        self.stats = {"tasks_completed": 0, "tasks_failed": 0}
         self.cleanup_calls = []
         self.reported_issues = []
         self.reset_calls = []
+        self.kill_calls = []
         self.load_model_calls = []
         self.start_runtime_calls = 0
         self.reuse_existing = False
@@ -191,6 +195,11 @@ class MockSplitGpu(GPUSplitMixin, GPUTaskMixin):
 
     def _attest_runtime_reality(self):
         return self.runtime_attestation
+
+    def _kill_worker(self, worker_id: str, reason: str = "", force: bool = False):
+        self.kill_calls.append(
+            {"worker_id": worker_id, "reason": reason, "force": force}
+        )
 
 
 class MockLoadClaimGpu(GPUTaskMixin):
@@ -614,6 +623,46 @@ class SplitRuntimeHardeningTests(unittest.TestCase):
             gpu._service_split_reservations()
 
             self.assertEqual(gpu.start_calls, 0)
+
+    def test_active_split_partner_loss_fails_local_llm_workers_and_resets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = MockSplitGpu(Path(tmp))
+            reservation_path = gpu._split_reservation_path("pair_3_4")
+            reservation_path.write_text(
+                json.dumps(
+                    {
+                        "group_id": "pair_3_4",
+                        "status": "ready",
+                        "target_model": "model-a",
+                        "members": ["gpu-3", "gpu-4"],
+                        "launcher": "gpu-3",
+                        "port": 11441,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            gpu.active_workers = {
+                "gpu-3-w0-task": {
+                    "process": MagicMock(),
+                    "task": {
+                        "task_id": "task-1",
+                        "task_class": "llm",
+                    },
+                    "vram_estimate": 256,
+                    "peak_vram_mb": 128,
+                }
+            }
+            gpu.claimed_vram = 256
+            gpu._is_gpu_heartbeat_fresh = lambda _gpu_name, max_age_seconds=0: False
+
+            gpu._check_active_split_partner_health()
+
+            self.assertEqual(len(gpu.kill_calls), 1)
+            self.assertEqual(len(gpu.outbox), 1)
+            self.assertEqual(gpu.outbox[0].result["error_code"], "split_partner_lost")
+            self.assertEqual(gpu.cleanup_calls[-1]["reason"], "split_partner_lost:heartbeat_stale:gpu-4")
+            self.assertEqual(gpu.claimed_vram, 0)
+            self.assertEqual(gpu.stats["tasks_failed"], 1)
 
     def test_service_split_reservations_ignores_runtime_owner_metadata_files(self):
         class RuntimeOwnerScanGuardGpu(MockSplitGpu):

@@ -417,6 +417,7 @@ class GPUAgent(
                 self._service_split_reservations()
                 self._check_split_runtime_invariants()
                 self._check_split_health_issue_timeout()
+                self._check_active_split_partner_health()
 
                 # Auto-recovery check: if wedged with no active work, trigger recovery
                 should_recover, recover_reason = self._should_trigger_auto_recovery()

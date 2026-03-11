@@ -47,7 +47,9 @@ dst = Path("{REMOTE_BENCH_CONFIG}")
 cfg = json.loads(src.read_text(encoding="utf-8"))
 cfg["worker_mode"] = "cold"
 cfg["initial_hot_workers"] = 0
-cfg["max_hot_workers"] = 0
+cfg["max_hot_workers"] = 5
+cfg["startup_warm_workers"] = []
+cfg["startup_meta_tasks"] = []
 cfg["auto_default_enabled"] = False
 cfg["auto_default_idle_seconds"] = 999999
 dst.write_text(json.dumps(cfg, indent=2), encoding="utf-8")

@@ -131,7 +131,7 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
         elif model_loaded:
             host_display = "[loaded]"
         elif runtime_state.startswith("loading"):
-            host_display = configured_model or runtime_api_base or "[loading]"
+            host_display = "[loading]"
         else:
             host_display = "-"
 

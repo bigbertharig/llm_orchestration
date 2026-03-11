@@ -849,6 +849,37 @@ class BrainResourceMixin:
                         pending.add(gid)
         return pending
 
+    def _reclaimable_pending_split_group_ids(
+        self,
+        model_id: str,
+        viable_groups: List[Dict[str, Any]],
+        gpu_states: Dict[str, Dict[str, Any]],
+        pending_groups: set[str],
+    ) -> set[str]:
+        """Return pending split groups that still need targeted unloads first.
+
+        A queued ``load_split_llm`` should not make a group unavailable if the
+        selected members are still hot and no targeted unloads exist yet. In that
+        state, the brain still needs to issue reclaim unloads before the queued
+        split load can make progress.
+        """
+        reclaimable: set[str] = set()
+        if not pending_groups:
+            return reclaimable
+
+        for group in viable_groups:
+            group_id = str(group.get("id", "")).strip()
+            if not group_id or group_id not in pending_groups:
+                continue
+            members_needing_unload = self._split_group_members_needing_unload(group, gpu_states)
+            if not members_needing_unload:
+                continue
+            pending_unloads = self._has_pending_unload_for_members(members_needing_unload)
+            if any(not pending_unloads.get(member, False) for member in members_needing_unload):
+                reclaimable.add(group_id)
+
+        return reclaimable
+
     def _collect_pending_meta_commands(self) -> set[str]:
         commands: set[str] = set()
         for lane in (self.queue_path, self.processing_path):
@@ -2577,6 +2608,23 @@ class BrainResourceMixin:
                         and str(s.get("runtime_group_id", "")).strip() in viable_group_ids
                     }
                     pending_groups = self._pending_split_group_ids(split_model, viable_group_ids)
+                    reclaimable_pending_groups = self._reclaimable_pending_split_group_ids(
+                        split_model,
+                        viable_groups,
+                        gpu_states,
+                        pending_groups,
+                    )
+                    if reclaimable_pending_groups:
+                        pending_groups -= reclaimable_pending_groups
+                        self.log_decision(
+                            "RESOURCE_DECISION",
+                            "Pending split loads still need reclaim unloads; treating groups as unload-first candidates",
+                            {
+                                "split_model": split_model,
+                                "pending_groups": sorted(viable_group_ids),
+                                "reclaimable_pending_groups": sorted(reclaimable_pending_groups),
+                            },
+                        )
                     reconciled_states = [
                         self._reconcile_split_group_state(group, split_model)
                         for group in viable_groups
