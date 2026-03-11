@@ -20,11 +20,30 @@ Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 - `shared/scripts/summarize_history_run.py` summarize one historical batch
 - `~/llm_orchestration/scripts/rollup_history.py` roll up an entire history tree
 - `shared/scripts/batch_runtime_diag.py` inspect runtime state for a batch
+- Meta tasks (`load_llm`, `unload_llm`): brain inserts via `brain_resources.py:_insert_resource_task()`, workers execute via `gpu_llama.py:load_model()`
+- Model catalog: `shared/agents/models.catalog.json` (model IDs, GGUF paths, placement, tiers)
+
+## Shared Storage Topology (Current)
+
+- Shared drive/NFS source is the GPU rig at `10.0.0.3` (not `10.0.0.2`).
+- Rig-local path convention: `/mnt/shared/...`
+- Laptop/operator path convention: `/media/bryan/shared/...`
+- CPU worker path convention: usually `/media/bryan/shared/...` (some hosts may expose `/mnt/shared/...`)
+
+Operational rule:
+- Scripts that run on CPU workers must resolve shared root dynamically (`/media/bryan/shared` vs `/mnt/shared`) instead of hardcoding one path.
+- If CPU workers disappear from dashboard, first verify worker shared mount points resolve to rig `10.0.0.3` and are actually mounted.
+
+## Architecture — Who Does What
+- **Brain**: Sequences work. Promotes private→public tasks when dependencies resolve. Handles retries (max 3 attempts). Manages model lifecycle via meta tasks.
+- **Workers**: Dumb grabbers. Scan `tasks/queue/`, claim whatever matches. No dependency checking, no sequencing. If 5 tasks are in the queue, 5 workers grab them simultaneously.
+- **Scripts**: `prepare_llm_runtimes.py` enforces sequential loading by writing one meta task, waiting for completion, then writing the next. This is the correct external entry point — not writing batches of tasks to the queue.
 
 ## Non-Negotiables
 - Fail fast with clear errors.
 - No backward-compatibility hacks.
-- Don’t run plan scripts directly; always submit through `submit.py` or dashboard.
+- Don't run plan scripts directly; always submit through `submit.py` or dashboard.
+- Model loading/unloading happens through brain-managed meta tasks only — never write directly to the task queue.
 
 ## Standard Procedures
 
@@ -70,7 +89,7 @@ Wrapper start modes when you intentionally want them:
 ```bash
 python3 ~/llm_orchestration/scripts/start_default_mode.py
 python3 ~/llm_orchestration/scripts/start_benchmark_mode.py
-python3 ~/llm_orchestration/scripts/start_custom_mode.py --brain-model ... --single-model ... --split-model ...
+python3 ~/llm_orchestration/scripts/start_custom_mode.py --models qwen3.5:4b qwen2.5-coder:7b ...
 ```
 
 ### Check The Rig
@@ -184,6 +203,29 @@ Useful options:
 - `--keep-workers`
 - `--keep-models`
 - `--clean-reset`
+
+### Load Models Onto GPUs
+
+Use `start_custom_mode.py` to load specific models onto workers. It starts
+benchmark mode (cold workers), then calls `prepare_llm_runtimes.py` on the rig
+which queues one `load_llm` meta task at a time, waits for completion, then
+queues the next.
+
+```bash
+python3 ~/llm_orchestration/scripts/start_custom_mode.py \
+  --models qwen3.5:4b qwen2.5-coder:7b qwen3.5:9b-q3km mistral:7b-instruct deepseek-r1:7b \
+  --force-unload-first
+```
+
+Model IDs come from `shared/agents/models.catalog.json`. One model per
+available cold worker. The brain and workers handle sequencing, retry, and
+placement — do not try to replicate this manually.
+
+Key scripts in the chain:
+- `~/llm_orchestration/scripts/benchmarks/start_custom_mode.py` — laptop-side entry point
+- `shared/scripts/prepare_llm_runtimes.py` — rig-side, sequential meta task submission
+- `shared/agents/gpu_tasks.py` — worker-side task claiming
+- `shared/agents/gpu_llama.py` — worker-side container lifecycle
 
 ### Reset A GPU
 

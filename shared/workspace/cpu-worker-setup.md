@@ -26,7 +26,9 @@ Normal behavior:
 
 - claim only `executor: worker` + `task_class: cpu`
 - write `queue -> processing -> complete/failed`
-- publish heartbeats under `shared/cpus/`
+- publish heartbeats under:
+  - `shared/heartbeats/cpu-worker-<id>.json` (dashboard path)
+  - `shared/cpus/cpu-worker-<id>/heartbeat.json` (worker folder path)
 
 This is separate from the local repo copy at
 `/home/bryan/llm_orchestration/scripts/cpu_agent.py`, which is useful for local
@@ -50,12 +52,12 @@ inference.
 ## Network Assumptions
 
 - subnet: `10.0.0.0/24`
-- control plane: `10.0.0.2`
+- control plane: `10.0.0.2` (laptop/operator)
 - GPU rig: `10.0.0.3`
 - CPU workers: `10.0.0.10` through `10.0.0.17`
 
-The workers mount the shared drive from the control plane and execute directly
-against shared scripts, queues, and outputs.
+The workers mount shared storage from the GPU rig (`10.0.0.3`) and execute
+directly against shared scripts, queues, and outputs.
 
 ---
 
@@ -87,6 +89,12 @@ Image assumptions:
 Expected shared mount on workers:
 
 - `/media/bryan/shared`
+
+Current required fstab line (normalized across workers 10-17):
+
+```fstab
+10.0.0.3:/mnt/shared /media/bryan/shared nfs nofail,_netdev,noauto,x-systemd.automount,x-systemd.mount-timeout=10s,nolock 0 0
+```
 
 Expected runtime paths:
 
@@ -146,6 +154,8 @@ python3 /media/bryan/shared/scripts/cpu_agent.py --once --name cpu-worker-10
 - CPU workers should write logs to shared persistent storage, not `/tmp`.
 - The helper script currently launches the shared CPU agent over SSH and keeps
   logs in `/media/bryan/shared/logs/cpu_workers/`.
+- The helper script starts workers with:
+  - `python3 /media/bryan/shared/scripts/cpu_agent.py --config /media/bryan/shared/agents/config.json --name cpu-worker-<id>`
 - CPU workers are expected to stay simple:
   - no GPU ownership
   - no LLM runtime ownership
@@ -162,7 +172,25 @@ They should behave like lightweight task executors that report status upward.
 3. Confirm hostname and shared mount.
 4. Confirm `python3` is available.
 5. Start the CPU agent with the shared restart helper.
-6. Confirm heartbeat appears under `shared/cpus/`.
+6. Confirm heartbeats update under both:
+   - `shared/heartbeats/cpu-worker-<id>.json`
+   - `shared/cpus/cpu-worker-<id>/heartbeat.json`
+
+---
+
+## Known Failure Mode (Fixed)
+
+Symptom:
+- worker process starts, then exits with `PermissionError` writing heartbeat.
+
+Cause:
+- stale root-owned heartbeat files from older runs.
+
+Fix:
+- on NFS server (`10.0.0.3`), reset owner/mode for worker heartbeat files:
+  - `/mnt/shared/heartbeats/cpu-worker-<id>.json`
+  - `/mnt/shared/cpus/cpu-worker-<id>/heartbeat.json`
+  - owner/group `bryan:bryan`, file mode `664`, worker dir mode `775`
 
 ---
 
