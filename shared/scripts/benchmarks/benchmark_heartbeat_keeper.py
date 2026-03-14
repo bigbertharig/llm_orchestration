@@ -70,12 +70,27 @@ def _num(s: str) -> float:
 
 
 def get_cpu_temp() -> float | None:
-    """Read CPU temperature from thermal zone."""
+    """Read CPU package temperature from thermal zones.
+
+    Prefers x86_pkg_temp (actual CPU die temp) over acpitz (motherboard ambient).
+    """
+    best: float | None = None
     try:
-        with open("/sys/class/thermal/thermal_zone0/temp") as f:
-            return round(int(f.read().strip()) / 1000, 1)
+        from pathlib import Path
+        for zone in sorted(Path("/sys/class/thermal").glob("thermal_zone*")):
+            try:
+                zone_type = (zone / "type").read_text().strip()
+                temp_raw = int((zone / "temp").read_text().strip())
+                temp_c = round(temp_raw / 1000, 1)
+                if zone_type == "x86_pkg_temp":
+                    return temp_c  # CPU package temp — best source
+                if best is None:
+                    best = temp_c  # fallback to first zone
+            except Exception:
+                continue
     except Exception:
-        return None
+        pass
+    return best
 
 
 def get_benchmark_containers() -> dict:
