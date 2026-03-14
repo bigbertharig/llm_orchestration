@@ -1061,8 +1061,15 @@ function renderWorkerTable(workers, type) {
       splitGroupTotals[gid].members += 1;
     });
     const stateLabel = (w) => {
+      const suite = String(w.active_suite || '').trim();
       const placement = String(w.runtime_placement || '').trim();
       const gid = String(w.runtime_group_id || '').trim();
+      if (suite) {
+        if (placement === 'split_gpu' && gid) {
+          return `${suite} [LINKED ${gid}]`;
+        }
+        return suite;
+      }
       if (placement === 'split_gpu' && gid) {
         return `LINKED (${gid})`;
       }
@@ -1079,14 +1086,28 @@ function renderWorkerTable(workers, type) {
       return `${self} (grp ${grp.used}/${grp.total})`;
     };
     const holdingLabel = (w) => {
+      const activeTask = String(w.active_task || '').trim();
+      const activeProgress = String(w.active_progress || '').trim();
+      const activeLabel = activeTask
+        ? (activeProgress ? `${activeTask} (${activeProgress})` : activeTask)
+        : '';
       const gid = String(w.runtime_group_id || '').trim();
       const placement = String(w.runtime_placement || '').trim();
       if (!gid || placement !== 'split_gpu') {
-        return truncCell((w.holding || []).slice(0,2).join(' | ') || '-', 64, true);
+        const items = (w.holding || [])
+          .map((h) => String(h || '').trim())
+          .filter(Boolean);
+        const merged = activeLabel
+          ? [activeLabel, ...items.filter((x) => x !== activeLabel)]
+          : items;
+        return truncCell(merged.slice(0,2).join(' | ') || '-', 64, true);
       }
       const groupItems = [...(splitGroupHoldings[gid] || new Set())].slice(0, 3);
-      const groupText = groupItems.length ? `GROUP ${groupItems.join(' | ')}` : 'GROUP -';
-      return truncCell(groupText, 80, true);
+      const filteredGroup = activeLabel ? groupItems.filter((x) => x !== activeLabel) : groupItems;
+      const parts = [];
+      if (activeLabel) parts.push(activeLabel);
+      if (filteredGroup.length) parts.push(`GROUP ${filteredGroup.join(' | ')}`);
+      return truncCell(parts.join(' | ') || 'GROUP -', 96, true);
     };
     const rows = workers.map(w => [
       fmt(w.name),
