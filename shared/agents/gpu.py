@@ -111,6 +111,7 @@ class GPUAgent(
         self.gpu_state_dir = self.shared_path / "gpus" / f"gpu_{self.gpu_id}"
         self.gpu_state_dir.mkdir(parents=True, exist_ok=True)
         self.heartbeat_file = self.gpu_state_dir / "heartbeat.json"
+        self.benchmark_reservation_file = self.gpu_state_dir / "benchmark_reservation.json"
 
         # Signals
         self.signals_path = self.shared_path / "signals"
@@ -260,6 +261,26 @@ class GPUAgent(
         """Probe the active llama runtime health."""
         return self.check_llama_health()
 
+    def _read_benchmark_reservation(self) -> Dict[str, Any]:
+        """Read external benchmark reservation state for this GPU."""
+        path = self.benchmark_reservation_file
+        if not path.exists():
+            return {"reserved": False}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            self.logger.warning(f"Failed to read benchmark reservation file {path}: {e}")
+            return {"reserved": False, "reservation_error": "read_failed"}
+        if not isinstance(data, dict):
+            self.logger.warning(f"Invalid benchmark reservation payload in {path}: expected object")
+            return {"reserved": False, "reservation_error": "invalid_payload"}
+        data["reserved"] = bool(data.get("reserved", True))
+        return data
+
+    def _is_benchmark_reserved(self) -> bool:
+        return bool(self._read_benchmark_reservation().get("reserved", False))
+
     def _write_heartbeat(self):
         """Write GPU-level heartbeat to filesystem. We are sole owner, no lock needed.
 
@@ -307,6 +328,8 @@ class GPUAgent(
             and self.model_loaded
             and bool(self.runtime_healthy)
         )
+        benchmark_reservation = self._read_benchmark_reservation()
+        reserved = bool(benchmark_reservation.get("reserved", False))
 
         heartbeat = {
             "gpu_id": self.gpu_id,
@@ -338,6 +361,9 @@ class GPUAgent(
             "runtime_port": self.runtime_port,
             "runtime_backend": self.runtime_backend,
             "runtime_api_base": self.runtime_api_base,
+            "reserved": reserved,
+            "reserved_for": str(benchmark_reservation.get("reserved_for", "") or ""),
+            "reservation": benchmark_reservation if reserved else None,
             "split_health_issue": self._get_split_health_issue_heartbeat(),
             "global_load_owner_issue": dict(self.pending_global_load_owner_issue),
             "runtime_healthy": bool(self.runtime_healthy),

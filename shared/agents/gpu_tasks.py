@@ -976,6 +976,18 @@ class GPUTaskMixin:
         # Emergency meta-tasks allowed during thermal pause
         THERMAL_EMERGENCY_META_COMMANDS = {"reset_gpu_runtime", "reset_split_runtime"}
 
+        reservation = self._read_benchmark_reservation()
+        if reservation.get("reserved", False):
+            reservation_owner = str(
+                reservation.get("owner")
+                or reservation.get("reserved_for")
+                or "benchmark"
+            ).strip()
+            self.logger.info(
+                f"TASKS_RESERVED: skip claiming queued work while reserved for {reservation_owner}"
+            )
+            return []
+
         if self.thermal_pause_active:
             remaining = max(0, int(self.thermal_pause_until - time.time()))
 

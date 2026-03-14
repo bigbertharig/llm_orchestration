@@ -8,6 +8,7 @@ import sys
 import tempfile
 import types
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -224,6 +225,64 @@ class BrainResourceMetaBlockingTests(unittest.TestCase):
                     {"command": "unload_llm", "meta": {"candidate_workers": ["gpu-3"]}},
                 ],
             )
+
+    def test_reserved_hot_gpu_is_excluded_from_hot_capacity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = MockBrainResources(Path(tmp))
+            now = datetime.now().isoformat()
+            brain.active_batches = {"batch-1": {}}
+            brain.max_hot_workers = 1
+            brain._gpu_states = {
+                "gpu-1": {
+                    "model_loaded": True,
+                    "runtime_healthy": True,
+                    "runtime_placement": "single_gpu",
+                    "loaded_model": "qwen2.5:7b",
+                    "loaded_tier": 1,
+                    "reserved": True,
+                    "reserved_for": "benchmark",
+                    "last_updated": now,
+                },
+                "gpu-2": {
+                    "model_loaded": False,
+                    "runtime_healthy": True,
+                    "last_updated": now,
+                },
+                "gpu-3": {
+                    "model_loaded": False,
+                    "runtime_healthy": True,
+                    "last_updated": now,
+                },
+            }
+            brain._demand_window = {"total_llm": 10, "split_llm": 0, "min_tier": 1}
+
+            brain._make_resource_decisions(self.gpu_status, brain.gpu_agents, self.queue_stats)
+
+            self.assertEqual(brain.inserted, [{"command": "load_llm", "meta": {}}])
+
+    def test_reserved_gpu_blocks_global_idle_detection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = MockBrainResources(Path(tmp))
+            brain.active_batches = {}
+            is_idle, reasons = brain._is_system_globally_idle(
+                {
+                    "total_pending": 0,
+                    "processing_count": 0,
+                },
+                {"total_llm": 0},
+                {
+                    "gpu-1": {
+                        "reserved": True,
+                        "reserved_for": "benchmark",
+                        "last_updated": datetime.now().isoformat(),
+                        "active_tasks": [],
+                        "meta_task_active": False,
+                    }
+                },
+            )
+
+            self.assertFalse(is_idle)
+            self.assertIn("reserved:gpu-1", reasons)
 
 
 if __name__ == "__main__":

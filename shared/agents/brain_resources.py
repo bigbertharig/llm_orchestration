@@ -714,9 +714,34 @@ class BrainResourceMixin:
                     continue
         return False
 
+    def _gpu_reservation_info(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        reservation = state.get("reservation")
+        if isinstance(reservation, dict):
+            info = dict(reservation)
+            info["reserved"] = bool(info.get("reserved", state.get("reserved", True)))
+            return info
+        if not state.get("reserved", False):
+            return {"reserved": False}
+        return {
+            "reserved": True,
+            "reserved_for": str(state.get("reserved_for", "") or "").strip(),
+        }
+
+    def _is_gpu_reserved(self, state: Dict[str, Any]) -> bool:
+        return bool(self._gpu_reservation_info(state).get("reserved", False))
+
+    def _reserved_gpu_names(self, gpu_states: Dict[str, Dict[str, Any]]) -> List[str]:
+        return sorted(
+            gpu_name
+            for gpu_name, state in gpu_states.items()
+            if self._is_gpu_reserved(state)
+        )
+
     def _single_hot_gpu_rows(self, gpu_states: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         for gpu_name, state in gpu_states.items():
+            if self._is_gpu_reserved(state):
+                continue
             if not state.get("model_loaded", False):
                 continue
             if str(state.get("runtime_placement", "")) != "single_gpu":
@@ -2056,6 +2081,8 @@ class BrainResourceMixin:
             if not self._is_fresh_gpu_state(state):
                 # Stale heartbeat - cannot be trusted for real-work detection
                 continue
+            if self._is_gpu_reserved(state):
+                reasons.append(f"reserved:{gpu_name}")
             active_tasks = state.get("active_tasks", [])
             if isinstance(active_tasks, list) and active_tasks:
                 # Check if any are non-meta tasks
@@ -2117,6 +2144,8 @@ class BrainResourceMixin:
                 # Stale heartbeat - cannot be trusted as authoritative busy signal
                 # Skip entirely - don't block idle detection based on stale data
                 continue
+            if self._is_gpu_reserved(state):
+                reasons.append(f"reserved:{gpu_name}")
             active_tasks = state.get("active_tasks", [])
             if isinstance(active_tasks, list) and active_tasks:
                 reasons.append(f"active_tasks:{gpu_name}")
@@ -2436,6 +2465,12 @@ class BrainResourceMixin:
 
         # Get GPU agent states from heartbeats (moved earlier for thermal recovery)
         gpu_states = self._get_gpu_states()
+        reserved_gpus = self._reserved_gpu_names(gpu_states)
+        orchestration_gpu_states = {
+            gpu_name: state
+            for gpu_name, state in gpu_states.items()
+            if gpu_name not in reserved_gpus
+        }
 
         # Check for thermal recovery escalation (brain-level)
         # This takes priority over other resource decisions
@@ -2446,15 +2481,16 @@ class BrainResourceMixin:
         active_gpus = [g for g in gpu_status if g["util_pct"] > 10 or g["mem_used_mb"] > 1000]
         total_power = sum(g["power_w"] for g in gpu_status)
 
-        # gpu_states already retrieved above for thermal recovery
-        gpus_with_model = [g for g, s in gpu_states.items() if s.get("model_loaded", False)]
-        gpus_without_model = [g for g, s in gpu_states.items() if not s.get("model_loaded", False)]
+        # gpu_states already retrieved above for thermal recovery.
+        # Reserved GPUs are excluded from normal orchestration decisions.
+        gpus_with_model = [g for g, s in orchestration_gpu_states.items() if s.get("model_loaded", False)]
+        gpus_without_model = [g for g, s in orchestration_gpu_states.items() if not s.get("model_loaded", False)]
         split_loaded = [
-            g for g, s in gpu_states.items()
+            g for g, s in orchestration_gpu_states.items()
             if s.get("model_loaded", False) and str(s.get("runtime_placement", "")) == "split_gpu"
         ]
         max_loaded_tier = 0
-        for s in gpu_states.values():
+        for s in orchestration_gpu_states.values():
             if not s.get("model_loaded", False):
                 continue
             try:
@@ -2464,7 +2500,7 @@ class BrainResourceMixin:
             max_loaded_tier = max(max_loaded_tier, tier)
 
         # Track unhealthy GPUs (runtime circuit breaker tripped)
-        unhealthy_gpus = [g for g, s in gpu_states.items()
+        unhealthy_gpus = [g for g, s in orchestration_gpu_states.items()
                           if not s.get("runtime_healthy", True)]
         if unhealthy_gpus:
             self.log_decision("GPU_UNHEALTHY",
@@ -2485,6 +2521,7 @@ class BrainResourceMixin:
                 "running_gpus": list(running_gpus.keys()),
                 "hot_gpus": gpus_with_model,
                 "split_loaded": split_loaded,
+                "reserved_gpus": reserved_gpus,
                 "max_loaded_tier": max_loaded_tier,
                 "queue_stats": queue_stats
             })
@@ -2594,6 +2631,8 @@ class BrainResourceMixin:
                     members = g.get("members", [])
                     if not all(member in running_gpus for member in members):
                         continue
+                    if any(member in reserved_gpus for member in members):
+                        continue
                     if any(member in unhealthy_gpus for member in members):
                         continue
                     viable_groups.append(g)
@@ -2601,7 +2640,7 @@ class BrainResourceMixin:
                     viable_group_ids = [str(g.get("id", "")).strip() for g in viable_groups]
                     ready_groups = {
                         str(s.get("runtime_group_id", "")).strip()
-                        for s in gpu_states.values()
+                        for s in orchestration_gpu_states.values()
                         if s.get("model_loaded", False)
                         and str(s.get("runtime_placement", "")) == "split_gpu"
                         and str(s.get("loaded_model", "")) == split_model
@@ -2611,7 +2650,7 @@ class BrainResourceMixin:
                     reclaimable_pending_groups = self._reclaimable_pending_split_group_ids(
                         split_model,
                         viable_groups,
-                        gpu_states,
+                        orchestration_gpu_states,
                         pending_groups,
                     )
                     if reclaimable_pending_groups:

@@ -60,6 +60,7 @@ class MockClaimGpu(GPUTaskMixin):
         self.active_workers = {}
         self.claimed_vram = 0
         self.port = 11436
+        self._reservation = {"reserved": False}
 
     def _get_preferred_classes(self):
         return ["llm"]
@@ -90,6 +91,9 @@ class MockClaimGpu(GPUTaskMixin):
 
     def _scan_emergency_meta_tasks(self, _commands):
         return []
+
+    def _read_benchmark_reservation(self):
+        return dict(self._reservation)
 
 
 class MockSpawnGpu(GPUWorkerMixin):
@@ -169,6 +173,24 @@ class WorkerRuntimeReadinessTests(unittest.TestCase):
             self.assertEqual(len(claimed), 1)
             self.assertFalse(task_file.exists())
             self.assertTrue((gpu.processing_path / "task-1.json").exists())
+
+    def test_claim_tasks_skips_all_work_when_reserved_for_benchmark(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = MockClaimGpu(Path(tmp), runtime_state="ready_single")
+            gpu._reservation = {"reserved": True, "owner": "bench-pipeline"}
+            task = {
+                "task_id": "task-1",
+                "task_class": "llm",
+                "llm_model": "qwen2.5:7b",
+                "priority": 5,
+            }
+            task_file = gpu.queue_path / "task-1.json"
+            task_file.write_text(json.dumps(task), encoding="utf-8")
+
+            claimed = gpu.claim_tasks()
+
+            self.assertEqual(claimed, [])
+            self.assertTrue(task_file.exists())
 
     def test_split_runtime_refuses_single_gpu_task_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
