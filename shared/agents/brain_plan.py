@@ -838,6 +838,22 @@ Required JSON format:
                 if not task_def.get("depends_on"):
                     tasks_with_no_deps.append(task)
 
+        # For goal-driven plans, find the final non-foreach task for summary deps
+        compile_output_task_id = None
+        if goal_spec:
+            non_foreach_tasks = [t for t in task_defs if not t.get("foreach")]
+            if non_foreach_tasks:
+                last_task_name = non_foreach_tasks[-1]["id"]
+                for task_file in self.private_tasks_path.glob("*.json"):
+                    try:
+                        with open(task_file) as f:
+                            t = json.load(f)
+                        if t.get("batch_id") == batch_id and t.get("name") == last_task_name:
+                            compile_output_task_id = t["task_id"]
+                            break
+                    except Exception:
+                        pass
+
         # Track this batch (include paths for foreach expansion)
         batch_meta = {
             "plan": plan_dir.name,
