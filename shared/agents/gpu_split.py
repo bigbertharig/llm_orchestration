@@ -3057,7 +3057,7 @@ class GPUSplitMixin:
                 or ".runtime_owner." in res_file.name
             ):
                 continue
-            lock = FileLock(str(res_file) + ".lock", timeout=1)
+            lock = FileLock(str(res_file) + ".lock", timeout=5)
             start_runtime = None
             local_pair_prep = None
             deferred_cleanup = None
@@ -3383,8 +3383,14 @@ class GPUSplitMixin:
                                 )
             except Timeout:
                 lock_error = True
-            except Exception:
+                self.logger.warning(
+                    f"SPLIT_RESERVATION_LOCK_TIMEOUT group={res_file.stem} worker={self.name}"
+                )
+            except Exception as exc:
                 lock_error = True
+                self.logger.error(
+                    f"SPLIT_RESERVATION_ERROR group={res_file.stem} worker={self.name} error={exc}"
+                )
 
             # Execute deferred cleanup OUTSIDE the reservation lock (always, even on lock error)
             # This ensures cleanup runs even if an exception occurred after deferred_cleanup was set
@@ -3455,8 +3461,12 @@ class GPUSplitMixin:
                         reservation["error"] = str(self.last_split_runtime_error or "split runtime failed")
                     with open(res_file, "w", encoding="utf-8") as f:
                         json.dump(reservation, f, indent=2)
-            except Exception:
-                pass
+            except Exception as exc:
+                self.logger.error(
+                    f"SPLIT_POST_RUNTIME_WRITE_FAILED "
+                    f"group={start_runtime['group'].get('id','')} "
+                    f"worker={self.name} ok={ok} error={exc}"
+                )
 
             # NOTE: Do NOT call _set_split_runtime_loaded here. Status is now
             # "ready_stabilizing" and the stability gate must pass first. When the
