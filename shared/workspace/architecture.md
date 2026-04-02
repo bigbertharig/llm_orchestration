@@ -181,7 +181,12 @@ Hardware is auto-discovered by `setup.py` and stored in `config.json`. The syste
 
 Run `python setup.py` on any rig to scan hardware and generate `config.json`. See `config.template.json` for the schema.
 
-Models are stored as GGUF files on the shared drive under `/mnt/shared/models/`. The runtime backend is `llama` in `config.json`, and models are served via containerized `llama-server` (one container per loaded model).
+Models are stored as GGUF files on the shared drive under `/mnt/shared/models/` on the rig and appear as `/media/bryan/shared/models/` on the laptop. The runtime backend is `llama` in `config.json`, and models are served via containerized `llama-server` (one container per loaded model).
+
+The runtime image is an implementation detail, not an architectural constant:
+- worker/runtime ownership belongs to the orchestrator
+- the backing `llama.cpp` image may be rebuilt or replaced as model support evolves
+- benchmark and plan logic should depend on stable wrapper scripts and APIs, not on one pinned llama.cpp revision
 
 See [NETWORK_SETUP.md](NETWORK_SETUP.md) and [systems_prep.md](systems_prep.md) for rig-specific details.
 
@@ -192,21 +197,21 @@ See [NETWORK_SETUP.md](NETWORK_SETUP.md) and [systems_prep.md](systems_prep.md) 
 ```
 ┌──────────────────────────────────┐     ethernet     ┌──────────────────────────────────┐
 │       Control Plane              │                  │           GPU Rig                │
-│  • Internet access               │◄────────────────►│  • Air-gapped (no internet)      │
-│  • Runs cloud LLM (Claude Code)  │                  │  • NVIDIA GPUs (per config.json) │
-│  • Prepares plans                │                  │  • Runs brain + workers          │
-│  • Submits to shared folder      │                  │  • Executes plans                │
-│  • GitHub for version control    │                  │  • Local LLM inference (llama-server) │
-└──────────────────────────────────┘                  └──────────────────────────────────┘
-           │                                                      │
-           │  USB                                                 │ NFS mount
-           ▼                                                      │
-┌──────────────────────────────────┐                              │
-│     Shared Drive (ext4)          │◄─────────────────────────────┘
-│  Mounted on control plane        │
-│  bind-mounted → repo/shared      │
-│  NFS-exported to GPU rig         │
-└──────────────────────────────────┘
+│  • Laptop at 10.0.0.2            │◄────────────────►│  • Rig at 10.0.0.3              │
+│  • Internet access               │                  │  • NVIDIA GPUs (per config.json) │
+│  • Runs cloud LLM / Codex        │                  │  • Runs brain + workers          │
+│  • Prepares plans and code       │                  │  • Executes plans                │
+│  • Reads shared drive over NFS   │                  │  • Local LLM inference           │
+│  • GitHub for version control    │                  │  • Owns USB shared drive         │
+└──────────────────────────────────┘                  └───────────────┬──────────────────┘
+                                                                      │
+                                                                      │ USB
+                                                                      ▼
+                                                         ┌──────────────────────────────┐
+                                                         │     Shared Drive (ext4)      │
+                                                         │  Mounted locally on rig      │
+                                                         │  Exported over NFS           │
+                                                         └──────────────────────────────┘
 ```
 
 **Communication is file-based only.** No network APIs between machines. The shared drive is the sole communication channel.
@@ -215,22 +220,22 @@ See [NETWORK_SETUP.md](NETWORK_SETUP.md) and [systems_prep.md](systems_prep.md) 
 
 ## File Structure
 
-**Key insight:** The `shared/` folder lives on an external drive, bind-mounted into the git repo on the control plane, and NFS-exported to the GPU rig.
+**Key insight:** The `shared/` folder lives on the USB drive attached to the rig. The rig mounts it locally as `/mnt/shared`, exports it over NFS, and the laptop reads it as `/media/bryan/shared`.
 
 ```
-llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
+llm_orchestration/                 # Git repo on control host / laptop (~/llm_orchestration)
 ├── .claude/settings.json          # Claude Code permissions (full access, core/ denied)
 ├── .gitignore                     # Selective sync rules
 ├── requirements.txt               # Python dependencies
 │
-├── scripts/                       # RPi-only utilities
+├── scripts/                       # Operator-side utilities
 │   ├── submit.py                  # Submit a plan for execution
-│   ├── status.py                  # Check system status
+│   ├── status.py                  # Local repo status helper (not a shared rig entrypoint)
 │   ├── watch.py                   # Live monitoring
 │   └── gpu-monitor.py             # GPU benchmarking tools
 │
-└── shared/                        # External drive, bind-mounted here
-    │                              # NFS-shared to GPU rig via ethernet
+└── shared/                        # NFS-mounted view of rig-owned shared drive
+    │                              # rig path: /mnt/shared ; laptop path: /media/bryan/shared
     │
     ├── agents/                    # Agent code (GPU rig runs these)
     │   ├── brain.py               # Brain coordinator (main loop + orchestration)
@@ -278,6 +283,19 @@ llm_orchestration/                 # Git repo on RPi (~/llm_orchestration)
     ├── signals/                   # GPU agent control signals (not in git)
     └── logs/                      # Logs (synced to git for backup)
 ```
+
+## Runtime Boundary
+
+Normal runtime control path:
+- start orchestrator services from the rig side
+- load and unload worker models through orchestrator meta tasks
+- use benchmark wrappers under `~/llm_orchestration/scripts/benchmarks/` when you intentionally want benchmark mode behavior
+
+Debug-only runtime path:
+- `/mnt/shared/scripts/llama_runtime/run_runtime.sh`
+- direct `docker run llama-server ...`
+
+Those debug paths are for smoke tests and runtime isolation only. They bypass orchestrator ownership and should not be treated as the normal operating model.
 
 ---
 

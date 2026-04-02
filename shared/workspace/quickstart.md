@@ -42,6 +42,12 @@ ls ~/llm_orchestration/shared/tasks/{queue,processing,complete}/ 2>/dev/null | h
 #                   docker ps --filter name=llama-worker
 ```
 
+Notes:
+- there is no supported shared `status.py` helper under `/mnt/shared` right now
+- on the rig, prefer `/mnt/shared/...`; on the laptop, prefer `/media/bryan/shared/...`
+- when a wrapper proxies to the rig, pass shared paths that normalize cleanly to rig-visible paths
+- worker runtime ports such as `11435+` are rig-local; run direct-to-port benchmark/custom harnesses on `10.0.0.3` or through an explicit proxy/tunnel
+
 What to expect:
 - `brain.py` and GPU agents are running
 - brain model responds on its configured port
@@ -75,8 +81,14 @@ Use wrapper mode scripts only when you intentionally want that mode's startup be
 
 ```bash
 python3 ~/llm_orchestration/scripts/start_default_mode.py
-python3 ~/llm_orchestration/scripts/start_benchmark_mode.py
-python3 ~/llm_orchestration/scripts/start_custom_mode.py --brain-model ... --single-model ... --split-model ...
+python3 ~/llm_orchestration/scripts/benchmarks/start_benchmark_mode.py
+python3 ~/llm_orchestration/scripts/benchmarks/start_custom_mode.py --brain-model ... --single-model ... --split-model ...
+```
+
+Runtime preflight:
+
+```bash
+python3 ~/llm_orchestration/scripts/runtime_preflight.py --config config.benchmark.json --json
 ```
 
 Those wrappers are still orchestration entry points, not separate runtime systems.

@@ -8,6 +8,12 @@ Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 - `workspace/brain-behavior.md` (brain loop details)
 - `core/RULES.md` (immutable safety constraints)
 
+## Active Runtime Docs
+- `workspace/implement/runtime_unification_cleanup.md` (current cleanup track and next steps)
+- `workspace/implement/modular_runtime_target_system.md` (target modular system and code areas to change)
+- `shared/scripts/llama_runtime/README.md` (runtime image/build/run helpers)
+- `shared/plans/shoulders/benchmarking/README.md` (benchmark runtime usage and current runtime compatibility notes)
+
 ## Key Paths
 - `shared/agents/` code + config
 - `shared/plans/` shoulders/arms plan repos
@@ -29,6 +35,12 @@ Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 - Rig-local path convention: `/mnt/shared/...`
 - Laptop/operator path convention: `/media/bryan/shared/...`
 - CPU worker path convention: usually `/media/bryan/shared/...` (some hosts may expose `/mnt/shared/...`)
+- The same files are reached through different mount prefixes depending on where the command runs.
+
+Path rule:
+- if a command executes on the rig itself, prefer `/mnt/shared/...`
+- if a command executes on the laptop at `10.0.0.2`, prefer `/media/bryan/shared/...`
+- if a wrapper proxies work to the rig, pass shared paths that can be normalized to rig-visible paths
 
 Operational rule:
 - Scripts that run on CPU workers must resolve shared root dynamically (`/media/bryan/shared` vs `/mnt/shared`) instead of hardcoding one path.
@@ -65,6 +77,7 @@ Use the rig side for:
 - submitting batches
 - resetting GPUs / return-to-default flows
 - checking live local runtime ports and rig-local processes
+- running benchmark harnesses that talk directly to worker runtime ports
 
 The laptop side is still fine for:
 - reading shared history folders
@@ -74,6 +87,8 @@ The laptop side is still fine for:
 Rule of thumb:
 - If the command controls live runtime state, do it on `10.0.0.3`.
 - If the command only reads shared artifacts or edits code, either side is fine.
+- Worker runtime ports (`11435+`, split ports, and similar) are rig-local operator ports.
+- If a benchmark/custom harness talks directly to a worker port, run that harness on the rig side or use an explicit proxy/tunnel.
 
 ### Start The System
 
@@ -88,8 +103,8 @@ Wrapper start modes when you intentionally want them:
 
 ```bash
 python3 ~/llm_orchestration/scripts/start_default_mode.py
-python3 ~/llm_orchestration/scripts/start_benchmark_mode.py
-python3 ~/llm_orchestration/scripts/start_custom_mode.py --models qwen3.5:4b qwen2.5-coder:7b ...
+python3 ~/llm_orchestration/scripts/benchmarks/start_benchmark_mode.py
+python3 ~/llm_orchestration/scripts/benchmarks/start_custom_mode.py --models qwen3.5:4b qwen2.5-coder:7b ...
 ```
 
 ### Check The Rig
@@ -97,10 +112,16 @@ python3 ~/llm_orchestration/scripts/start_custom_mode.py --models qwen3.5:4b qwe
 ```bash
 pgrep -af "brain.py|gpu.py"
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
-python3 ~/llm_orchestration/scripts/status.py
 # Runtime-specific probe (depends on runtime_backend config):
 #   active runtime: curl -s http://127.0.0.1:<port>/v1/models
+#   health probe:    curl -s http://127.0.0.1:<port>/health
+#   containers:      docker ps --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
 ```
+
+Important:
+- do not rely on a shared `status.py` path under `/mnt/shared`; there is no supported status helper there right now
+- if docs mention `/mnt/shared/scripts/status.py`, treat that as stale and use direct probes instead
+- `python3 ~/llm_orchestration/scripts/runtime_preflight.py --config config.benchmark.json --json` is the operator preflight entrypoint for current rig-state checks
 
 Primary live log:
 
@@ -199,6 +220,10 @@ source ~/llm-orchestration-venv/bin/activate
 python3 scripts/kill_plan.py [batch_id]
 ```
 
+Rig note:
+- the shared drive does not currently expose `kill_plan.py` under `/mnt/shared/scripts/`
+- use the repo copy from `~/llm_orchestration/scripts/kill_plan.py` on the rig
+
 Useful options:
 - `--keep-workers`
 - `--keep-models`
@@ -212,7 +237,7 @@ which queues one `load_llm` meta task at a time, waits for completion, then
 queues the next.
 
 ```bash
-python3 ~/llm_orchestration/scripts/start_custom_mode.py \
+python3 ~/llm_orchestration/scripts/benchmarks/start_custom_mode.py \
   --models qwen3.5:4b qwen2.5-coder:7b qwen3.5:9b-q3km mistral:7b-instruct deepseek-r1:7b \
   --force-unload-first
 ```
@@ -223,9 +248,21 @@ placement — do not try to replicate this manually.
 
 Key scripts in the chain:
 - `~/llm_orchestration/scripts/benchmarks/start_custom_mode.py` — laptop-side entry point
+- `~/llm_orchestration/scripts/runtime_preflight.py` — operator preflight entry point
 - `shared/scripts/prepare_llm_runtimes.py` — rig-side, sequential meta task submission
+- `shared/scripts/runtime_preflight.py` — rig-side cleanup/preflight checks
 - `shared/agents/gpu_tasks.py` — worker-side task claiming
 - `shared/agents/gpu_llama.py` — worker-side container lifecycle
+
+Debug-only direct smoke path:
+- `/mnt/shared/scripts/llama_runtime/run_runtime.sh` on the rig
+- use this only to isolate runtime/container failures or validate GGUF compatibility
+- do not leave direct runtime containers running alongside orchestrator-owned worker ports
+
+Known runtime compatibility issue:
+- the current `llama-runtime:sm61-sm86` build does not load Gemma 4 GGUF files
+- observed failure on April 2, 2026: `unknown model architecture: 'gemma4'`
+- this blocks both worker-tier and brain-tier Gemma 4 smoke runs until the runtime image is updated
 
 ### Reset A GPU
 

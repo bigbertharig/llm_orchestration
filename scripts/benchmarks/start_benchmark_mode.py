@@ -17,6 +17,7 @@ REMOTE_HOST = "gpu"
 REMOTE_BASE_CONFIG = "/mnt/shared/agents/config.json"
 REMOTE_BENCH_CONFIG = "/mnt/shared/agents/config.benchmark.json"
 REMOTE_STARTUP = "/mnt/shared/agents/startup.py"
+REMOTE_PREFLIGHT = "/mnt/shared/scripts/runtime_preflight.py"
 REMOTE_PYTHON = "/home/bryan/llm-orchestration-venv/bin/python"
 REMOTE_LOG = "/mnt/shared/logs/startup-benchmark.log"
 
@@ -55,6 +56,14 @@ cfg["auto_default_idle_seconds"] = 999999
 dst.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 print(dst)
 PY
+{REMOTE_PYTHON} {REMOTE_PREFLIGHT} \
+  --shared-root /mnt/shared \
+  --config config.benchmark.json \
+  --clear-orphan-queue-locks \
+  --cleanup-stale-runtime-meta \
+  --cleanup-test-runtime-containers \
+  --fail-on-active-processing \
+  --json
 pkill -f /mnt/shared/agents/brain.py || true
 pkill -f /mnt/shared/agents/gpu.py || true
 pkill -f /mnt/shared/agents/startup.py || true

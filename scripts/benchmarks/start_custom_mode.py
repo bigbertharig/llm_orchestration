@@ -36,6 +36,16 @@ def main() -> int:
     ap.add_argument("--force-unload-first", action="store_true",
                      help="Unload all currently loaded workers before loading")
     ap.add_argument("--strict-processing-empty", action="store_true")
+    ap.add_argument(
+        "--no-cleanup-stale-runtime-meta",
+        action="store_true",
+        help="Do not auto-clean stale runtime meta tasks before load prep.",
+    )
+    ap.add_argument(
+        "--no-cleanup-test-runtime-containers",
+        action="store_true",
+        help="Do not auto-remove unmanaged test-* runtime containers before load prep.",
+    )
     ap.add_argument("--load-timeout-seconds", type=int, default=300)
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--json", action="store_true")
@@ -85,12 +95,18 @@ def main() -> int:
         "--shared-root", args.shared_root,
         "--config", args.config,
         "--clear-orphan-queue-locks",
+        "--cleanup-stale-runtime-meta",
+        "--cleanup-test-runtime-containers",
         "--load-timeout-seconds", str(args.load_timeout_seconds),
         "--models",
     ] + args.models
 
     if args.strict_processing_empty:
         prep_cmd.append("--strict-processing-empty")
+    if args.no_cleanup_stale_runtime_meta:
+        prep_cmd.remove("--cleanup-stale-runtime-meta")
+    if args.no_cleanup_test_runtime_containers:
+        prep_cmd.remove("--cleanup-test-runtime-containers")
     if args.force_unload_first:
         prep_cmd.append("--force-unload-first")
 
