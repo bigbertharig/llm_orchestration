@@ -11,6 +11,19 @@ import sys
 REMOTE_HOST = "gpu"
 REMOTE_PYTHON = "/home/bryan/llm-orchestration-venv/bin/python"
 REMOTE_SCRIPT = "/mnt/shared/scripts/runtime_preflight.py"
+SHARED_ALIASES = (
+    "/mnt/shared",
+    "/home/bryan/llm_orchestration/shared",
+    "/media/bryan/shared",
+)
+
+
+def _to_runtime_shared_path(path_text: str) -> str:
+    value = str(path_text)
+    for prefix in SHARED_ALIASES:
+        if value == prefix or value.startswith(prefix + "/"):
+            return "/mnt/shared" + value[len(prefix):]
+    return value
 
 
 def main() -> int:
@@ -33,8 +46,8 @@ def main() -> int:
         REMOTE_PYTHON,
         REMOTE_SCRIPT,
         "--shared-root", args.shared_root,
-        "--config", args.config,
-        "--catalog", args.catalog,
+        "--config", _to_runtime_shared_path(args.config),
+        "--catalog", _to_runtime_shared_path(args.catalog),
         "--runtime-meta-stale-seconds", str(args.runtime_meta_stale_seconds),
     ]
     if args.clear_orphan_queue_locks:

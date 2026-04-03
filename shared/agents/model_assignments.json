@@ -1,0 +1,35 @@
+{
+  "_comment": "Runtime model assignments by GPU role. The brain uses this to select which model to load. The catalog (models.catalog.json) is the full inventory of available models; this file defines what should actually run. First entry in each list is the default. Future: brain picks alternatives based on task-model fit from benchmarking data.",
+  "schema_version": 1,
+
+  "single_gpu": {
+    "_comment": "Models for individual GPU workers (gpu-1 through gpu-5). Default is loaded on startup and when tasks don't specify a model.",
+    "default": "qwen2.5-coder:7b",
+    "alternatives": [
+      {
+        "id": "deepseek-r1:7b",
+        "notes": "Stronger reasoning, slower. Good for score_person, evaluate tasks."
+      },
+      {
+        "id": "qwen3.5:4b",
+        "notes": "Lighter model, faster inference. Good for simple extraction tasks."
+      },
+      {
+        "id": "qwen3.5:9b-q3km",
+        "notes": "Larger but fits single GPU with Q3_K_M quant. Better quality than 7b for complex tasks."
+      }
+    ]
+  },
+
+  "split_gpu": {
+    "_comment": "Models requiring two GPUs in a split pair (pair_1_3 or pair_4_5).",
+    "default": "qwen2.5-coder:14b",
+    "alternatives": []
+  },
+
+  "brain": {
+    "_comment": "Model for the brain agent (gpu-0, 3090). Handles monitoring, evaluation, goal planning.",
+    "default": "qwen2.5:32b",
+    "alternatives": []
+  }
+}

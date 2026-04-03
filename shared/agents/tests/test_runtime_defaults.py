@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from brain_core import (
     resolve_llama_runtime_profile,
+    resolve_llama_runtime_image,
     resolve_auto_default_target,
     resolve_runtime_base_url,
     resolve_runtime_chat_endpoint,
@@ -86,6 +87,20 @@ class RuntimeDefaultTargetTests(unittest.TestCase):
         runtime_base = resolve_runtime_base_url({})
 
         self.assertEqual(runtime_base, "http://localhost:11434")
+
+    def test_runtime_image_prefers_explicit_config(self):
+        image = resolve_llama_runtime_image(
+            {
+                "llama_runtime_image": "llama-runtime:sm61-sm86-gemma4",
+            }
+        )
+
+        self.assertEqual(image, "llama-runtime:sm61-sm86-gemma4")
+
+    def test_runtime_image_defaults_when_missing(self):
+        image = resolve_llama_runtime_image({})
+
+        self.assertEqual(image, "llama-runtime:sm61-sm86")
 
     def test_runtime_chat_endpoint_uses_llama_route(self):
         endpoint = resolve_runtime_chat_endpoint(

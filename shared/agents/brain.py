@@ -90,6 +90,7 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
         self.model_catalog = self._load_model_catalog(config_dir)
         self.model_tier_by_id = self._build_model_tier_map(self.model_catalog)
         self.model_meta_by_id = self._build_model_meta_map(self.model_catalog)
+        self.model_assignments = self._load_model_assignments(config_dir)
         self.default_llm_min_tier = int(
             self.model_catalog.get("default_llm_min_tier", DEFAULT_LLM_MIN_TIER)
         )

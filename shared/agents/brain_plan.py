@@ -18,6 +18,21 @@ from brain_constants import PRIORITY_TIER_TO_VALUE, VALID_TASK_CLASSES, VALID_VR
 
 
 class BrainPlanMixin:
+    def _is_unresolved_plan_variable(self, value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        text = value.strip()
+        return text.startswith("{") and text.endswith("}") and len(text) > 2
+
+    def _substitute_plan_variables(self, value: Any, variables: Dict[str, str]) -> Any:
+        """Replace {VARS} in plan string fields while preserving non-strings."""
+        if not isinstance(value, str):
+            return value
+        resolved = value
+        for var, replacement in variables.items():
+            resolved = resolved.replace(var, replacement)
+        return resolved
+
     def _batch_display_name(self, plan_name: str, config: Dict[str, Any]) -> str:
         base = str(plan_name or "").strip() or "unknown_plan"
         repo_path = str((config or {}).get("REPO_PATH", "") or "").strip()
@@ -442,13 +457,13 @@ Required JSON format:
                 if task.get("task_class") == "llm":
                     if task.get("llm_model"):
                         catalog_tier = self.model_tier_by_id.get(task["llm_model"])
-                        if catalog_tier is None:
+                        if catalog_tier is None and not self._is_unresolved_plan_variable(task["llm_model"]):
                             self.logger.warning(
                                 f"Unknown llm_model '{task['llm_model']}' for {task_id}; will fail at task creation"
                             )
-                        elif task.get("llm_min_tier") is None:
+                        elif catalog_tier is not None and task.get("llm_min_tier") is None:
                             task["llm_min_tier"] = catalog_tier
-                        if not task.get("llm_placement"):
+                        if not task.get("llm_placement") and catalog_tier is not None:
                             task["llm_placement"] = str(
                                 self.model_meta_by_id.get(task["llm_model"], {}).get("placement", "")
                             ) or None
@@ -759,9 +774,10 @@ Required JSON format:
         tasks_with_no_deps = []
         for task_def in task_defs:
             # Substitute all variables in command
-            command = task_def["command"]
-            for var, value in variables.items():
-                command = command.replace(var, value)
+            command = self._substitute_plan_variables(task_def["command"], variables)
+            llm_min_tier = self._substitute_plan_variables(task_def.get("llm_min_tier"), variables)
+            llm_model = self._substitute_plan_variables(task_def.get("llm_model"), variables)
+            llm_placement = self._substitute_plan_variables(task_def.get("llm_placement"), variables)
 
             vram_estimate_mb, vram_estimate_source = self._resolve_task_vram_estimate(task_def, command)
 
@@ -776,9 +792,9 @@ Required JSON format:
                 task_class=task_def.get("task_class"),
                 vram_estimate_mb=vram_estimate_mb,
                 vram_estimate_source=vram_estimate_source,
-                llm_min_tier=task_def.get("llm_min_tier"),
-                llm_model=task_def.get("llm_model"),
-                llm_placement=task_def.get("llm_placement"),
+                llm_min_tier=llm_min_tier,
+                llm_model=llm_model,
+                llm_placement=llm_placement,
                 batch_priority=batch_priority_label,
                 preemptible=batch_preemptible,
             )
@@ -789,9 +805,7 @@ Required JSON format:
             # Preserve foreach spec for later expansion
             if task_def.get("foreach"):
                 # Substitute variables in foreach path
-                foreach_spec = task_def["foreach"]
-                for var, value in variables.items():
-                    foreach_spec = foreach_spec.replace(var, value)
+                foreach_spec = self._substitute_plan_variables(task_def["foreach"], variables)
                 task["foreach"] = foreach_spec
                 task["batch_size"] = max(1, int(task_def.get("batch_size", 1)))
                 # Mark goal-driven foreach tasks for incremental expansion
@@ -802,9 +816,9 @@ Required JSON format:
                     "command": command,
                     "executor": task_def.get("executor", "worker"),
                     "task_class": task_def.get("task_class"),
-                    "llm_min_tier": task_def.get("llm_min_tier"),
-                    "llm_model": task_def.get("llm_model"),
-                    "llm_placement": task_def.get("llm_placement"),
+                    "llm_min_tier": llm_min_tier,
+                    "llm_model": llm_model,
+                    "llm_placement": llm_placement,
                     "priority": batch_priority_value,
                     "depends_on": list(task_def.get("depends_on", [])),
                 }
@@ -838,12 +852,24 @@ Required JSON format:
                 if not task_def.get("depends_on"):
                     tasks_with_no_deps.append(task)
 
-        # For goal-driven plans, find the final non-foreach task for summary deps
+        # For goal-driven plans, find the compilation task (first non-foreach
+        # task that depends on a foreach task).  This is the task released by
+        # _release_goal_final_task() once the goal is met/exhausted.
         compile_output_task_id = None
         if goal_spec:
-            non_foreach_tasks = [t for t in task_defs if not t.get("foreach")]
-            if non_foreach_tasks:
-                last_task_name = non_foreach_tasks[-1]["id"]
+            foreach_task_ids = {t["id"] for t in task_defs if t.get("foreach")}
+            compile_task_name = None
+            for t in task_defs:
+                if t.get("foreach"):
+                    continue
+                deps = t.get("depends_on") or []
+                if isinstance(deps, str):
+                    deps = [deps]
+                if any(d in foreach_task_ids for d in deps):
+                    compile_task_name = t["id"]
+                    break
+            last_task_name = compile_task_name
+            if last_task_name:
                 for task_file in self.private_tasks_path.glob("*.json"):
                     try:
                         with open(task_file) as f:
@@ -946,6 +972,7 @@ Required JSON format:
                 "max_validations_per_cycle": max_validations_per_cycle,
                 "discovery_round_cap": goal_round_cap,
                 "discovery_rounds_generated": 1,
+                "discovery_rounds_completed": 0,
                 # Round 1 tasks are created by plan parsing above; keep discovery
                 # idle so prefill can enqueue rounds 2..N immediately on first loop.
                 "discovery_in_progress": False,

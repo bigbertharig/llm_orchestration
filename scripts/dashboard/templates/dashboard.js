@@ -1037,7 +1037,6 @@ function renderWorkerTabs(workers) {
 function renderWorkerTable(workers, type) {
   if (type === 'gpu') {
     const splitGroupTotals = {};
-    const splitGroupHoldings = {};
     workers.forEach((w) => {
       const gid = String(w.runtime_group_id || '').trim();
       const placement = String(w.runtime_placement || '').trim();
@@ -1045,34 +1044,19 @@ function renderWorkerTable(workers, type) {
       if (!splitGroupTotals[gid]) {
         splitGroupTotals[gid] = { used: 0, total: 0, members: 0 };
       }
-      if (!splitGroupHoldings[gid]) {
-        splitGroupHoldings[gid] = new Set();
-      }
       if (w.vram_used_mb !== null && w.vram_used_mb !== undefined) {
         splitGroupTotals[gid].used += Number(w.vram_used_mb) || 0;
       }
       if (w.vram_total_mb !== null && w.vram_total_mb !== undefined) {
         splitGroupTotals[gid].total += Number(w.vram_total_mb) || 0;
       }
-      (w.holding || []).forEach((h) => {
-        const text = String(h || '').trim();
-        if (text) splitGroupHoldings[gid].add(text);
-      });
       splitGroupTotals[gid].members += 1;
     });
     const stateLabel = (w) => {
       const suite = String(w.active_suite || '').trim();
-      const placement = String(w.runtime_placement || '').trim();
-      const gid = String(w.runtime_group_id || '').trim();
-      if (suite) {
-        if (placement === 'split_gpu' && gid) {
-          return `${suite} [LINKED ${gid}]`;
-        }
-        return suite;
-      }
-      if (placement === 'split_gpu' && gid) {
-        return `LINKED (${gid})`;
-      }
+      const idx = String(w.active_task_index || '').trim();
+      if (suite && idx) return `${suite} ${idx}`;
+      if (suite) return suite;
       return fmt(w.state);
     };
     const vram = (w) => {
@@ -1091,23 +1075,13 @@ function renderWorkerTable(workers, type) {
       const activeLabel = activeTask
         ? (activeProgress ? `${activeTask} (${activeProgress})` : activeTask)
         : '';
-      const gid = String(w.runtime_group_id || '').trim();
-      const placement = String(w.runtime_placement || '').trim();
-      if (!gid || placement !== 'split_gpu') {
-        const items = (w.holding || [])
-          .map((h) => String(h || '').trim())
-          .filter(Boolean);
-        const merged = activeLabel
-          ? [activeLabel, ...items.filter((x) => x !== activeLabel)]
-          : items;
-        return truncCell(merged.slice(0,2).join(' | ') || '-', 64, true);
-      }
-      const groupItems = [...(splitGroupHoldings[gid] || new Set())].slice(0, 3);
-      const filteredGroup = activeLabel ? groupItems.filter((x) => x !== activeLabel) : groupItems;
-      const parts = [];
-      if (activeLabel) parts.push(activeLabel);
-      if (filteredGroup.length) parts.push(`GROUP ${filteredGroup.join(' | ')}`);
-      return truncCell(parts.join(' | ') || 'GROUP -', 96, true);
+      const items = (w.holding || [])
+        .map((h) => String(h || '').trim())
+        .filter(Boolean);
+      const merged = activeLabel
+        ? [activeLabel, ...items.filter((x) => x !== activeLabel)]
+        : items;
+      return truncCell(merged.slice(0,2).join(' | ') || '-', 64, true);
     };
     const rows = workers.map(w => [
       fmt(w.name),

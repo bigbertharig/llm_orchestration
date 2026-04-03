@@ -87,7 +87,16 @@ Current next steps:
 New findings during `return_default.py` integration:
 - fixed: `_read_gpu_heartbeat()` had unreachable code and effectively returned `None` for all GPUs
 - fixed: `runtime_preflight.py` was flagging expected startup listeners as conflicts during managed `load_llm` transitions
+- fixed: repo-side `runtime_preflight.py` now normalizes shared-path aliases like `/home/bryan/llm_orchestration/shared/...` to rig paths before proxying
+- fixed: `brain_plan.py` now substitutes plan variables into `llm_model`, `llm_min_tier`, and `llm_placement` instead of only command strings
 - fixed: `return_default.py` can now fall back to rig-side runtime probe results when heartbeat `model_loaded` state lags behind reality
 - fixed: `return_default.py` no longer uses a stale fixed `90s` wait budget by default; it derives wait time from the configured single-model load timeout/profile
-- remaining live issue: default startup load for `qwen2.5-coder:7b` on `gpu-2` is materially slower than the original wrapper assumptions and should be treated as a real system characteristic or tuned down
-- likely next bug-finder after this: run a `github_analyzer` smoke batch, since it exercises real submission, sequencing, and verifier/runtime behavior instead of just model loads
+- fixed: startup enqueue no longer duplicates `startup_single_default` when a fresh meta heartbeat exists without a sibling task json
+- current live blocker: after the parser fix, `github_analyzer` submission no longer dies on unknown `{WORKER_MODEL}` placeholders, but submission is still gated by the default startup warm load on `gpu-2`
+- current live blocker details:
+  - `startup_single_default` task `ee96b2e6-9820-497a-bb89-0ee43e3e9657`
+  - worker state remains `loading_single`
+  - `llama-worker-gpu-2` listens on `127.0.0.1:11436` and returns HTTP `503 {"message":"Loading model"}`
+  - after >2 minutes, docker logs still stop at `load_tensors` with no ready transition
+  - GPU 2 shows ~4240 MiB used, so this looks like a very slow or wedged readiness path rather than an immediate crash
+- next investigation after current code fixes: determine whether default startup should wait for hot-worker readiness at all, or whether submit paths should proceed while startup warm loads continue asynchronously

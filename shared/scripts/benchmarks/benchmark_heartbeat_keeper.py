@@ -176,9 +176,7 @@ def _container_host_port(container_name: str) -> int | None:
             return int(port_str)
     except Exception:
         pass
-    # Fallback: check -p flag from container name patterns
-    # llama-gpu2 -> port 11436, llama-split-test -> port 11437, etc.
-    # Better: check published ports
+    # Fallback: check published ports
     try:
         r = subprocess.run(
             ["docker", "port", container_name],
@@ -190,6 +188,11 @@ def _container_host_port(container_name: str) -> int | None:
                 return int(m.group(1))
     except Exception:
         pass
+    # Fallback: extract --port from container command args (for --network host containers)
+    cmd = _container_full_cmd(container_name)
+    m = re.search(r"--port\s+(\d+)", cmd)
+    if m:
+        return int(m.group(1))
     return None
 
 
@@ -232,38 +235,228 @@ def _container_gpu_ids(container_name: str) -> list:
     return []
 
 
-def get_benchmark_progress(container_name: str) -> dict | None:
-    """Try to extract progress info from container logs."""
+def _docker_logs_tail(container_name: str, lines: int = 20) -> str:
+    """Get the last N lines of container logs."""
     try:
         r = subprocess.run(
-            ["docker", "logs", "--tail", "5", container_name],
+            ["docker", "logs", "--tail", str(lines), container_name],
             capture_output=True, text=True, timeout=5,
         )
-        output = r.stdout + r.stderr
-        # Look for progress patterns like "43%|" or "459/2700"
-        progress = {}
-        for line in reversed(output.splitlines()):
-            # Percentage pattern
-            pct_match = re.search(r"(\d+)%\|", line)
-            if pct_match and "percent" not in progress:
-                progress["percent"] = int(pct_match.group(1))
-            # Fraction pattern
-            frac_match = re.search(r"(\d+)/(\d+)", line)
-            if frac_match and "current" not in progress:
-                progress["current"] = int(frac_match.group(1))
-                progress["total"] = int(frac_match.group(2))
-            # Running task pattern
-            task_match = re.search(r"Running (?:task: )?(\w+)", line)
-            if task_match and "current_task" not in progress:
-                progress["current_task"] = task_match.group(1)
-            if progress:
-                break
-        # Check for completion
-        if "COMPLETE" in output:
-            progress["status"] = "completed"
-        return progress if progress else None
+        return r.stdout + r.stderr
     except Exception:
+        return ""
+
+
+def _parse_task_position(logs: str, tasks_requested: list[str]) -> tuple[str, int | None, int | None]:
+    """Parse current task and position from log markers.
+
+    Returns (current_task, task_index, task_total).
+    task_index is 1-based (completed + 1).
+    """
+    running_tasks: list[str] = []
+    done_tasks: set[str] = set()
+    for m in re.finditer(r"--- Running task:\s*(\S+)\s*---", logs):
+        running_tasks.append(m.group(1))
+    for m in re.finditer(r"---\s*(\S+)\s+done\s*---", logs):
+        done_tasks.add(m.group(1))
+
+    current_task = running_tasks[-1] if running_tasks else ""
+    task_total = len(tasks_requested) if tasks_requested else (len(set(running_tasks)) or None)
+
+    if current_task and task_total:
+        # Index = number of completed tasks + 1
+        if tasks_requested:
+            try:
+                task_index = tasks_requested.index(current_task) + 1
+            except ValueError:
+                task_index = len(done_tasks) + 1
+        else:
+            task_index = len(done_tasks) + 1
+        return current_task, task_index, task_total
+
+    return current_task, None, task_total
+
+
+def _parse_sub_progress(logs: str, suite: str | None) -> tuple[int | None, int | None]:
+    """Parse sub-task progress from container logs.
+
+    Returns (sub_current, sub_total).
+    """
+    if not logs:
+        return None, None
+
+    # reasoning / knowledge: "Requesting API: X/Y"
+    req_current, req_total = None, None
+    for m in re.finditer(r"Requesting API:[^\n\r]*?(\d+)/(\d+)", logs):
+        try:
+            req_current = int(m.group(1))
+            req_total = int(m.group(2))
+        except Exception:
+            continue
+    if req_current is not None and req_total is not None:
+        return min(req_current, req_total), req_total
+
+    # code: "Codegen: HumanEval/76" or "Codegen: Mbpp/267"
+    codegen_match = None
+    for m in re.finditer(r"Codegen:\s*(\w+)/(\d+)", logs):
+        codegen_match = m
+    if codegen_match:
+        task_name = codegen_match.group(1).lower()
+        idx = int(codegen_match.group(2))
+        # Known totals for common code benchmarks
+        known_totals = {"humaneval": 164, "mbpp": 500}
+        total = known_totals.get(task_name)
+        if total:
+            return min(idx, total), total
+        return idx, None
+
+    # knowledge: progress bar "X/Y" near "%|"
+    for line in reversed(logs.splitlines()):
+        if "%|" in line:
+            frac = re.search(r"(\d+)/(\d+)", line)
+            if frac:
+                return int(frac.group(1)), int(frac.group(2))
+
+    return None, None
+
+
+# Cache for campaign status to avoid re-scanning every heartbeat cycle
+_CAMPAIGN_CACHE: dict[str, tuple[float, dict]] = {}
+_CAMPAIGN_CACHE_TTL = 30.0  # seconds
+
+
+def _find_campaign_position(container_name: str) -> tuple[int | None, int | None]:
+    """Find campaign step position for this container.
+
+    Searches campaign status.json files for a step whose run_name or suite
+    matches the container. Returns (step_index, total_steps) 1-based,
+    or (None, None) for non-campaign runs.
+    """
+    import glob as glob_mod
+    campaign_root = Path("/mnt/shared/logs/benchmarks/campaigns/history")
+    if not campaign_root.exists():
+        return None, None
+
+    # Extract suite type from container name for matching
+    container_suite = None
+    for prefix in ("bench-reasoning", "bench-code", "bench-pipeline", "bench-knowledge"):
+        if prefix in container_name:
+            container_suite = prefix
+            break
+
+    if not container_suite:
+        return None, None
+
+    # Get container's full command to match run_name
+    full_cmd = _container_full_cmd(container_name)
+
+    now = time.time()
+    for status_path in campaign_root.glob("*/*/status.json"):
+        cache_key = str(status_path)
+        cached = _CAMPAIGN_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < _CAMPAIGN_CACHE_TTL:
+            status = cached[1]
+        else:
+            try:
+                with open(status_path) as f:
+                    status = json.load(f)
+                _CAMPAIGN_CACHE[cache_key] = (now, status)
+            except Exception:
+                continue
+
+        if not isinstance(status, dict):
+            continue
+        state = str(status.get("state") or "").lower()
+        if state in ("completed", "failed", "cancelled"):
+            continue
+
+        steps = status.get("steps")
+        if not isinstance(steps, list) or not steps:
+            continue
+
+        # Check worker port match
+        worker_info = status.get("worker") if isinstance(status.get("worker"), dict) else {}
+        worker_port = worker_info.get("port")
+        # Try matching via port in container command
+        port_in_cmd = re.search(r"localhost:(\d+)", full_cmd)
+        cmd_port = int(port_in_cmd.group(1)) if port_in_cmd else None
+
+        if worker_port and cmd_port and int(worker_port) != cmd_port:
+            continue
+
+        current_step = str(status.get("current_step") or "")
+        enabled_steps = [s for s in steps if s.get("enabled", True)]
+        total = len(enabled_steps)
+
+        for i, step in enumerate(enabled_steps):
+            step_suite = str(step.get("suite") or "")
+            step_id = str(step.get("id") or "")
+            step_state = str(step.get("state") or "").lower()
+            if step_suite == container_suite or step_id == current_step:
+                if step_state == "running" or step_id == current_step:
+                    return i + 1, total
+
+    return None, None
+
+
+def get_benchmark_progress(container_name: str) -> dict | None:
+    """Extract 3-level benchmark progress from a container.
+
+    Returns dict with:
+    - suite: benchmark suite type (reasoning, code, pipeline, knowledge)
+    - campaign_step/campaign_total: position in campaign sequence (or None)
+    - current_task/task_index/task_total: position within suite
+    - sub_current/sub_total: item-level progress within current task
+    - limit: --limit value from container args
+    - status: "running" or "completed"
+    """
+    # 1. Get suite type from container name
+    suite = None
+    for prefix in ("bench-reasoning", "bench-code", "bench-pipeline", "bench-knowledge"):
+        if prefix in container_name:
+            suite = prefix.replace("bench-", "")
+            break
+    if not suite:
         return None
+
+    # 2. Get tasks_requested and limit from container args
+    full_cmd = _container_full_cmd(container_name)
+    tasks_requested: list[str] = []
+    tasks_match = re.search(r"--tasks\s+([^\s\]]+)", full_cmd)
+    if tasks_match:
+        tasks_requested = [t.strip() for t in tasks_match.group(1).split(",") if t.strip()]
+
+    limit: int | None = None
+    limit_match = re.search(r"--limit\s+(\d+)", full_cmd)
+    if limit_match:
+        limit = int(limit_match.group(1))
+
+    # 3. Parse container logs for current task + progress
+    logs = _docker_logs_tail(container_name, 20)
+
+    current_task, task_index, task_total = _parse_task_position(logs, tasks_requested)
+    sub_current, sub_total = _parse_sub_progress(logs, suite)
+
+    # 4. Check for campaign membership
+    campaign_step, campaign_total = _find_campaign_position(container_name)
+
+    status = "running"
+    if "COMPLETE" in logs:
+        status = "completed"
+
+    return {
+        "suite": suite,
+        "campaign_step": campaign_step,
+        "campaign_total": campaign_total,
+        "tasks_requested": tasks_requested,
+        "current_task": current_task,
+        "task_index": task_index,
+        "task_total": task_total,
+        "sub_current": sub_current,
+        "sub_total": sub_total,
+        "limit": limit,
+        "status": status,
+    }
 
 
 def build_active_tasks(containers: dict, gpu_id: int) -> list:
@@ -325,6 +518,7 @@ def update_heartbeat(gpu_id: int, gpus_dir: Path, gpu_stats: dict,
     hb["cpu_temp_c"] = cpu_temp
     hb["active_tasks"] = active_tasks
     hb["active_workers"] = len(active_tasks)
+    hb["state"] = "benchmark" if active_tasks else "idle"
 
     with open(hb_path, "w") as f:
         json.dump(hb, f, indent=2)

@@ -29,6 +29,7 @@ from gpu_constants import (
     SINGLE_META_TIMEOUT_SECONDS,
 )
 from brain_core import resolve_llama_runtime_profile, resolve_model_search_roots
+from brain_core import resolve_llama_runtime_image
 
 # Path to runtime helper scripts.
 # Primary: shared drive (accessible from rig via NFS).
@@ -36,9 +37,6 @@ from brain_core import resolve_llama_runtime_profile, resolve_model_search_roots
 _SCRIPTS_DIR_SHARED = Path("/mnt/shared/scripts/llama_runtime")
 _SCRIPTS_DIR_REPO = Path(__file__).resolve().parent.parent.parent / "scripts" / "llama_runtime"
 _SCRIPTS_DIR = _SCRIPTS_DIR_SHARED if _SCRIPTS_DIR_SHARED.exists() else _SCRIPTS_DIR_REPO
-
-# Default image tag for the dedicated llama-server runtime image
-LLAMA_IMAGE_TAG = "llama-runtime:sm61-sm86"
 
 # Readiness probe settings
 LLAMA_READINESS_TIMEOUT_SECONDS = SINGLE_META_TIMEOUT_SECONDS
@@ -292,6 +290,24 @@ class GPULlamaMixin:
                 f"health checks, stopping container and going cold"
             )
             try:
+                recovering_model = str(self.loaded_model or "").strip()
+                thermal_pause_active = bool(getattr(self, "thermal_pause_active", False))
+                benchmark_reserved = False
+                try:
+                    benchmark_reserved = bool(self._is_benchmark_reserved())
+                except Exception:
+                    benchmark_reserved = False
+                thermal_recovery_mode = bool(
+                    thermal_pause_active and benchmark_reserved and recovering_model
+                )
+                if thermal_recovery_mode:
+                    self._schedule_thermal_runtime_recovery(
+                        recovering_model,
+                        reason="llama_health_recovery",
+                    )
+                else:
+                    self._clear_thermal_runtime_recovery("non_thermal_health_recovery")
+
                 self.stop_llama()
                 self.runtime_consecutive_failures = 0
                 self.runtime_healthy = True
@@ -304,7 +320,11 @@ class GPULlamaMixin:
                 self.runtime_api_base = self._llama_api_base()
                 self._set_runtime_state(
                     RUNTIME_STATE_COLD,
-                    phase="llama_health_recovery",
+                    phase=(
+                        "llama_health_recovery_thermal_grace"
+                        if thermal_recovery_mode
+                        else "llama_health_recovery"
+                    ),
                 )
                 self.logger.info("llama-server stopped after health failures, GPU is cold")
             except Exception as e:
@@ -448,6 +468,7 @@ class GPULlamaMixin:
                 "--model", gguf_path,
                 "--port", str(self.port),
                 "--gpus", f"device={self.gpu_id}",
+                "--image", resolve_llama_runtime_image(self.config),
                 "--ctx-size", str(profile.get("ctx_size", self.worker_num_ctx)),
                 "--n-gpu-layers", str(profile.get("n_gpu_layers", -1)),
                 "--batch-size", str(profile.get("batch_size", 512)),
@@ -457,6 +478,11 @@ class GPULlamaMixin:
                 cmd.extend(["--threads", str(profile["threads"])])
             if profile.get("tensor_split"):
                 cmd.extend(["--tensor-split", str(profile["tensor_split"])])
+            # OOM protection: Docker memory limits from model profile
+            if profile.get("memory_limit"):
+                cmd.extend(["--memory-limit", str(profile["memory_limit"])])
+            if profile.get("memory_swap"):
+                cmd.extend(["--memory-swap", str(profile["memory_swap"])])
             for extra_arg in profile.get("extra_args", []):
                 cmd.extend(["--extra-arg", str(extra_arg)])
 

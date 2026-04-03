@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 import requests
 from filelock import FileLock, Timeout
 
-from brain_core import resolve_llama_runtime_profile
+from brain_core import resolve_llama_runtime_profile, resolve_llama_runtime_image
 from gpu_constants import (
     ATTESTATION_MISS_HARD_FAIL_THRESHOLD,
     ATTESTATION_MISS_SOFT_FAIL_THRESHOLD,
@@ -1877,6 +1877,7 @@ class GPUSplitMixin:
                     "--model", gguf_path,
                     "--port", str(port),
                     "--gpus", f"device={','.join(member_gpu_ids)}",
+                    "--image", resolve_llama_runtime_image(self.config),
                     "--ctx-size", str(profile.get("ctx_size", self.worker_num_ctx)),
                     "--n-gpu-layers", str(profile.get("n_gpu_layers", -1)),
                     "--batch-size", str(profile.get("batch_size", 512)),

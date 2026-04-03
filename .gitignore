@@ -62,6 +62,7 @@ shared/logs/
 
 # SYNC: Workspace (docs, ideas, human escalations)
 !shared/workspace/
+shared/workspace/google.md
 
 # NO SYNC: Runtime state
 # shared/brain/         - runtime state, private tasks

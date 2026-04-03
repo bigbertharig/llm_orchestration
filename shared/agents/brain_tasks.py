@@ -207,6 +207,10 @@ class BrainTaskQueueMixin:
 
     def check_and_release_tasks(self):
         """Check private tasks and release any whose dependencies are met."""
+        # Release system startup tasks (not part of any batch).
+        # These use task_id in depends_on, not task names.
+        self._release_system_startup_tasks()
+
         for batch_id in list(self.active_batches.keys()):
             satisfied = self.get_satisfied_task_ids(batch_id)
             private_tasks = self.get_private_tasks(batch_id)
@@ -304,6 +308,38 @@ class BrainTaskQueueMixin:
             # Check if batch is complete (no private tasks, no public/processing tasks)
             if all_released and len(private_tasks) > 0:
                 self._check_batch_completion(batch_id)
+
+    def _release_system_startup_tasks(self):
+        """Release system startup tasks from private queue when dependencies complete.
+
+        Startup tasks use batch_id='system' and depend on each other by task_id.
+        Check if the dependency task_id exists in the complete directory.
+        """
+        for task_file in self.private_tasks_path.glob("*.json"):
+            try:
+                with open(task_file) as f:
+                    task = json.load(f)
+                if task.get("batch_id") != "system":
+                    continue
+                deps = task.get("depends_on", [])
+                deps_met = True
+                for dep_id in deps:
+                    dep_str = str(dep_id or "").strip()
+                    if not dep_str:
+                        continue
+                    # Dependency satisfied if task_id is in complete (not in queue or processing)
+                    if not (self.complete_path / f"{dep_str}.json").exists():
+                        deps_met = False
+                        break
+                if deps_met:
+                    task_file.unlink()
+                    self.save_to_public(task)
+                    self.logger.info(
+                        f"[STARTUP_RELEASE] Released system task {task.get('name')} "
+                        f"({task.get('task_id', '')[:8]})"
+                    )
+            except Exception:
+                continue
 
     def _expand_foreach_task(self, template_task: Dict, batch_id: str) -> List[str] | None:
         """

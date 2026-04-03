@@ -8,6 +8,7 @@
   },
   "shared_path": "../",
   "permissions_path": "permissions/",
+  "llama_runtime_image": "llama-runtime:sm61-sm86",
   "runtime_backend": "llama",
   "model_search_roots": [
     "/home/bryan/model-hotset",
@@ -19,65 +20,59 @@
   "brain_context_tokens": 8192,
   "worker_context_tokens": 8192,
   "auto_default_gpu": "gpu-2",
-  "auto_default_model": "qwen3.5:4b",
+  "auto_default_model": "qwen2.5-coder:7b",
   "startup_warm_workers": [],
   "startup_meta_tasks": [],
   "llama_single_defaults": {
-    "ctx_size": 8192,
+    "ctx_size": 16384,
     "batch_size": 64,
     "parallel": 1,
     "n_gpu_layers": 999
   },
   "llama_split_defaults": {
-    "ctx_size": 8192,
+    "ctx_size": 16384,
     "batch_size": 128,
     "parallel": 1,
     "n_gpu_layers": 999
   },
   "llama_single_profiles": {
     "mistral:7b-instruct": {
-      "ctx_size": 8192,
+      "ctx_size": 12288,
       "batch_size": 64,
       "parallel": 1,
       "n_gpu_layers": 999
     },
     "qwen2.5-coder:7b": {
-      "ctx_size": 8192,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999
-    },
-    "qwen3.5:4b": {
-      "ctx_size": 8192,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999
-    },
-    "qwen3.5:9b-q3km": {
-      "ctx_size": 8192,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999
-    },
-    "deepseek-r1:7b": {
-      "ctx_size": 8192,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999
-    },
-    "qwen2.5:7b": {
-      "ctx_size": 8192,
+      "ctx_size": 16384,
       "batch_size": 64,
       "parallel": 1,
       "n_gpu_layers": 999,
       "extra_args": [
         "--no-warmup"
       ]
+    },
+    "qwen3.5:4b": {
+      "ctx_size": 16384,
+      "batch_size": 64,
+      "parallel": 1,
+      "n_gpu_layers": 999
+    },
+    "qwen3.5:9b-q3km": {
+      "ctx_size": 16384,
+      "batch_size": 64,
+      "parallel": 1,
+      "n_gpu_layers": 999
+    },
+    "deepseek-r1:7b": {
+      "ctx_size": 16384,
+      "batch_size": 64,
+      "parallel": 1,
+      "n_gpu_layers": 999
     }
   },
   "llama_split_profiles": {
     "qwen2.5-coder:14b": {
-      "ctx_size": 8192,
+      "ctx_size": 16384,
       "batch_size": 128,
       "parallel": 1,
       "n_gpu_layers": 999,
@@ -90,16 +85,16 @@
   },
   "review_lap_models": {
     "extractor": {
-      "preferred": "qwen2.5:7b",
+      "preferred": "qwen2.5-coder:7b",
       "fallback": "qwen2.5-coder:14b"
     },
     "verifier": {
       "preferred": "qwen2.5-coder:14b",
-      "fallback": "qwen2.5:7b"
+      "fallback": "qwen2.5-coder:7b"
     },
     "adjudicator": {
       "preferred": "qwen2.5-coder:14b",
-      "fallback": "qwen2.5:7b"
+      "fallback": "qwen2.5-coder:7b"
     }
   },
   "brain": {
@@ -114,7 +109,7 @@
       "name": "gpu-1",
       "id": 1,
       "vram_mb": 6144,
-      "model": "qwen2.5:7b",
+      "model": "qwen2.5-coder:7b",
       "port": 11435,
       "permissions": "worker.json"
     },
@@ -122,7 +117,7 @@
       "name": "gpu-2",
       "id": 2,
       "vram_mb": 6144,
-      "model": "qwen2.5:7b",
+      "model": "qwen2.5-coder:7b",
       "port": 11436,
       "permissions": "worker.json"
     },
@@ -130,7 +125,7 @@
       "name": "gpu-3",
       "id": 3,
       "vram_mb": 6144,
-      "model": "qwen2.5:7b",
+      "model": "qwen2.5-coder:7b",
       "port": 11437,
       "permissions": "worker.json"
     },
@@ -138,7 +133,7 @@
       "name": "gpu-4",
       "id": 4,
       "vram_mb": 6144,
-      "model": "qwen2.5:7b",
+      "model": "qwen2.5-coder:7b",
       "port": 11438,
       "permissions": "worker.json"
     },
@@ -146,7 +141,7 @@
       "name": "gpu-5",
       "id": 5,
       "vram_mb": 6144,
-      "model": "qwen2.5:7b",
+      "model": "qwen2.5-coder:7b",
       "port": 11439,
       "permissions": "worker.json"
     }

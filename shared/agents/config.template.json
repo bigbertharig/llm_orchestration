@@ -14,6 +14,7 @@
   "model_search_roots": [
     "/mnt/shared/models"
   ],
+  "llama_runtime_image": "llama-runtime:sm61-sm86",
   "runtime_host": "http://localhost:11434",
   "runtime_backend": "llama",
   "brain_keep_alive": "30m",
@@ -21,8 +22,17 @@
   "brain_context_tokens": 8192,
   "worker_context_tokens": 8192,
   "auto_default_gpu": "gpu-2",
-  "auto_default_model": "qwen2.5:7b",
+  "auto_default_model": "qwen2.5-coder:7b",
   "startup_warm_workers": ["gpu-2"],
+  "startup_meta_tasks": [
+    {
+      "name": "startup_single_default",
+      "command": "load_llm",
+      "target_model": "qwen2.5-coder:7b",
+      "load_mode": "single",
+      "candidate_workers": ["gpu-2"]
+    }
+  ],
   "llama_single_defaults": {
     "ctx_size": 16384,
     "batch_size": 64,

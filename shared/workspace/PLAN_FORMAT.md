@@ -539,4 +539,28 @@ Avoid these mistakes in any plan:
 - Use generic examples in shared format docs.
 - Keep plan-specific tuning knobs in the plan repo, not in the shared format spec.
 - If a repo needs environment bootstrap, include it in the plan command; the format doc should stay generic.
-- If a plan uses unusual task fields or conventions, document them in that plan’s `## Notes` section, not here.
+- If a plan uses unusual task fields or conventions, document them in that plan's `## Notes` section, not here.
+
+## Migration Notes
+
+### Ollama to llama-server (completed for research_assistant shoulder)
+
+The LLM runtime changed from Ollama to llama-server. All plan scripts that call a local LLM must use the OpenAI-compatible API, not the legacy Ollama API.
+
+Old (Ollama):
+- Endpoint: `{BASE_URL}/api/generate`
+- Payload: `{"model": m, "prompt": p, "stream": false, "format": "json", "options": {"temperature": t, "num_predict": n}}`
+- Response: `resp.json()["response"]`
+
+New (llama-server):
+- Endpoint: `{BASE_URL}/v1/completions`
+- Payload: `{"model": m, "prompt": p, "temperature": t, "max_tokens": n}`
+- Response: `resp.json()["choices"][0]["text"]`
+
+Key differences:
+- No `"stream"` field (llama-server completions are non-streaming by default)
+- No `"format": "json"` (enforce JSON output via prompt instructions instead)
+- `"options"` dict is flattened: `temperature` and `max_tokens` are top-level
+- Response path changes from `.response` to `.choices[0].text`
+
+When updating other plan scripts, grep for `/api/generate` to find remaining Ollama call sites.

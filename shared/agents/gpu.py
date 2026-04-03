@@ -245,6 +245,16 @@ class GPUAgent(
         self.thermal_pause_max_seconds = int(pause_cfg.get("max_seconds", 600))
         self.thermal_pause_backoff_factor = float(pause_cfg.get("backoff_factor", 2.0))
         self.thermal_resume_margin_c = int(pause_cfg.get("resume_margin_c", 3))
+        self.thermal_runtime_recovery_grace_seconds = int(
+            pause_cfg.get("runtime_recovery_grace_seconds", 900)
+        )
+        self.thermal_runtime_recovery_retry_seconds = int(
+            pause_cfg.get("runtime_recovery_retry_seconds", 30)
+        )
+        self.pending_thermal_runtime_recovery_model: Optional[str] = None
+        self.pending_thermal_runtime_recovery_reason: Optional[str] = None
+        self.pending_thermal_runtime_recovery_deadline: float = 0.0
+        self.pending_thermal_runtime_recovery_last_attempt_at: float = 0.0
 
         # Set CUDA device for this process and all children
         os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)

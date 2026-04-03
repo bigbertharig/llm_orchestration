@@ -227,28 +227,15 @@ def build_config(assignment, runtime, system):
         "brain_context_tokens": 8192,
         "worker_context_tokens": 8192,
         "auto_default_gpu": warm_gpu_name or "gpu-2",
-        "auto_default_model": "qwen2.5:7b",
+        "auto_default_model": "qwen2.5-coder:7b",
         "startup_warm_workers": [warm_gpu_name] if warm_gpu_name else [],
         "startup_meta_tasks": [
             {
                 "name": "startup_single_default",
                 "command": "load_llm",
-                "target_model": "qwen2.5:7b",
+                "target_model": "qwen2.5-coder:7b",
                 "load_mode": "single",
                 "candidate_workers": [warm_gpu_name or "gpu-2"],
-            },
-            {
-                "name": "startup_split_pair_1_3",
-                "command": "load_split_llm",
-                "target_model": "qwen2.5-coder:14b",
-                "load_mode": "split",
-                "candidate_groups": [
-                    {
-                        "id": "pair_1_3",
-                        "members": ["gpu-1", "gpu-3"],
-                        "port": 11440,
-                    }
-                ],
             },
         ],
         "llama_single_defaults": {

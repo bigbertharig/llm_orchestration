@@ -220,23 +220,20 @@ class StartupIdempotenceTests(unittest.TestCase):
             )
 
             queue_files = list((shared / "tasks" / "queue").glob("*.json"))
-            self.assertEqual(len(queue_files), 2)
-            queued = {
-                payload["name"]: payload
-                for payload in (
-                    json.loads(path.read_text(encoding="utf-8"))
-                    for path in queue_files
-                )
-            }
-            first = queued["startup_single_default"]
-            second = queued["startup_split_pair_1_3"]
+            private_files = list((shared / "brain" / "private_tasks").glob("*.json"))
+            self.assertEqual(len(queue_files), 1)
+            self.assertEqual(len(private_files), 1)
+            first = json.loads(queue_files[0].read_text(encoding="utf-8"))
+            second = json.loads(private_files[0].read_text(encoding="utf-8"))
 
             self.assertEqual(first["command"], "load_llm")
+            self.assertEqual(first["name"], "startup_single_default")
             self.assertEqual(first["candidate_workers"], ["gpu-2"])
             self.assertEqual(first["target_model"], "qwen2.5:7b")
             self.assertEqual(first["depends_on"], [])
 
             self.assertEqual(second["command"], "load_split_llm")
+            self.assertEqual(second["name"], "startup_split_pair_1_3")
             self.assertEqual(second["target_model"], "qwen2.5-coder:14b")
             self.assertEqual(second["load_mode"], "split")
             self.assertEqual(second["depends_on"], [first["task_id"]])
@@ -266,6 +263,30 @@ class StartupIdempotenceTests(unittest.TestCase):
 
             self.assertEqual(removed, 2)
             self.assertEqual(list(queue.glob("*.json")), [])
+
+    def test_purge_stale_startup_meta_tasks_removes_orphan_meta_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            processing = shared / "tasks" / "processing"
+            processing.mkdir(parents=True, exist_ok=True)
+            orphan_hb = processing / "orphan-task.heartbeat.json"
+            orphan_hb.write_text(
+                json.dumps(
+                    {
+                        "task_id": "orphan-task",
+                        "worker_id": "gpu-2-meta",
+                        "is_meta": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stale_ts = time.time() - 600
+            __import__("os").utime(orphan_hb, (stale_ts, stale_ts))
+
+            removed = startup._purge_stale_startup_meta_tasks(shared)
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(orphan_hb.exists())
 
     def test_enqueue_startup_meta_tasks_skips_when_non_system_work_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -313,6 +334,38 @@ class StartupIdempotenceTests(unittest.TestCase):
                         "command": "load_split_llm",
                         "batch_id": "system",
                         "created_by": "brain",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            startup._enqueue_startup_meta_tasks(
+                shared_path=shared,
+                created_by="startup",
+                startup_meta_tasks=[
+                    {
+                        "name": "startup_single_default",
+                        "command": "load_llm",
+                        "target_model": "qwen2.5:7b",
+                        "candidate_workers": ["gpu-2"],
+                    }
+                ],
+            )
+
+            self.assertEqual(list((shared / "tasks" / "queue").glob("*.json")), [])
+
+    def test_enqueue_startup_meta_tasks_skips_when_fresh_meta_heartbeat_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            processing = shared / "tasks" / "processing"
+            processing.mkdir(parents=True, exist_ok=True)
+            heartbeat_path = processing / "load.heartbeat.json"
+            heartbeat_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": "load",
+                        "worker_id": "gpu-2-meta",
+                        "is_meta": True,
                     }
                 ),
                 encoding="utf-8",

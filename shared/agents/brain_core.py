@@ -90,13 +90,15 @@ def _normalize_llama_profile(raw: Any) -> dict[str, Any]:
         except Exception:
             continue
 
-    tensor_split = raw.get("tensor_split")
-    if isinstance(tensor_split, list):
-        parts = [str(part).strip() for part in tensor_split if str(part).strip()]
-        if parts:
-            normalized["tensor_split"] = ",".join(parts)
-    elif isinstance(tensor_split, str) and tensor_split.strip():
-        normalized["tensor_split"] = tensor_split.strip()
+    # String fields (Docker memory limits like "4g", "11g"; tensor_split like "1,1")
+    for field in ("memory_limit", "memory_swap", "tensor_split"):
+        value = raw.get(field)
+        if isinstance(value, list):
+            parts = [str(part).strip() for part in value if str(part).strip()]
+            if parts:
+                normalized[field] = ",".join(parts)
+        elif isinstance(value, str) and value.strip():
+            normalized[field] = value.strip()
 
     extra_args = raw.get("extra_args")
     if isinstance(extra_args, list):
@@ -142,6 +144,14 @@ def resolve_runtime_base_url(config: dict) -> str:
     if not runtime_base:
         runtime_base = "http://localhost:11434"
     return runtime_base.rstrip("/")
+
+
+def resolve_llama_runtime_image(config: dict) -> str:
+    """Resolve the llama runtime container image tag from config."""
+    image = str(config.get("llama_runtime_image") or "").strip()
+    if image:
+        return image
+    return "llama-runtime:sm61-sm86"
 
 
 def resolve_model_search_roots(config: dict) -> list[Path]:
@@ -226,6 +236,24 @@ class BrainCoreMixin:
 
         self.logger.info(f"Loaded model catalog from {catalog_path}")
         return catalog
+
+    def _load_model_assignments(self, config_dir: Path) -> Dict[str, Any]:
+        """Load model_assignments.json which defines default and alternative models per GPU role."""
+        assignments_path = (config_dir / "model_assignments.json").resolve()
+        if not assignments_path.exists():
+            self.logger.warning(
+                f"Model assignments file not found: {assignments_path} — "
+                "falling back to catalog-based model selection"
+            )
+            return {}
+        try:
+            with open(assignments_path, "r", encoding="utf-8") as f:
+                assignments = json.load(f)
+            self.logger.info(f"Loaded model assignments from {assignments_path}")
+            return assignments
+        except Exception as exc:
+            self.logger.error(f"Failed to load model assignments {assignments_path}: {exc}")
+            return {}
 
     def _build_model_tier_map(self, catalog: Dict[str, Any]) -> Dict[str, int]:
         tier_map: Dict[str, int] = {}

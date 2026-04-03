@@ -531,18 +531,24 @@ class BrainDispatchMixin:
                     if task_type == "execute_plan":
                         task_file.unlink()
                         self.handle_execute_plan_task(task)
+                        self.check_and_release_tasks()
                     elif task_type == "decide":
                         task_file.unlink()
                         self.handle_decide_task(task)
+                        self.check_and_release_tasks()
                     elif task_type == "system":
                         # Brain-level system commands (orchestrator_full_reset, etc.)
                         task_file.unlink()
                         self.handle_system_task(task)
+                        self.check_and_release_tasks()
                     elif (executor == "brain" or task_class == "brain") and task_type == "shell":
                         task["executor"] = "brain"
                         task["task_class"] = "brain"
                         task_file.unlink()
                         self.handle_shell_task(task)
+                        # Release downstream tasks immediately so workers can
+                        # start on dependent chains while brain continues.
+                        self.check_and_release_tasks()
                     elif executor == "brain" or task_class == "brain":
                         task_file.unlink()
                         task["status"] = "failed"

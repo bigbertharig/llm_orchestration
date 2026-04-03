@@ -23,6 +23,92 @@ from gpu_constants import (
 class GPUThermalMixin:
     """Mixin providing thermal safety and resource management methods."""
 
+    def _schedule_thermal_runtime_recovery(self, model_id: str, reason: str) -> None:
+        """Remember that a benchmark-owned runtime should be reloaded after thermal pause."""
+        model = str(model_id or "").strip()
+        if not model:
+            return
+        now = time.time()
+        self.pending_thermal_runtime_recovery_model = model
+        self.pending_thermal_runtime_recovery_reason = reason
+        self.pending_thermal_runtime_recovery_deadline = (
+            now + max(1, self.thermal_runtime_recovery_grace_seconds)
+        )
+        self.pending_thermal_runtime_recovery_last_attempt_at = 0.0
+        self.logger.warning(
+            "THERMAL_RUNTIME_RECOVERY_SCHEDULED: "
+            f"worker={self.name} model={model} grace_s={self.thermal_runtime_recovery_grace_seconds} "
+            f"reason={reason}"
+        )
+
+    def _clear_thermal_runtime_recovery(self, note: str = "") -> None:
+        model = str(getattr(self, "pending_thermal_runtime_recovery_model", "") or "").strip()
+        if model:
+            self.logger.info(
+                "THERMAL_RUNTIME_RECOVERY_CLEARED: "
+                f"worker={self.name} model={model} note={note or 'cleared'}"
+            )
+        self.pending_thermal_runtime_recovery_model = None
+        self.pending_thermal_runtime_recovery_reason = None
+        self.pending_thermal_runtime_recovery_deadline = 0.0
+        self.pending_thermal_runtime_recovery_last_attempt_at = 0.0
+
+    def _maybe_resume_thermal_runtime_recovery(self) -> None:
+        """Reload a thermally-paused benchmark runtime once the pause clears."""
+        model = str(getattr(self, "pending_thermal_runtime_recovery_model", "") or "").strip()
+        if not model:
+            return
+        if self.thermal_pause_active:
+            return
+        if self.active_workers or self.active_meta_task:
+            return
+
+        now = time.time()
+        deadline = float(getattr(self, "pending_thermal_runtime_recovery_deadline", 0.0) or 0.0)
+        if deadline and now > deadline:
+            self.logger.error(
+                "THERMAL_RUNTIME_RECOVERY_EXPIRED: "
+                f"worker={self.name} model={model} grace_s={self.thermal_runtime_recovery_grace_seconds}"
+            )
+            self._clear_thermal_runtime_recovery("deadline_expired")
+            return
+
+        try:
+            reservation = self._read_benchmark_reservation()
+        except Exception:
+            reservation = {"reserved": False}
+        if not bool(reservation.get("reserved", False)):
+            self._clear_thermal_runtime_recovery("reservation_released")
+            return
+
+        last_attempt = float(
+            getattr(self, "pending_thermal_runtime_recovery_last_attempt_at", 0.0) or 0.0
+        )
+        if last_attempt and (now - last_attempt) < max(1, self.thermal_runtime_recovery_retry_seconds):
+            return
+
+        self.pending_thermal_runtime_recovery_last_attempt_at = now
+        reason = str(getattr(self, "pending_thermal_runtime_recovery_reason", "") or "").strip()
+        self.logger.warning(
+            "THERMAL_RUNTIME_RECOVERY_ATTEMPT: "
+            f"worker={self.name} model={model} reason={reason or 'thermal_runtime_recovery'}"
+        )
+        try:
+            self.load_model(model_id=model, task_id=None)
+        except Exception as e:
+            self.logger.warning(
+                "THERMAL_RUNTIME_RECOVERY_RETRY: "
+                f"worker={self.name} model={model} error={e}"
+            )
+            return
+
+        if self.model_loaded and str(self.loaded_model or "").strip() == model:
+            self.logger.info(
+                "THERMAL_RUNTIME_RECOVERY_COMPLETE: "
+                f"worker={self.name} model={model}"
+            )
+            self._clear_thermal_runtime_recovery("reloaded")
+
     def _query_gpu_vram(self) -> int:
         """Query total VRAM for this GPU via nvidia-smi. Fallback for configs without vram_mb."""
         try:
@@ -355,6 +441,7 @@ class GPUThermalMixin:
                 self.logger.info(
                     f"THERMAL_PAUSE_EXIT: resumed_workers={resumed} active_task_ids={active_task_ids or ['none']}"
                 )
+                self._maybe_resume_thermal_runtime_recovery()
             else:
                 self.thermal_pause_attempts += 1
                 next_pause = int(self.thermal_pause_current_seconds * self.thermal_pause_backoff_factor)

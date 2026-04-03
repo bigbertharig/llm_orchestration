@@ -380,31 +380,37 @@ class BrainGoalMixin:
                 # End-of-discovery-cycle marker is terminal discovery task event
                 # (complete or failed) so strict task failures do not stall rounds.
                 if self._task_name_matches_base(task_name, discovery_terminal_task):
+                    goal["discovery_rounds_completed"] = (
+                        int(goal.get("discovery_rounds_completed", 0) or 0) + 1
+                    )
+                    # Clear in_progress when the highest scheduled round finishes
                     active_round = int(goal.get("discovery_active_round", 0) or 0)
-                    if round_num is None or round_num == active_round:
+                    if round_num is None or round_num >= active_round:
                         goal["discovery_in_progress"] = False
                         goal["discovery_active_round"] = 0
-                        event_type = "GOAL_DISCOVERY_READY"
+                    event_type = "GOAL_DISCOVERY_READY"
+                    event_msg = (
+                        f"Discovery round {round_num or 1} complete for batch {batch_id}; "
+                        f"{goal['discovery_rounds_completed']} rounds done"
+                    )
+                    if lane_name == "failed":
+                        event_type = "GOAL_DISCOVERY_ROUND_FAILED"
                         event_msg = (
-                            f"Discovery round complete for batch {batch_id}; pool can be expanded"
+                            f"Discovery round {round_num or 1} failed for batch {batch_id}; "
+                            "continuing scheduling"
                         )
-                        if lane_name == "failed":
-                            event_type = "GOAL_DISCOVERY_ROUND_FAILED"
-                            event_msg = (
-                                f"Discovery round ended with failed identify task for batch {batch_id}; "
-                                "continuing scheduling"
-                            )
-                        self.log_decision(
-                            event_type,
-                            event_msg,
-                            {
-                                "batch_id": batch_id,
-                                "round": int(round_num or 1),
-                                "lane": lane_name,
-                                "task_name": task_name,
-                                "candidates_total": int(goal.get("candidates_total", 0) or 0),
-                            },
-                        )
+                    self.log_decision(
+                        event_type,
+                        event_msg,
+                        {
+                            "batch_id": batch_id,
+                            "round": int(round_num or 1),
+                            "rounds_completed": goal["discovery_rounds_completed"],
+                            "lane": lane_name,
+                            "task_name": task_name,
+                            "candidates_total": int(goal.get("candidates_total", 0) or 0),
+                        },
+                    )
         goal["processed_discovery_task_ids"] = list(processed_ids)
         # Backward-compatible key used by older state snapshots.
         goal["processed_identify_task_ids"] = list(processed_ids)
@@ -427,12 +433,11 @@ class BrainGoalMixin:
 
     def _maybe_schedule_discovery_prefill(self, batch_id: str, goal: Dict[str, Any]) -> int:
         """
-        Front-load discovery rounds up to the prefill target so the initial
-        candidate pool is populated faster.
+        Schedule discovery rounds up to the prefill target.  Called every cycle
+        with a dynamic target (target - accepted) so the queue depth tracks
+        empty spots proportionally.
         """
         if goal.get("status") != "active":
-            return 0
-        if bool(goal.get("discovery_in_progress")):
             return 0
 
         templates = goal.get("discovery_templates", {})
@@ -741,60 +746,29 @@ class BrainGoalMixin:
             # Keep pool size and discovery-cycle state fresh.
             self._refresh_goal_pool_stats(goal)
             self._process_goal_discovery_events(batch_id, goal)
-            # Explicit phase-based state machine:
-            # - fill_pool: prioritize discovery until buffer is healthy
-            # - drain_pool: pause discovery and focus on scoring/decisions
-            phase = str(goal.get("phase", "fill_pool") or "fill_pool")
-            if phase not in {"fill_pool", "drain_pool"}:
-                phase = "fill_pool"
-                goal["phase"] = phase
-            pool_remaining = max(0, int(goal.get("candidates_total", 0)) - int(goal.get("next_index", 0)))
-            in_flight_now = len(goal.get("in_flight_ids", []))
-            buffer_total = pool_remaining + in_flight_now
-            buffer_target = max(1, int(goal.get("discovery_pool_target", goal.get("target", 1)) or 1))
-            refill_watermark = max(
-                1,
-                int(goal.get("discovery_refill_watermark", max(1, (buffer_target + 3) // 4)) or 1),
-            )
 
+            # Proportional discovery scheduling (two-loop model):
+            #
+            # Loop 1 (discovery): keep scheduled rounds = target - accepted.
+            #   As accepted grows, fewer new rounds get scheduled.
+            #   round_cap (target * max_attempts_multiplier) is the hard stop.
+            #
+            # Loop 2 (judgment): tracked in the per-candidate foreach below.
+            #   Spawns final_judgment tasks from manifest as candidates arrive.
+            #
+            # The prefill method handles multi-round scheduling and dedup
+            # via scheduled_through tracking.
             if goal.get("status") == "active":
-                if phase == "fill_pool" and buffer_total >= buffer_target:
-                    goal["phase"] = "drain_pool"
-                    phase = "drain_pool"
-                    self.log_decision(
-                        "GOAL_PHASE_CHANGE",
-                        f"Goal batch {batch_id} phase fill_pool -> drain_pool",
-                        {
-                            "batch_id": batch_id,
-                            "buffer_total": buffer_total,
-                            "buffer_target": buffer_target,
-                            "pool_remaining": pool_remaining,
-                            "in_flight": in_flight_now,
-                        },
-                    )
-                elif phase == "drain_pool" and buffer_total <= refill_watermark:
-                    goal["phase"] = "fill_pool"
-                    phase = "fill_pool"
-                    self.log_decision(
-                        "GOAL_PHASE_CHANGE",
-                        f"Goal batch {batch_id} phase drain_pool -> fill_pool",
-                        {
-                            "batch_id": batch_id,
-                            "buffer_total": buffer_total,
-                            "refill_watermark": refill_watermark,
-                            "pool_remaining": pool_remaining,
-                            "in_flight": in_flight_now,
-                        },
-                    )
-
-            if goal.get("status") == "active" and phase == "fill_pool":
+                empty_spots = max(0, int(goal["target"]) - int(goal["accepted"]))
+                cap = int(goal.get("discovery_round_cap", 0) or 0)
+                # We want empty_spots rounds scheduled ahead of completed rounds.
+                # completed_rounds ≈ discovery_rounds_completed (tracked by terminal events).
+                completed_rounds = int(goal.get("discovery_rounds_completed", 0) or 0)
+                desired_generated = completed_rounds + empty_spots
+                if cap > 0:
+                    desired_generated = min(desired_generated, cap)
+                goal["discovery_prefill_target_rounds"] = desired_generated
                 self._maybe_schedule_discovery_prefill(batch_id, goal)
-                # Fill-pool should keep generating rounds while buffer is short.
-                remaining_target = max(0, int(goal["target"]) - int(goal["accepted"]))
-                if remaining_target > buffer_total:
-                    self._maybe_schedule_next_discovery_round(
-                        batch_id, goal, reason="fill_pool_buffer_shortfall"
-                    )
 
             # Candidate spawning is always allowed while active so decision flow
             # can continue in both phases.
@@ -924,61 +898,44 @@ class BrainGoalMixin:
                      "rejected": goal["rejected"]})
                 self._release_goal_final_task(batch_id)
 
-            # Circuit breaker: pool exhausted for current pool snapshot.
-            # Only exhaust when the query-round cap is reached; otherwise keep
-            # discovery active and continue trying additional rounds.
+            # Circuit breaker: pool exhausted + round cap reached.
+            # The proportional scheduler above handles ongoing round generation.
+            # We only exhaust when we've used all rounds AND drained the pool.
             total_attempted = goal["accepted"] + goal["rejected"]
             if (goal["status"] == "active" and
                     goal["next_index"] >= goal["candidates_total"] and
                     in_flight == 0 and
                     goal["accepted"] < target - tolerance):
-                phase = str(goal.get("phase", "fill_pool") or "fill_pool")
-                if phase != "fill_pool":
-                    goal["phase"] = "fill_pool"
-                    self.log_decision(
-                        "GOAL_PHASE_CHANGE",
-                        f"Goal batch {batch_id} phase drain_pool -> fill_pool (pool exhausted)",
-                        {
-                            "batch_id": batch_id,
-                            "accepted": goal["accepted"],
-                            "target": target,
-                            "pool_size": goal["candidates_total"],
-                            "next_index": goal["next_index"],
-                        },
-                    )
-                scheduled = self._maybe_schedule_next_discovery_round(
-                    batch_id, goal, reason="pool_exhausted"
-                )
-                if not scheduled:
-                    wait_for_discovery = bool(goal.get("discovery_in_progress"))
-                    if wait_for_discovery:
-                        self.log_decision("GOAL_DISCOVERY_WAIT",
-                            "Pool exhausted while discovery round is still in progress; waiting for terminal event",
-                            {"accepted": goal["accepted"], "target": target,
-                             "rejected": goal["rejected"], "pool_size": goal["candidates_total"],
-                             "discovery_rounds_generated": int(goal.get("discovery_rounds_generated", 1) or 1),
-                             "discovery_round_cap": int(goal.get("discovery_round_cap", 0) or 0)})
-                    else:
-                        round_cap = int(goal.get("discovery_round_cap", 0) or 0)
-                        rounds_generated = int(goal.get("discovery_rounds_generated", 1) or 1)
-                        if round_cap > 0 and rounds_generated >= round_cap:
-                            goal["status"] = "exhausted"
-                            self.log_decision("GOAL_EXHAUSTED",
-                                f"Goal exhausted: round cap reached ({rounds_generated}/{round_cap}) with "
-                                f"{goal['accepted']}/{target} accepted",
-                                {"accepted": goal["accepted"], "target": target,
-                                 "rejected": goal["rejected"], "pool_size": goal["candidates_total"],
-                                 "discovery_rounds_generated": rounds_generated,
-                                 "discovery_round_cap": round_cap,
-                                 "reason": "query_round_cap_reached"})
-                            self._release_goal_final_task(batch_id)
-                        else:
-                            self.log_decision("GOAL_DISCOVERY_WAIT",
-                                "Pool exhausted but discovery remains active; waiting for next scheduling opportunity",
-                                {"accepted": goal["accepted"], "target": target,
-                                 "rejected": goal["rejected"], "pool_size": goal["candidates_total"],
-                                 "discovery_rounds_generated": rounds_generated,
-                                 "discovery_round_cap": round_cap})
+                round_cap = int(goal.get("discovery_round_cap", 0) or 0)
+                rounds_generated = int(goal.get("discovery_rounds_generated", 1) or 1)
+                rounds_in_flight = rounds_generated - int(goal.get("discovery_rounds_completed", 0) or 0)
+                if rounds_in_flight > 0:
+                    # Discovery rounds still running — wait for them
+                    self.log_decision("GOAL_DISCOVERY_WAIT",
+                        f"Pool exhausted, {rounds_in_flight} discovery rounds still in flight",
+                        {"accepted": goal["accepted"], "target": target,
+                         "rounds_generated": rounds_generated,
+                         "rounds_completed": goal.get("discovery_rounds_completed", 0),
+                         "round_cap": round_cap})
+                elif round_cap > 0 and rounds_generated >= round_cap:
+                    goal["status"] = "exhausted"
+                    self.log_decision("GOAL_EXHAUSTED",
+                        f"Goal exhausted: round cap reached ({rounds_generated}/{round_cap}) with "
+                        f"{goal['accepted']}/{target} accepted",
+                        {"accepted": goal["accepted"], "target": target,
+                         "rejected": goal["rejected"],
+                         "rounds_generated": rounds_generated,
+                         "round_cap": round_cap,
+                         "reason": "query_round_cap_reached"})
+                    self._release_goal_final_task(batch_id)
+                else:
+                    # No cap or cap not reached — proportional scheduler will
+                    # handle generating more rounds on next cycle
+                    self.log_decision("GOAL_DISCOVERY_WAIT",
+                        "Pool exhausted, waiting for proportional scheduler to generate more rounds",
+                        {"accepted": goal["accepted"], "target": target,
+                         "rounds_generated": rounds_generated,
+                         "round_cap": round_cap})
 
             # Circuit breaker: max rejected candidates.
             max_rejections = int(goal.get("max_rejections", goal.get("max_attempts", 0)) or 0)

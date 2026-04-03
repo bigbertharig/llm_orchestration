@@ -427,6 +427,19 @@ def _startup_meta_enqueue_blockers(shared_path: Path) -> list[str]:
             if batch_id and batch_id != "system":
                 saw_non_system_work = True
 
+    processing_dir = shared_path / "tasks" / "processing"
+    if processing_dir.exists():
+        for hb_file in processing_dir.glob("*.heartbeat.json"):
+            task_file = hb_file.with_name(hb_file.name.replace(".heartbeat.json", ".json"))
+            if task_file.exists():
+                continue
+            try:
+                hb = json.loads(hb_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if bool(hb.get("is_meta")):
+                saw_load_meta = True
+
     if saw_non_system_work:
         reasons.append("active_non_system_tasks")
     if saw_load_meta:
@@ -437,6 +450,7 @@ def _startup_meta_enqueue_blockers(shared_path: Path) -> list[str]:
 def _purge_stale_startup_meta_tasks(shared_path: Path) -> int:
     """Remove startup-created load meta tasks left behind from prior runs."""
     removed = 0
+    heartbeat_stale_seconds = 180
     for folder in ("queue", "processing"):
         path = shared_path / "tasks" / folder
         if not path.exists():
@@ -473,6 +487,29 @@ def _purge_stale_startup_meta_tasks(shared_path: Path) -> int:
                     removed += 1
                 except Exception:
                     continue
+        if folder != "processing":
+            continue
+        for hb_file in path.glob("*.heartbeat.json"):
+            task_file = hb_file.with_name(hb_file.name.replace(".heartbeat.json", ".json"))
+            if task_file.exists():
+                continue
+            try:
+                hb = json.loads(hb_file.read_text(encoding="utf-8"))
+            except Exception:
+                hb = {}
+            if not bool(hb.get("is_meta")):
+                continue
+            try:
+                age_seconds = max(0.0, time.time() - hb_file.stat().st_mtime)
+            except Exception:
+                age_seconds = float(heartbeat_stale_seconds + 1)
+            if age_seconds < heartbeat_stale_seconds:
+                continue
+            try:
+                hb_file.unlink()
+                removed += 1
+            except Exception:
+                continue
     return removed
 
 
@@ -640,6 +677,9 @@ def _enqueue_startup_meta_tasks(
 
     previous_task_id = None
     queued = 0
+    held = 0
+    private_path = shared_path / "brain" / "private_tasks"
+    private_path.mkdir(parents=True, exist_ok=True)
     for idx, raw_task in enumerate(startup_meta_tasks, start=1):
         if not isinstance(raw_task, dict):
             continue
@@ -675,14 +715,20 @@ def _enqueue_startup_meta_tasks(
             if key in raw_task:
                 task[key] = raw_task[key]
 
-        task_file = queue_path / f"{task['task_id']}.json"
+        # First task goes to public queue; subsequent tasks go to brain
+        # private tasks so the brain releases them when dependencies clear.
+        if previous_task_id is None:
+            task_file = queue_path / f"{task['task_id']}.json"
+            queued += 1
+        else:
+            task_file = private_path / f"{task['task_id']}.json"
+            held += 1
         with open(task_file, "w", encoding="utf-8") as f:
             json.dump(task, f, indent=2)
         previous_task_id = task["task_id"]
-        queued += 1
 
-    if queued:
-        print(f"Queued {queued} startup meta task(s) from config.")
+    if queued or held:
+        print(f"Startup meta tasks: {queued} queued, {held} held for brain sequencing.")
 
 
 # =============================================================================

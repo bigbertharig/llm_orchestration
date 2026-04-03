@@ -3,6 +3,7 @@
   "_usage": "python3 run_benchmark_campaign.py <manifest> --config config.benchmark-brain.json",
   "_note": "14B models are tested as split-load on 2x 1060 workers, not here.",
   "shared_path": "../",
+  "llama_runtime_image": "llama-runtime:sm61-sm86",
   "runtime_backend": "llama",
   "model_search_roots": [
     "/mnt/shared/models"
@@ -16,26 +17,34 @@
     "ctx_size": 16384,
     "batch_size": 128,
     "parallel": 1,
-    "n_gpu_layers": 999
+    "n_gpu_layers": 999,
+    "memory_limit": "11g",
+    "memory_swap": "13g"
   },
   "llama_single_profiles": {
     "qwen2.5-coder:32b": {
       "ctx_size": 16384,
       "batch_size": 128,
       "parallel": 1,
-      "n_gpu_layers": 999
+      "n_gpu_layers": 999,
+      "memory_limit": "11g",
+      "memory_swap": "13g"
     },
     "deepseek-r1:32b": {
       "ctx_size": 16384,
       "batch_size": 128,
       "parallel": 1,
-      "n_gpu_layers": 999
+      "n_gpu_layers": 999,
+      "memory_limit": "11g",
+      "memory_swap": "13g"
     },
     "qwen3.5:35b-a3b": {
       "ctx_size": 16384,
       "batch_size": 128,
       "parallel": 1,
-      "n_gpu_layers": 999
+      "n_gpu_layers": 999,
+      "memory_limit": "11g",
+      "memory_swap": "13g"
     }
   },
   "gpus": [

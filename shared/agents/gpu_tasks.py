@@ -1356,6 +1356,14 @@ class GPUTaskMixin:
             # llama backend: load_model handles container start internally
             self.load_model(model_id=target_model, task_id=task_id)
             load_success = bool(self.model_loaded)
+            # Kill any workers spawned with stale port/model so they get requeued
+            if load_success:
+                stale = self._fail_active_llm_workers(
+                    f"model_changed:{target_model}",
+                    error_code="runtime_model_changed",
+                )
+                if stale:
+                    self.logger.info(f"load_llm: killed {stale} stale worker(s) after model change")
             result = self._build_meta_result(
                 command,
                 task,
@@ -1596,6 +1604,14 @@ class GPUTaskMixin:
                             task_id=task.get("task_id"),
                         )
 
+                    # Kill any workers spawned with stale port/model so they get requeued
+                    if success:
+                        stale = self._fail_active_llm_workers(
+                            f"model_changed_split:{target_model}",
+                            error_code="runtime_model_changed",
+                        )
+                        if stale:
+                            self.logger.info(f"load_split_llm: killed {stale} stale worker(s) after split load")
                     result = self._build_meta_result(
                         command,
                         task,

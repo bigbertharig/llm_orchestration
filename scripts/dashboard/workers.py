@@ -357,6 +357,8 @@ def _status_candidates(shared_path: Path) -> list[tuple[str, Path]]:
         out.append(("pipeline", p))
     for p in (logs_root / "bench-code" / "history").glob("**/status.json"):
         out.append(("code", p))
+    for p in (logs_root / "bench-knowledge" / "history").glob("**/status.json"):
+        out.append(("knowledge", p))
     return out
 
 
@@ -437,10 +439,14 @@ def _active_benchmark_by_port(shared_path: Path) -> dict[int, dict[str, Any]]:
         prev_ts = prev.get("updated_ts") if isinstance(prev, dict) else None
         if prev is not None and isinstance(prev_ts, (int, float)) and prev_ts > cur_ts:
             continue
+        task_index_label = ""
+        if suite != "pipeline" and current_idx > 0 and task_total > 0:
+            task_index_label = f"{current_idx}/{task_total}"
         best[port] = {
             "suite": suite,
             "current_task": current_task,
             "progress": progress,
+            "task_index": task_index_label,
             "age_s": age_s,
             "updated_ts": cur_ts,
         }
@@ -525,6 +531,25 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
         active_suite = ""
         active_task = ""
         active_progress = ""
+        active_task_index = ""
+        # Extract structured benchmark_progress from heartbeat active_tasks
+        for at in hb.get("active_tasks", []) or []:
+            if not isinstance(at, dict):
+                continue
+            bp = at.get("benchmark_progress") or {}
+            if not bp.get("suite"):
+                continue
+            active_suite = str(bp["suite"])
+            if bp.get("campaign_step") and bp.get("campaign_total"):
+                active_task_index = f"{bp['campaign_step']}/{bp['campaign_total']}"
+            elif bp.get("task_index") and bp.get("task_total"):
+                active_task_index = f"{bp['task_index']}/{bp['task_total']}"
+            if bp.get("current_task"):
+                active_task = str(bp["current_task"])
+            if bp.get("sub_current") is not None and bp.get("sub_total"):
+                active_progress = f"{bp['sub_current']}/{bp['sub_total']}"
+            break  # use first benchmark container's progress
+
         try:
             port_key = int(hb.get("runtime_port") or 0)
         except Exception:
@@ -549,9 +574,16 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
                 and isinstance(bench_age_s, int)
                 and bench_age_s > BENCHMARK_IDLE_CLEAR_AGE_S
             ):
-                active_suite = str(bench.get("suite") or "").strip()
-                active_task = str(bench.get("current_task") or "").strip()
-                active_progress = str(bench.get("progress") or "").strip()
+                if not active_suite:
+                    active_suite = str(bench.get("suite") or "").strip()
+                if not active_task:
+                    active_task = str(bench.get("current_task") or "").strip()
+                if not active_progress:
+                    active_progress = str(bench.get("progress") or "").strip()
+                if not active_task_index:
+                    bench_idx = str(bench.get("task_index") or "").strip()
+                    if bench_idx:
+                        active_task_index = bench_idx
                 if active_task:
                     task_label = active_task
                     if active_progress:
@@ -585,6 +617,7 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
             "active_suite": active_suite,
             "active_task": active_task,
             "active_progress": active_progress,
+            "active_task_index": active_task_index,
         })
 
     # CPU workers
