@@ -628,7 +628,7 @@ JSON only:"""
                 result = task.get("result", {})
                 error_type = result.get("error_type", "worker")  # Default to worker failure
 
-                if task.get("status") == "abandoned":
+                if task.get("status") in {"abandoned", "cancelled", "completed", "succeeded"}:
                     continue
 
                 # Use task memory fields (attempts, workers_attempted)

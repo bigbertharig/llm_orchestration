@@ -102,6 +102,26 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 class BrainFailureIncidentTests(unittest.TestCase):
+    def test_cancelled_brain_task_without_result_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            brain = MockBrainFailures(root)
+            task = {
+                "task_id": "task-cancelled",
+                "batch_id": "batch-1",
+                "name": "cancelled_brain_task",
+                "task_class": "brain",
+                "status": "cancelled",
+            }
+            task_file = brain.failed_path / "task-cancelled.json"
+            _write_json(task_file, task)
+
+            brain.handle_failed_tasks()
+
+            self.assertEqual(json.loads(task_file.read_text(encoding="utf-8")), task)
+            self.assertEqual(brain.aborted_batches, [])
+            self.assertEqual(brain.logged, [])
+
     def test_recoverable_retry_preserves_incident_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
