@@ -151,7 +151,7 @@ def resolve_llama_runtime_image(config: dict) -> str:
     image = str(config.get("llama_runtime_image") or "").strip()
     if image:
         return image
-    return "llama-runtime:sm61-sm86"
+    return "llama-runtime:b10333"
 
 
 def resolve_model_search_roots(config: dict) -> list[Path]:
@@ -818,6 +818,7 @@ class BrainCoreMixin:
             "--model", gguf_path,
             "--port", str(brain_port),
             "--gpus", f"device={gpu_device}",
+            "--image", resolve_llama_runtime_image(self.config),
             "--ctx-size", str(self.brain_num_ctx),
         ]
 
@@ -842,6 +843,13 @@ class BrainCoreMixin:
                     return
             except Exception:
                 pass
+            container_state = self._get_llama_container_state(self.BRAIN_LLAMA_CONTAINER)
+            if container_state != "running":
+                logs = self._get_brain_container_logs()
+                raise RuntimeError(
+                    f"Brain llama-server exited during readiness (state={container_state}). "
+                    f"Container logs:\n{logs}"
+                )
             time.sleep(self.BRAIN_LLAMA_READINESS_POLL)
 
         # Timeout — grab logs
@@ -876,6 +884,19 @@ class BrainCoreMixin:
             return (result.stdout or "") + (result.stderr or "")
         except Exception:
             return "(failed to retrieve container logs)"
+
+    def _get_llama_container_state(self, container_name: str) -> str:
+        """Return the Docker state for a managed llama container."""
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Status}}", container_name],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return "missing"
+            return (result.stdout or "").strip() or "unknown"
+        except Exception:
+            return "unknown"
 
     def _kill_existing_runtime(self):
         """Stop any local llama-server process holding the brain port."""

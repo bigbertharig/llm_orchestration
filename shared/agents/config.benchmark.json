@@ -8,7 +8,7 @@
   },
   "shared_path": "../",
   "permissions_path": "permissions/",
-  "llama_runtime_image": "llama-runtime:sm61-sm86",
+  "llama_runtime_image": "llama-runtime:b10333",
   "runtime_backend": "llama",
   "model_search_roots": [
     "/home/bryan/model-hotset",

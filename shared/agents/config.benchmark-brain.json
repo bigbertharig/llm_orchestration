@@ -3,7 +3,7 @@
   "_usage": "python3 run_benchmark_campaign.py <manifest> --config config.benchmark-brain.json",
   "_note": "14B models are tested as split-load on 2x 1060 workers, not here.",
   "shared_path": "../",
-  "llama_runtime_image": "llama-runtime:sm61-sm86",
+  "llama_runtime_image": "llama-runtime:b10333",
   "runtime_backend": "llama",
   "model_search_roots": [
     "/mnt/shared/models"

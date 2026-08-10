@@ -14,7 +14,7 @@
   "model_search_roots": [
     "/mnt/shared/models"
   ],
-  "llama_runtime_image": "llama-runtime:sm61-sm86",
+  "llama_runtime_image": "llama-runtime:b10333",
   "runtime_host": "http://localhost:11434",
   "runtime_backend": "llama",
   "brain_keep_alive": "30m",

@@ -6,10 +6,13 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from brain_core import (
+    BrainCoreMixin,
     resolve_llama_runtime_profile,
     resolve_llama_runtime_image,
     resolve_auto_default_target,
@@ -19,6 +22,57 @@ from brain_core import (
 
 
 class RuntimeDefaultTargetTests(unittest.TestCase):
+    def test_brain_runtime_command_uses_configured_image(self):
+        brain = BrainCoreMixin.__new__(BrainCoreMixin)
+        brain.config = {"llama_runtime_image": "llama-runtime:test-candidate"}
+        brain.gpus = [0]
+        brain.model = "test:1b"
+        brain.brain_num_ctx = 2048
+        brain.logger = mock.Mock()
+
+        with (
+            mock.patch.object(brain, "_kill_existing_runtime"),
+            mock.patch.object(brain, "_stop_llama_container"),
+            mock.patch.object(brain, "_resolve_brain_gguf_path", return_value="/models/test.gguf"),
+            mock.patch.object(brain, "_brain_runtime_base_url", return_value="http://127.0.0.1:11434"),
+            mock.patch("brain_core.resolve_llama_runtime_profile", return_value={}),
+            mock.patch(
+                "brain_core.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="container-id", stderr=""),
+            ) as run,
+            mock.patch("brain_core.requests.get", return_value=SimpleNamespace(status_code=200)),
+        ):
+            brain._start_llama_brain()
+
+        command = run.call_args.args[0]
+        image_flag = command.index("--image")
+        self.assertEqual(command[image_flag + 1], "llama-runtime:test-candidate")
+
+    def test_brain_runtime_fails_immediately_when_container_exits(self):
+        brain = BrainCoreMixin.__new__(BrainCoreMixin)
+        brain.config = {"llama_runtime_image": "llama-runtime:test-candidate"}
+        brain.gpus = [0]
+        brain.model = "test:1b"
+        brain.brain_num_ctx = 2048
+        brain.logger = mock.Mock()
+
+        with (
+            mock.patch.object(brain, "_kill_existing_runtime"),
+            mock.patch.object(brain, "_stop_llama_container"),
+            mock.patch.object(brain, "_resolve_brain_gguf_path", return_value="/models/test.gguf"),
+            mock.patch.object(brain, "_brain_runtime_base_url", return_value="http://127.0.0.1:11434"),
+            mock.patch.object(brain, "_get_llama_container_state", return_value="exited"),
+            mock.patch.object(brain, "_get_brain_container_logs", return_value="fatal startup error"),
+            mock.patch("brain_core.resolve_llama_runtime_profile", return_value={}),
+            mock.patch(
+                "brain_core.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="container-id", stderr=""),
+            ),
+            mock.patch("brain_core.requests.get", return_value=SimpleNamespace(status_code=503)),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exited during readiness"):
+                brain._start_llama_brain()
+
     def test_prefers_explicit_auto_default_settings(self):
         gpu, model = resolve_auto_default_target(
             {
@@ -100,7 +154,7 @@ class RuntimeDefaultTargetTests(unittest.TestCase):
     def test_runtime_image_defaults_when_missing(self):
         image = resolve_llama_runtime_image({})
 
-        self.assertEqual(image, "llama-runtime:sm61-sm86")
+        self.assertEqual(image, "llama-runtime:b10333")
 
     def test_runtime_chat_endpoint_uses_llama_route(self):
         endpoint = resolve_runtime_chat_endpoint(
