@@ -458,6 +458,27 @@ def validate_resolved_blocks(blocks: Dict[str, BlockState]) -> None:
         if spec.get("env_file_supported") and cfg.get("env_file"):
             if not Path(str(cfg["env_file"])).is_file():
                 errors.append(f"{bid}: env_file not found: {cfg['env_file']}")
+
+    groups: Dict[str, List[BlockState]] = {}
+    for block in blocks.values():
+        group = str(block.config.get("runtime_group", "")).strip()
+        if group:
+            groups.setdefault(group, []).append(block)
+    runtime_keys = (
+        "model", "gguf", "placement", "runtime_image", "ctx_size",
+        "batch_size", "runtime_args",
+    )
+    for group, members in groups.items():
+        if len(members) < 2:
+            errors.append(f"runtime_group '{group}' must contain at least two blocks")
+            continue
+        expected = {key: members[0].config.get(key) for key in runtime_keys}
+        for member in members[1:]:
+            actual = {key: member.config.get(key) for key in runtime_keys}
+            if actual != expected:
+                errors.append(
+                    f"{member.block_id}: runtime_group '{group}' changes runtime settings"
+                )
     if errors:
         raise SystemExit("ERROR: campaign preflight failed:\n  - " + "\n  - ".join(errors))
 
@@ -797,6 +818,74 @@ class Scheduler:
         self.occupied: Dict[str, str] = {}  # slot_name -> block_id
         self._shutdown = False
 
+    def _runtime_group_members(self, group: str) -> List[BlockState]:
+        return [
+            block for block in self.state.blocks.values()
+            if str(block.config.get("runtime_group", "")).strip() == group
+        ]
+
+    def _runtime_group_predecessor(self, block: BlockState) -> Optional[BlockState]:
+        group = str(block.config.get("runtime_group", "")).strip()
+        if not group:
+            return None
+        members = self._runtime_group_members(group)
+        index = members.index(block)
+        return members[index - 1] if index > 0 else None
+
+    def _runtime_group_successor(self, block: BlockState) -> Optional[BlockState]:
+        group = str(block.config.get("runtime_group", "")).strip()
+        if not group:
+            return None
+        members = self._runtime_group_members(group)
+        index = members.index(block)
+        return members[index + 1] if index + 1 < len(members) else None
+
+    def handoff_runtime(self, block: BlockState) -> bool:
+        """Start the next suite in a runtime group without reloading its model."""
+        successor = self._runtime_group_successor(block)
+        slot = block.assigned_slot
+        if successor is None or slot is None:
+            return False
+        if successor.status not in (PENDING, WAITING_DEPS, WAITING_GPU):
+            return False
+        if any(
+            self.state.blocks[dep].status != COMPLETED
+            for dep in successor.depends_on
+            if dep in self.state.blocks
+        ):
+            return False
+
+        successor.assigned_slot = slot
+        successor.runtime_container = block.runtime_container
+        successor.started_at = now_iso()
+        successor.suite_started_at = now_iso()
+        successor.status = RUNNING_SUITE
+        block.runtime_container = None
+        self.occupied[slot.name] = successor.block_id
+        group = str(successor.config["runtime_group"])
+        log(
+            f"Block {successor.block_id} -> {slot.name} "
+            f"[reusing runtime group {group}]"
+        )
+        if self.dry_run:
+            log(
+                f"  Suite command: {' '.join(build_suite_cmd(successor, slot))}",
+                verbose_only=True,
+            )
+            return True
+        try:
+            successor.suite_process = start_suite(successor, slot)
+            return True
+        except Exception as exc:
+            successor.status = FAILED
+            successor.error = f"suite start failed: {exc}"
+            successor.ended_at = now_iso()
+            stop_runtime(successor.runtime_container)
+            successor.runtime_container = None
+            self.occupied.pop(slot.name, None)
+            log(f"Block {successor.block_id}: FAILED to start suite: {exc}")
+            return False
+
     def _all_done(self) -> bool:
         return all(
             bs.status in (COMPLETED, FAILED)
@@ -816,6 +905,9 @@ class Scheduler:
                 bs.status = WAITING_DEPS
 
             if bs.status == WAITING_DEPS:
+                predecessor = self._runtime_group_predecessor(bs)
+                if predecessor and predecessor.status not in (COMPLETED, FAILED):
+                    continue
                 deps_met = all(
                     self.state.blocks[d].status == COMPLETED
                     for d in bs.depends_on
@@ -976,10 +1068,12 @@ class Scheduler:
                     bs.status = COMPLETED
                     bs.ended_at = now_iso()
                     bs.exit_code = 0
+                    log(f"Block {bid}: [dry-run] COMPLETED")
+                    if self.handoff_runtime(bs):
+                        continue
                     if bs.assigned_slot:
                         self.occupied.pop(bs.assigned_slot.name, None)
                     stop_runtime(bs.runtime_container)
-                    log(f"Block {bid}: [dry-run] COMPLETED")
                 continue
 
             rc = bs.suite_process.poll()
@@ -1005,7 +1099,10 @@ class Scheduler:
                 bs.error = f"suite exited with code {rc}"
                 log(f"Block {bid}: FAILED (exit {rc})")
 
-            # Release slot and stop runtime
+            if (rc == 0 or self.on_failure == "continue") and self.handoff_runtime(bs):
+                continue
+
+            # Release slot and stop runtime after the final suite in a group.
             if bs.assigned_slot:
                 self.occupied.pop(bs.assigned_slot.name, None)
             stop_runtime(bs.runtime_container)
