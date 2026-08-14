@@ -1069,23 +1069,11 @@ function renderWorkerTable(workers, type) {
       if (!grp || grp.members < 2 || grp.total <= 0) return self;
       return `${self} (grp ${grp.used}/${grp.total})`;
     };
-    const holdingLabel = (w) => {
-      const activeTask = String(w.active_task || '').trim();
-      const activeProgress = String(w.active_progress || '').trim();
-      const activeLabel = activeTask
-        ? (activeProgress ? `${activeTask} (${activeProgress})` : activeTask)
-        : '';
-      const items = (w.holding || [])
-        .map((h) => String(h || '').trim())
-        .filter(Boolean);
-      const merged = activeLabel
-        ? [activeLabel, ...items.filter((x) => x !== activeLabel)]
-        : items;
-      return truncCell(merged.slice(0,2).join(' | ') || '-', 64, true);
-    };
     const rows = workers.map(w => [
       fmt(w.name),
       stateLabel(w),
+      gpuLaneBadge(w),
+      gpuAvailability(w),
       fmt(w.host),
       `<span class="${tempClass(w.cpu_temp_c)}">${fmt(w.cpu_temp_c)}</span>`,
       fmt(w.gpu_temp_c),
@@ -1093,11 +1081,11 @@ function renderWorkerTable(workers, type) {
       fmt(w.power_w),
       vram(w),
       fmt(w.thermal_cause && w.thermal_cause !== 'none' ? w.thermal_cause : '-'),
-      holdingLabel(w),
+      gpuWorkLabel(w),
       `<span class="${hbClass(w.age_s)}">${fmt(w.age_s)}</span>`
     ]);
     document.getElementById('workerTable').innerHTML = table(
-      ['Name', 'State', 'Host', 'CPU C', 'GPU C', 'GPU %', 'W', 'VRAM', 'Thermal', 'Holding', 'HB s'],
+      ['Name', 'State', 'Lane', 'Avail', 'Runtime', 'CPU C', 'GPU C', 'GPU %', 'W', 'VRAM', 'Thermal', 'Work', 'HB s'],
       rows
     );
   } else {
@@ -1121,6 +1109,39 @@ function renderWorkerTable(workers, type) {
 function laneChip(lane) {
   if (!lane || lane === '-') return '<span class="chip missing">-</span>';
   return `<span class="chip ${lane}">${lane}</span>`;
+}
+
+function gpuLaneBadge(w) {
+  const lane = String(w.busy_lane || '').trim();
+  if (!lane) return '<span class="chip available">OPEN</span>';
+  return `<span class="chip ${esc(lane)}">${esc(lane)}</span>`;
+}
+
+function gpuAvailability(w) {
+  const lanes = Array.isArray(w.available_lanes) ? w.available_lanes : [];
+  if (lanes.length) return lanes.map(l => `<span class="chip ${esc(l)}">${esc(l)}</span>`).join(' ');
+  const blocked = Array.isArray(w.blocked_lanes) ? w.blocked_lanes : [];
+  if (blocked.length) return '<span class="chip blocked">blocked</span>';
+  return '<span class="chip missing">-</span>';
+}
+
+function gpuWorkLabel(w) {
+  const activeTask = String(w.active_task || '').trim();
+  const activeProgress = String(w.active_progress || '').trim();
+  const activeLabel = activeTask
+    ? (activeProgress ? `${activeTask} (${activeProgress})` : activeTask)
+    : '';
+  const items = (w.holding || [])
+    .map((h) => String(h || '').trim())
+    .filter(Boolean);
+  const owner = String(w.busy_owner || '').trim();
+  const reason = String(w.busy_reason || '').trim();
+  const laneLabel = owner || reason ? `${owner || 'busy'}${reason ? `: ${reason}` : ''}` : '';
+  const merged = activeLabel
+    ? [activeLabel, ...items.filter((x) => x !== activeLabel)]
+    : items;
+  if (laneLabel && !merged.includes(laneLabel)) merged.push(laneLabel);
+  return truncCell(merged.slice(0, 2).join(' | ') || '-', 72, true);
 }
 
 function renderBatchChains(data, allowedBatchIds = null) {
@@ -1310,7 +1331,17 @@ function renderBatchChains(data, allowedBatchIds = null) {
 
 function refreshFromData(data) {
   latestStatus = data;
-  document.getElementById('meta').textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
+  const policy = data.control_policy || {};
+  const profile = String(policy.boot_profile || 'neutral');
+  const admitted = Array.isArray(policy.admitted_controllers)
+    ? policy.admitted_controllers.join(', ') || 'none'
+    : 'unknown';
+  const leases = Array.isArray((data.gpu_leases || {}).leases)
+    ? data.gpu_leases.leases.length
+    : 0;
+  document.getElementById('meta').textContent =
+    `Updated ${new Date(data.generated_at).toLocaleTimeString()} | ` +
+    `Profile ${profile} | Admitted ${admitted} | GPU leases ${leases}`;
   document.getElementById('countCards').innerHTML = renderCountCards(data.counts);
 
   const batchRows = Object.entries(data.active_batches).map(([id, b]) => {
@@ -1369,18 +1400,20 @@ function refreshFromData(data) {
       fmt(w.model),
       fmt(w.name),
       fmt(w.state),
+      gpuLaneBadge(w),
+      gpuAvailability(w),
       vram,
       `<span class="${tempClass(w.cpu_temp_c)}">${fmt(w.cpu_temp_c)}</span>`,
       fmt(w.gpu_temp_c),
       fmt(w.gpu_util),
       fmt(w.power_w),
       fmt(thermal),
-      truncCell((w.holding || []).slice(0,2).join(' | ') || '-', 64, true),
+      gpuWorkLabel(w),
       `<span class="${hbClass(w.age_s)}">${fmt(w.age_s)}</span>`
     ];
   });
   document.getElementById('brainGpus').innerHTML = table(
-    ['Model', 'Name', 'State', 'VRAM', 'CPU C', 'GPU C', 'GPU %', 'W', 'Thermal', 'Holding', 'HB'],
+    ['Model', 'Name', 'State', 'Lane', 'Avail', 'VRAM', 'CPU C', 'GPU C', 'GPU %', 'W', 'Thermal', 'Work', 'HB'],
     brainRows
   );
   bindCopyables('#brainGpus');

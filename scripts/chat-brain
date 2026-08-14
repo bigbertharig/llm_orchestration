@@ -4,6 +4,15 @@
 #        chat-brain --new    (opens new terminal window)
 #        chat-brain --no-init (skip startup prompt file)
 
+set -euo pipefail
+
+BASE_DIR="/home/bryan/llm_orchestration"
+RUNTIME_PREFLIGHT="$BASE_DIR/scripts/runtime_preflight.py"
+RETURN_DEFAULT="$BASE_DIR/scripts/return_default.py"
+CONFIG_PATH="$BASE_DIR/shared/agents/config.json"
+CATALOG_PATH="$BASE_DIR/shared/agents/models.catalog.json"
+CHAT_LEASE_OWNER="chat-brain:$(hostname):$$"
+
 if [[ -n "${BRAIN_MODEL_OVERRIDE:-}" ]]; then
     MODEL="$BRAIN_MODEL_OVERRIDE"
 else
@@ -26,16 +35,163 @@ PY
 )"
 fi
 
+EXPECTED_MODEL_FILE="$(python3 - "$MODEL" "$CATALOG_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+model_id = sys.argv[1]
+catalog_path = Path(sys.argv[2])
+expected = ""
+try:
+    data = json.loads(catalog_path.read_text(encoding="utf-8"))
+    for row in data.get("models", []):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("id") or "").strip() != model_id:
+            continue
+        gguf = str(row.get("gguf_path") or "").strip()
+        if gguf:
+            expected = Path(gguf).name
+        break
+except Exception:
+    pass
+print(expected)
+PY
+)"
+
+probe_brain_runtime() {
+    local expected_file="$1"
+    ssh -o BatchMode=yes gpu python3 - "$expected_file" <<'PY'
+import json
+import sys
+import urllib.request
+from pathlib import Path
+
+expected = str(sys.argv[1] or "").strip()
+payload = {
+    "runtime_ok": False,
+    "loaded_model": "",
+    "brain_state": "missing",
+    "brain_pid_running": False,
+    "match": False,
+}
+
+try:
+    with urllib.request.urlopen("http://127.0.0.1:11434/v1/models", timeout=5) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    models = data.get("data") or []
+    if models and isinstance(models[0], dict):
+        payload["loaded_model"] = str(models[0].get("id") or "").strip()
+        payload["runtime_ok"] = True
+except Exception as exc:
+    payload["error"] = str(exc)
+
+state_path = Path("/mnt/shared/brain/state.json")
+if state_path.exists():
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        payload["brain_state"] = str(state.get("status") or "unknown").strip() or "unknown"
+        pid = int(state.get("pid") or 0)
+        payload["brain_pid_running"] = pid > 0 and Path(f"/proc/{pid}").exists()
+    except Exception:
+        payload["brain_state"] = "unreadable"
+
+payload["match"] = bool(expected) and payload["loaded_model"] == expected
+print(json.dumps(payload))
+PY
+}
+
+ensure_brain_ready() {
+    local status_json
+    status_json="$(probe_brain_runtime "$EXPECTED_MODEL_FILE")"
+    if python3 - "$status_json" <<'PY'
+import json
+import sys
+data = json.loads(sys.argv[1])
+raise SystemExit(0 if data.get("match") else 1)
+PY
+    then
+        echo "[chat-brain] brain runtime already serving ${MODEL}"
+        python3 "$BASE_DIR/scripts/load-gpu-runtime" \
+            --model "$MODEL" \
+            --gpu 0 \
+            --port 11434 \
+            --role brain \
+            --name llama-brain \
+            --lease-owner "$CHAT_LEASE_OWNER"
+        return 0
+    fi
+
+    echo "[chat-brain] brain runtime is not ready for ${MODEL}"
+    python3 - "$status_json" <<'PY'
+import json
+import sys
+data = json.loads(sys.argv[1])
+loaded = str(data.get("loaded_model") or "").strip() or "none"
+state = str(data.get("brain_state") or "").strip() or "unknown"
+pid_running = bool(data.get("brain_pid_running"))
+print(f"[chat-brain] observed runtime model: {loaded}")
+print(f"[chat-brain] observed brain state: {state} pid_running={pid_running}")
+PY
+
+    echo "[chat-brain] loading requested brain runtime for ${MODEL}"
+    python3 "$BASE_DIR/scripts/load-gpu-runtime" \
+        --model "$MODEL" \
+        --gpu 0 \
+        --port 11434 \
+        --role brain \
+        --name llama-brain \
+        --lease-owner "$CHAT_LEASE_OWNER"
+
+    status_json="$(probe_brain_runtime "$EXPECTED_MODEL_FILE")"
+    if ! python3 - "$status_json" <<'PY'
+import json
+import sys
+data = json.loads(sys.argv[1])
+raise SystemExit(0 if data.get("match") else 1)
+PY
+    then
+        python3 - "$status_json" <<'PY'
+import json
+import sys
+data = json.loads(sys.argv[1])
+loaded = str(data.get("loaded_model") or "").strip() or "none"
+state = str(data.get("brain_state") or "").strip() or "unknown"
+print(f"[chat-brain] expected configured brain model but observed loaded_model={loaded} brain_state={state}", file=sys.stderr)
+PY
+        return 1
+    fi
+
+    echo "[chat-brain] brain runtime ready for ${MODEL}"
+}
+
+release_chat_lease() {
+    ssh -o BatchMode=yes gpu python3 - "$CHAT_LEASE_OWNER" <<'PY' || true
+import sys
+from pathlib import Path
+
+owner = sys.argv[1]
+sys.path.insert(0, "/mnt/shared/agents")
+from gpu_leases import GPULeaseStore
+
+store = GPULeaseStore(Path("/mnt/shared"))
+lease = store.for_gpu(0)
+if lease and str(lease.get("owner") or "") == owner:
+    store.release(str(lease["lease_id"]), owner=owner)
+PY
+}
+
 REMOTE_CMD="python3 /home/bryan/llm_orchestration/scripts/chat_runtime.py --port 11434 --model ${MODEL}"
 INIT_FILE="${BRAIN_CHAT_INIT_FILE:-/home/bryan/Desktop/brain_chat_init.txt}"
 NO_INIT=0
 
-if [[ "$1" == "--no-init" ]]; then
+if [[ "${1:-}" == "--no-init" ]]; then
     NO_INIT=1
     shift
 fi
 
-if [[ "$1" == "--new" ]]; then
+if [[ "${1:-}" == "--new" ]]; then
     EXTRA=""
     if [[ "$NO_INIT" -eq 1 ]]; then
         EXTRA=" --no-init"
@@ -43,6 +199,8 @@ if [[ "$1" == "--new" ]]; then
     lxterminal --title="Brain (${MODEL})" -e "/home/bryan/llm_orchestration/scripts/chat-brain${EXTRA}" &
     disown
 else
+    ensure_brain_ready
+    trap release_chat_lease EXIT
     if [[ "$NO_INIT" -eq 0 && -s "$INIT_FILE" ]]; then
         echo "[chat-brain] injecting startup prompt from: $INIT_FILE"
         INIT_PROMPT="$(python3 - "$INIT_FILE" <<'PY'

@@ -110,6 +110,10 @@ Operator-facing control labels match the workspace docs:
 - `Return To Default`
 - `Reset selected GPU`
 
+`/api/status` includes `control_policy` and `gpu_leases`. The dashboard header
+shows the current boot profile, admitted controllers, and active lease count;
+GPU rows show controller-neutral lease ownership from worker heartbeats.
+
 Reset/kill endpoints run stale-artifact cleanup hooks (orphan task locks, stale processing heartbeats, system meta cleanup) before reporting completion.
 
 ## Reset Semantics

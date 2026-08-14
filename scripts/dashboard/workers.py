@@ -16,6 +16,18 @@ from .utils import (
 
 BENCHMARK_STATUS_MAX_AGE_S = 6 * 3600
 BENCHMARK_IDLE_CLEAR_AGE_S = 5 * 60
+GPU_LANES = ("BENCHING", "TASKING", "CHATTING", "SUPERVISING")
+LANE_ALIASES = {
+    "BENCHMARK": "BENCHING",
+    "BENCHMARKING": "BENCHING",
+    "BENCHMARKS": "BENCHING",
+    "TASK": "TASKING",
+    "PLAN": "TASKING",
+    "PLANS": "TASKING",
+    "CHAT": "CHATTING",
+    "INTERACTIVE": "CHATTING",
+    "SUPERVISION": "SUPERVISING",
+}
 TASK_NICKNAME_PATHS = (
     Path("/media/bryan/shared/plans/shoulders/benchmarking/docker/task_nicknames.json"),
     Path("/home/bryan/Desktop/shared/plans/shoulders/benchmarking/docker/task_nicknames.json"),
@@ -243,21 +255,98 @@ def classify_thermal_cause(reasons: Any) -> str:
     return "none"
 
 
-def _is_active_runtime_holding_phase(phase: str) -> bool:
-    """Return True only for in-progress runtime transition phases."""
+def _is_active_runtime_holding_phase(phase: str, *, runtime_state: str = "", task_id: Any = None) -> bool:
+    """Return True only for phases that should surface as active dashboard holds."""
     text = str(phase or "").strip()
     if not text:
         return False
+    state = str(runtime_state or "").strip()
     terminal_markers = (
         "load_complete",
         "split_load_complete",
         "unload_complete",
+        "startup_cold_reset",
+        "runtime_health_reconciled",
+        "wedge_cooldown_recovery",
     )
     if text in terminal_markers:
         return False
     if text.startswith("split_cleared"):
         return False
+    if str(task_id or "").strip():
+        return True
+    if state == "cold":
+        return False
     return True
+
+
+def _normalize_lane(value: Any) -> str:
+    lane = str(value or "").strip().upper()
+    return LANE_ALIASES.get(lane, lane)
+
+
+def _lane_state_from_heartbeat(hb: dict[str, Any]) -> dict[str, Any]:
+    """Return the GPU's normalized lane/busy surface for dashboard display."""
+    available = hb.get("available_for_lanes")
+    if not isinstance(available, dict):
+        available = {}
+    blocked = hb.get("blocked_by_lane")
+    if not isinstance(blocked, dict):
+        blocked = {}
+
+    lease = hb.get("lease") if isinstance(hb.get("lease"), dict) else {}
+    leased = bool(hb.get("leased") or lease.get("leased"))
+    busy = bool(hb.get("busy"))
+    lane = _normalize_lane(hb.get("busy_lane"))
+    owner = str(hb.get("busy_owner") or "").strip()
+    reason = str(hb.get("busy_reason") or "").strip()
+
+    if leased:
+        lane = _normalize_lane(
+            lane or lease.get("lane") or lease.get("controller") or "LEASED"
+        )
+        owner = owner or str(lease.get("owner") or lease.get("controller") or "unknown").strip()
+        reason = reason or f"leased:{lane}"
+        busy = True
+    elif not busy:
+        active_workers = int(hb.get("active_workers") or 0)
+        active_tasks = hb.get("active_tasks") if isinstance(hb.get("active_tasks"), list) else []
+        runtime_state = str(hb.get("runtime_state") or "").strip()
+        if active_workers > 0 or active_tasks:
+            lane = "TASKING"
+            owner = str(hb.get("name") or "").strip()
+            reason = "active_task"
+            busy = True
+        elif runtime_state.startswith("loading") or runtime_state in {"unloading", "wedged"}:
+            lane = "TASKING"
+            owner = str(hb.get("name") or "").strip()
+            reason = f"runtime:{runtime_state}"
+            busy = True
+
+    normalized_available: dict[str, bool] = {}
+    for lane_name in GPU_LANES:
+        raw = available.get(lane_name)
+        if isinstance(raw, bool):
+            normalized_available[lane_name] = raw
+        else:
+            normalized_available[lane_name] = not busy
+
+    if not reason and busy:
+        reason = f"busy:{lane or 'unknown'}"
+
+    available_labels = [k for k in GPU_LANES if normalized_available.get(k)]
+    blocked_labels = [k for k in GPU_LANES if not normalized_available.get(k)]
+    return {
+        "busy": busy,
+        "lane": lane,
+        "owner": owner,
+        "reason": reason,
+        "available_for_lanes": normalized_available,
+        "blocked_by_lane": blocked,
+        "available_lanes": available_labels,
+        "blocked_lanes": blocked_labels,
+        "status": "busy" if busy else "available",
+    }
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -505,6 +594,7 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
         runtime_phase = str(hb.get("runtime_transition_phase") or "").strip()
         runtime_api_base = str(hb.get("runtime_api_base") or "").strip()
         model_loaded = bool(hb.get("model_loaded"))
+        lane_state = _lane_state_from_heartbeat(hb)
         if model_loaded and loaded_model:
             if runtime_placement == "split_gpu":
                 host_display = f"{loaded_model} [split"
@@ -525,8 +615,14 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
         else:
             state_display = hb.get("state", "?")
 
-        if _is_active_runtime_holding_phase(runtime_phase) and runtime_phase not in held:
+        if _is_active_runtime_holding_phase(
+            runtime_phase,
+            runtime_state=runtime_state,
+            task_id=hb.get("runtime_transition_task_id"),
+        ) and runtime_phase not in held:
             held.append(runtime_phase)
+        if lane_state["busy"] and lane_state["reason"] and not held:
+            held.append(lane_state["reason"])
 
         active_suite = ""
         active_task = ""
@@ -601,6 +697,17 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
             "loaded_tier": hb.get("loaded_tier"),
             "runtime_placement": hb.get("runtime_placement"),
             "runtime_group_id": hb.get("runtime_group_id"),
+            "busy": lane_state["busy"],
+            "busy_lane": lane_state["lane"],
+            "busy_owner": lane_state["owner"],
+            "busy_reason": lane_state["reason"],
+            "leased": bool(hb.get("leased")),
+            "lease_controller": str(hb.get("lease_controller") or "").strip(),
+            "lease": hb.get("lease") if isinstance(hb.get("lease"), dict) else None,
+            "available_for_lanes": lane_state["available_for_lanes"],
+            "available_lanes": lane_state["available_lanes"],
+            "blocked_lanes": lane_state["blocked_lanes"],
+            "lane_status": lane_state["status"],
             "host": host_display,
             "updated_at": hb.get("last_updated"),
             "age_s": heartbeat_age_seconds(hb.get("last_updated")),
@@ -637,6 +744,14 @@ def load_worker_rows(shared_path: Path, processing_tasks: list[dict[str, Any]]) 
             "gpu_id": None,
             "type": "cpu",
             "state": hb.get("state", "?"),
+            "busy": bool(active_task_id),
+            "busy_lane": "TASKING" if active_task_id else "",
+            "busy_owner": name if active_task_id else "",
+            "busy_reason": "active_task" if active_task_id else "",
+            "available_for_lanes": {},
+            "available_lanes": [],
+            "blocked_lanes": [],
+            "lane_status": "busy" if active_task_id else "available",
             "host": hb.get("hostname", "-"),
             "updated_at": hb.get("last_updated"),
             "age_s": heartbeat_age_seconds(hb.get("last_updated")),

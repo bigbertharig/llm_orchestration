@@ -1,0 +1,821 @@
+#!/usr/bin/env python3
+"""Safely load a GGUF model onto a specific rig GPU.
+
+This is an operator wrapper around the existing runtime pieces:
+- rig-side runtime state checks use runtime_preflight.py and direct probes
+- model startup uses /mnt/shared/scripts/llama_runtime/run_runtime.sh
+
+The wrapper owns only the human-facing safety checks and prompts.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+
+BASE_DIR = Path("/home/bryan/llm_orchestration")
+LOCAL_CATALOG = BASE_DIR / "shared" / "agents" / "models.catalog.json"
+LOCAL_CONFIG = BASE_DIR / "shared" / "agents" / "config.json"
+REMOTE_HOST = "gpu"
+REMOTE_RUN_RUNTIME = "/mnt/shared/scripts/llama_runtime/run_runtime.sh"
+REMOTE_RUNTIME_PREFLIGHT = "/mnt/shared/scripts/runtime_preflight.py"
+REMOTE_GPU_LEASE = "/mnt/shared/scripts/manage_gpu_lease.py"
+REMOTE_PYTHON = "/home/bryan/llm-orchestration-venv/bin/python"
+
+LANE_BLOCKS = {
+    "BENCHING": {"TASKING", "CHATTING", "SUPERVISING"},
+    "TASKING": {"BENCHING", "CHATTING", "SUPERVISING"},
+    "CHATTING": {"BENCHING", "TASKING", "SUPERVISING"},
+    "SUPERVISING": {"BENCHING", "TASKING", "CHATTING"},
+}
+LANE_CONTROLLERS = {
+    "BENCHING": "benchmarks",
+    "TASKING": "plans",
+    "CHATTING": "interactive",
+    "SUPERVISING": "supervision",
+}
+
+
+def run(cmd: list[str], *, input_text: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        input=input_text,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=timeout,
+    )
+
+
+def ssh(*remote_args: str, input_text: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    return run(["ssh", "-o", "BatchMode=yes", REMOTE_HOST, *remote_args], input_text=input_text, timeout=timeout)
+
+
+def load_json(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{path} must contain a JSON object")
+    return data
+
+
+def resolve_model(model_id: str) -> dict:
+    catalog = load_json(LOCAL_CATALOG)
+    for row in catalog.get("models", []) or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("id") or "").strip() == model_id:
+            gguf_path = str(row.get("gguf_path") or "").strip()
+            if not gguf_path:
+                raise RuntimeError(f"model {model_id} has no gguf_path in {LOCAL_CATALOG}")
+            return {
+                "id": model_id,
+                "gguf_path": gguf_path,
+                "expected_loaded_model": Path(gguf_path).name,
+                "placement": str(row.get("placement") or "").strip(),
+                "tier": row.get("tier"),
+                "split_groups": row.get("split_groups") if isinstance(row.get("split_groups"), list) else [],
+            }
+    raise RuntimeError(f"model {model_id} not found in {LOCAL_CATALOG}")
+
+
+def config_port_for_gpu(gpu_id: int, role: str) -> int:
+    if role == "brain":
+        return 11434
+    config = load_json(LOCAL_CONFIG)
+    for row in config.get("gpus", []) or []:
+        if isinstance(row, dict) and int(row.get("id") or -1) == gpu_id:
+            return int(row.get("port") or 0)
+    raise RuntimeError(f"no configured worker port found for gpu-{gpu_id}")
+
+
+def worker_gpu_ports() -> dict[int, int]:
+    config = load_json(LOCAL_CONFIG)
+    ports: dict[int, int] = {}
+    for row in config.get("gpus", []) or []:
+        if not isinstance(row, dict):
+            continue
+        gpu_id = int(row.get("id") or -1)
+        port = int(row.get("port") or 0)
+        if gpu_id >= 0 and port:
+            ports[gpu_id] = port
+    return ports
+
+
+def runtime_defaults(model_id: str, role: str, placement: str) -> dict:
+    config = load_json(LOCAL_CONFIG)
+    if placement == "split_gpu":
+        profiles = config.get("llama_split_profiles") if isinstance(config.get("llama_split_profiles"), dict) else {}
+        defaults = config.get("llama_split_defaults") if isinstance(config.get("llama_split_defaults"), dict) else {}
+    else:
+        profiles = config.get("llama_single_profiles") if isinstance(config.get("llama_single_profiles"), dict) else {}
+        defaults = config.get("llama_single_defaults") if isinstance(config.get("llama_single_defaults"), dict) else {}
+    profile = profiles.get(model_id) if isinstance(profiles.get(model_id), dict) else {}
+    merged = {**defaults, **profile}
+
+    ctx_size = int(merged.get("ctx_size") or (16384 if role == "brain" else 8192))
+    batch_size = int(merged.get("batch_size") or (64 if role == "brain" else 64))
+    parallel = int(merged.get("parallel") or 1)
+    n_gpu_layers = int(merged.get("n_gpu_layers") or 999)
+    if placement == "split_gpu" and model_id == "phi-4:14b":
+        n_gpu_layers = -1
+    image = str(merged.get("image") or "").strip()
+    if not image:
+        if model_id.startswith("qwen3.6:") or model_id.startswith("gemma-4:"):
+            image = "llama-runtime:b8884-candidate"
+        else:
+            image = str(config.get("llama_runtime_image") or "llama-runtime:sm61-sm86").strip()
+
+    extra_args = []
+    configured_extra = merged.get("extra_args") or []
+    if isinstance(configured_extra, list):
+        extra_args.extend(str(x) for x in configured_extra if str(x).strip())
+    if model_id.startswith(("qwen3:", "qwen3.5:", "qwen3.6:")) and "--reasoning-budget" not in extra_args:
+        extra_args.extend(["--reasoning-budget", "0"])
+
+    return {
+        "ctx_size": ctx_size,
+        "batch_size": batch_size,
+        "parallel": parallel,
+        "n_gpu_layers": n_gpu_layers,
+        "image": image,
+        "extra_args": extra_args,
+        "tensor_split": str(merged.get("tensor_split") or "").strip(),
+    }
+
+
+def remote_probe(port: int, gpu_id: int) -> dict:
+    script = r"""
+import json
+import subprocess
+import urllib.request
+from pathlib import Path
+
+port = int(__import__("sys").argv[1])
+gpu_id = int(__import__("sys").argv[2])
+out = {
+    "runtime_ok": False,
+    "loaded_model": "",
+    "port": port,
+    "gpu": gpu_id,
+    "gpu_memory_used_mb": 0,
+    "gpu_utilization_pct": 0,
+    "docker_containers": [],
+    "benchmark_containers": [],
+    "active_batches": {},
+    "processing_tasks": [],
+    "lease": None,
+    "heartbeat": None,
+    "available_for_lanes": {},
+    "busy": False,
+    "busy_lane": "",
+    "busy_owner": "",
+    "busy_reason": "",
+}
+
+try:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=3) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    models = data.get("data") or []
+    if models and isinstance(models[0], dict):
+        out["runtime_ok"] = True
+        out["loaded_model"] = str(models[0].get("id") or "").strip()
+except Exception as exc:
+    out["runtime_error"] = str(exc)
+
+try:
+    proc = subprocess.run(
+        ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
+        text=True, capture_output=True, check=False, timeout=10,
+    )
+    for line in proc.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 3 and int(parts[0]) == gpu_id:
+            out["gpu_utilization_pct"] = int(float(parts[1]))
+            out["gpu_memory_used_mb"] = int(float(parts[2]))
+except Exception as exc:
+    out["gpu_error"] = str(exc)
+
+try:
+    proc = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}"],
+        text=True, capture_output=True, check=False, timeout=10,
+    )
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        name = line.split("\t", 1)[0]
+        out["docker_containers"].append(line)
+        if "bench" in name.lower():
+            out["benchmark_containers"].append(line)
+except Exception as exc:
+    out["docker_error"] = str(exc)
+
+try:
+    heartbeat_path = Path(f"/mnt/shared/gpus/gpu_{gpu_id}/heartbeat.json")
+    if heartbeat_path.exists():
+        heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+        if isinstance(heartbeat, dict):
+            out["heartbeat"] = heartbeat
+            lease = heartbeat.get("lease")
+            if isinstance(lease, dict) and heartbeat.get("leased", False):
+                out["lease"] = lease
+            out["available_for_lanes"] = heartbeat.get("available_for_lanes") if isinstance(heartbeat.get("available_for_lanes"), dict) else {}
+            out["busy"] = bool(heartbeat.get("busy", False))
+            out["busy_lane"] = str(heartbeat.get("busy_lane") or "").strip()
+            out["busy_owner"] = str(heartbeat.get("busy_owner") or "").strip()
+            out["busy_reason"] = str(heartbeat.get("busy_reason") or "").strip()
+    if out["lease"] is None:
+        lease_path = Path("/mnt/shared/gpus/leases.json")
+        if lease_path.exists():
+            state = json.loads(lease_path.read_text(encoding="utf-8"))
+            matches = [
+                lease for lease in state.get("leases", [])
+                if isinstance(lease, dict)
+                and gpu_id in {int(value) for value in lease.get("gpu_ids", [])}
+            ]
+            if len(matches) > 1:
+                raise RuntimeError(f"GPU {gpu_id} appears in multiple leases")
+            if matches:
+                out["lease"] = matches[0]
+except Exception as exc:
+    out["lease_error"] = str(exc)
+
+try:
+    state_path = Path("/mnt/shared/brain/state.json")
+    if state_path.exists():
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if isinstance(state.get("active_batches"), dict):
+            out["active_batches"] = state["active_batches"]
+except Exception:
+    pass
+
+try:
+    processing = Path("/mnt/shared/tasks/processing")
+    if processing.exists():
+        out["processing_tasks"] = sorted(p.name for p in processing.glob("*.json") if not p.name.endswith(".heartbeat.json"))
+except Exception:
+    pass
+
+print(json.dumps(out))
+"""
+    proc = ssh("python3", "-", str(port), str(gpu_id), input_text=script, timeout=20)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "remote probe failed").strip())
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def split_group_members(group: dict) -> list[int]:
+    members: list[int] = []
+    for value in group.get("members") or []:
+        text = str(value).strip()
+        if text.startswith("gpu-"):
+            text = text[4:]
+        if text:
+            members.append(int(text))
+    return members
+
+
+def probe_single_candidates(candidate_gpus: list[int]) -> dict[int, dict]:
+    ports = worker_gpu_ports()
+    probes: dict[int, dict] = {}
+    for gpu_id in candidate_gpus:
+        port = ports.get(gpu_id)
+        if not port:
+            continue
+        probes[gpu_id] = remote_probe(port, gpu_id)
+    return probes
+
+
+def lease_lane(lease: dict | None) -> str:
+    if not isinstance(lease, dict):
+        return ""
+    lane = str(lease.get("lane") or lease.get("controller") or "").strip().upper()
+    aliases = {
+        "BENCHMARKS": "BENCHING",
+        "BENCHMARK": "BENCHING",
+        "BENCHMARKING": "BENCHING",
+        "PLANS": "TASKING",
+        "TASK": "TASKING",
+        "PLAN": "TASKING",
+        "INTERACTIVE": "CHATTING",
+        "CHAT": "CHATTING",
+        "SUPERVISION": "SUPERVISING",
+    }
+    return aliases.get(lane, lane)
+
+
+def lease_owner(lease: dict | None) -> str:
+    if not isinstance(lease, dict):
+        return ""
+    return str(lease.get("owner") or lease.get("controller") or "unknown").strip()
+
+
+def gpu_is_available(probe: dict, current_lane: str) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    available_for_lanes = probe.get("available_for_lanes")
+    if isinstance(available_for_lanes, dict) and available_for_lanes.get(current_lane) is False:
+        reason = str(probe.get("busy_reason") or "").strip() or "busy"
+        lane = str(probe.get("busy_lane") or "").strip() or "unknown"
+        owner = str(probe.get("busy_owner") or "").strip() or "unknown"
+        reasons.append(f"GPU heartbeat says unavailable for {current_lane}: {reason} lane={lane} owner={owner}")
+    lease = probe.get("lease")
+    if isinstance(lease, dict) and not reasons:
+        reasons.append(
+            f"leased for {lease_lane(lease)} by {lease_owner(lease)}"
+        )
+    if str(probe.get("loaded_model") or "").strip():
+        reasons.append(f"port {probe.get('port')} serving {probe.get('loaded_model')}")
+    if int(probe.get("gpu_memory_used_mb") or 0) > 512:
+        reasons.append(f"GPU {probe.get('gpu')} using {probe.get('gpu_memory_used_mb')} MiB")
+    if probe.get("benchmark_containers"):
+        reasons.append("benchmark container running")
+    if probe.get("active_batches"):
+        reasons.append("brain active batch running")
+    if probe.get("processing_tasks"):
+        reasons.append("processing tasks present")
+    return not reasons, reasons
+
+
+def reserved_split_group_ids(preflight: dict) -> set[str]:
+    ids: set[str] = set()
+    for value in preflight.get("split_reservation_files") or []:
+        name = Path(str(value)).name
+        if name.endswith(".json"):
+            name = name[:-5]
+        if name:
+            ids.add(name)
+    return ids
+
+
+def reserved_split_members(reserved_group_ids: set[str]) -> set[int]:
+    members: set[int] = set()
+    catalog = load_json(LOCAL_CATALOG)
+    for row in catalog.get("models", []) or []:
+        if not isinstance(row, dict):
+            continue
+        for group in row.get("split_groups") or []:
+            if not isinstance(group, dict):
+                continue
+            if str(group.get("id") or "").strip() in reserved_group_ids:
+                members.update(split_group_members(group))
+    return members
+
+
+def select_single_gpu(candidate_gpus: list[int], blocked_gpus: set[int], current_lane: str) -> tuple[int, int, dict, dict[int, dict]]:
+    probes = probe_single_candidates(candidate_gpus)
+    for gpu_id in candidate_gpus:
+        if gpu_id in blocked_gpus:
+            continue
+        probe = probes.get(gpu_id)
+        if not probe:
+            continue
+        ok, _ = gpu_is_available(probe, current_lane)
+        if ok:
+            return gpu_id, int(probe["port"]), probe, probes
+    details = []
+    for gpu_id in candidate_gpus:
+        if gpu_id in blocked_gpus:
+            details.append(f"gpu-{gpu_id}: blocked by split reservation")
+            continue
+        probe = probes.get(gpu_id)
+        if not probe:
+            details.append(f"gpu-{gpu_id}: no configured probe")
+            continue
+        _, reasons = gpu_is_available(probe, current_lane)
+        details.append(f"gpu-{gpu_id}: " + (", ".join(reasons) if reasons else "available"))
+    raise RuntimeError("no available single-GPU worker found; " + "; ".join(details))
+
+
+def select_split_group(model: dict, requested_group: str, blocked_group_ids: set[str], current_lane: str) -> tuple[dict, dict[int, dict]]:
+    groups = [g for g in model.get("split_groups", []) if isinstance(g, dict)]
+    if requested_group != "auto":
+        groups = [g for g in groups if str(g.get("id") or "").strip() == requested_group]
+    if not groups:
+        raise RuntimeError(f"no split group matching {requested_group!r} for {model['id']}")
+
+    candidate_gpu_ids = sorted({gpu for group in groups for gpu in split_group_members(group)})
+    probes = probe_single_candidates(candidate_gpu_ids)
+    rejected: list[str] = []
+    expected = str(model.get("expected_loaded_model") or "").strip()
+    for group in groups:
+        group_id = str(group.get("id") or "").strip()
+        members = split_group_members(group)
+        reasons: list[str] = []
+        group_port = int(group.get("port") or 0)
+        if group_port:
+            group_probe = remote_probe(group_port, members[0] if members else 0)
+            loaded = str(group_probe.get("loaded_model") or "").strip()
+            if loaded == expected:
+                return group, probes
+            if loaded:
+                reasons.append(f"group port {group_port} serving {loaded}")
+        if group_id in blocked_group_ids:
+            reasons.append("split reservation exists")
+        for gpu_id in members:
+            probe = probes.get(gpu_id)
+            if not probe:
+                reasons.append(f"gpu-{gpu_id}: no configured probe")
+                continue
+            ok, gpu_reasons = gpu_is_available(probe, current_lane)
+            if not ok:
+                reasons.extend(f"gpu-{gpu_id}: {reason}" for reason in gpu_reasons)
+        if not reasons:
+            return group, probes
+        rejected.append(f"{group_id}: " + "; ".join(reasons))
+    raise RuntimeError("no available split group found; " + " | ".join(rejected))
+
+
+def run_preflight() -> dict:
+    proc = ssh(
+        REMOTE_PYTHON,
+        REMOTE_RUNTIME_PREFLIGHT,
+        "--shared-root", "/mnt/shared",
+        "--config", "/mnt/shared/agents/config.json",
+        "--catalog", "/mnt/shared/agents/models.catalog.json",
+        "--clear-orphan-queue-locks",
+        "--cleanup-stale-runtime-meta",
+        "--cleanup-test-runtime-containers",
+        "--json",
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "runtime preflight failed").strip())
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def ask(prompt: str, assume_yes: bool) -> bool:
+    if assume_yes:
+        print(f"{prompt} yes")
+        return True
+    answer = input(f"{prompt} [y/N] ").strip().lower()
+    return answer in {"y", "yes"}
+
+
+def needs_override(probe: dict, expected: str) -> list[str]:
+    warnings: list[str] = []
+    loaded = str(probe.get("loaded_model") or "").strip()
+    if loaded and loaded != expected:
+        warnings.append(f"port {probe['port']} is serving {loaded}, expected {expected}")
+    if int(probe.get("gpu_memory_used_mb") or 0) > 512 and loaded != expected:
+        warnings.append(
+            f"GPU {probe['gpu']} is using {probe['gpu_memory_used_mb']} MiB VRAM"
+        )
+    if probe.get("benchmark_containers"):
+        warnings.append("benchmark container(s) are running: " + "; ".join(probe["benchmark_containers"]))
+    if probe.get("active_batches"):
+        warnings.append("brain has active batch(es): " + ", ".join(sorted(probe["active_batches"].keys())))
+    if probe.get("processing_tasks"):
+        warnings.append("processing task(s) exist: " + ", ".join(probe["processing_tasks"][:5]))
+    return warnings
+
+
+def acquire_target(
+    gpu_ids: list[int],
+    ports: list[int],
+    lane: str,
+    owner: str,
+    run_id: str,
+    ttl_seconds: int,
+) -> dict:
+    cmd = [
+        REMOTE_PYTHON,
+        REMOTE_GPU_LEASE,
+        "--shared-path", "/mnt/shared",
+        "acquire",
+        "--controller", LANE_CONTROLLERS[lane],
+        "--owner", owner,
+        "--run-id", run_id,
+        "--gpus", ",".join(str(gpu_id) for gpu_id in gpu_ids),
+        "--ports", ",".join(str(port) for port in ports),
+        "--lane", lane.lower(),
+        "--ttl-seconds", str(ttl_seconds),
+    ]
+    proc = ssh(*cmd, timeout=30)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or f"failed to lease GPU(s) {gpu_ids}").strip())
+    payload = json.loads(proc.stdout)
+    if not isinstance(payload, dict) or not payload.get("lease_id"):
+        raise RuntimeError("GPU lease acquisition returned an invalid payload")
+    return payload
+
+
+def renew_lease(lease_id: str, owner: str, ttl_seconds: int) -> dict:
+    cmd = [
+        REMOTE_PYTHON,
+        REMOTE_GPU_LEASE,
+        "--shared-path", "/mnt/shared",
+        "renew",
+        "--lease-id", lease_id,
+        "--owner", owner,
+        "--ttl-seconds", str(ttl_seconds),
+    ]
+    proc = ssh(*cmd, timeout=30)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or f"failed to renew lease {lease_id}").strip())
+    return json.loads(proc.stdout)
+
+
+def release_lease(lease_id: str, owner: str) -> None:
+    cmd = [
+        REMOTE_PYTHON,
+        REMOTE_GPU_LEASE,
+        "--shared-path", "/mnt/shared",
+        "release",
+        "--lease-id", lease_id,
+        "--owner", owner,
+    ]
+    proc = ssh(*cmd, timeout=30)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or f"failed to release lease {lease_id}").strip())
+
+
+def stop_target_runtime(name: str, port: int, role: str) -> None:
+    names = [name]
+    if role == "brain":
+        for candidate in ("llama-brain", "llama-brain-manual"):
+            if candidate not in names:
+                names.append(candidate)
+    quoted_names = " ".join(names)
+    script = f"""
+set -e
+for container_name in {quoted_names}; do
+  docker rm -f "$container_name" >/dev/null 2>&1 || true
+done
+if command -v lsof >/dev/null 2>&1; then
+  pids=$(lsof -tiTCP:{port} -sTCP:LISTEN || true)
+  if [ -n "$pids" ]; then
+    echo "Port {port} still has listener(s): $pids" >&2
+  fi
+fi
+"""
+    proc = ssh("bash", "-s", input_text=script, timeout=60)
+    if proc.stdout.strip():
+        print(proc.stdout.strip())
+    if proc.stderr.strip():
+        print(proc.stderr.strip(), file=sys.stderr)
+
+
+def start_runtime(name: str, model: dict, gpu_id: int, port: int, settings: dict, *, gpus_arg: str | None = None) -> str:
+    cmd = [
+        "bash", REMOTE_RUN_RUNTIME,
+        "--image", settings["image"],
+        "--name", name,
+        "--model", model["gguf_path"],
+        "--port", str(port),
+        "--gpus", gpus_arg or f"device={gpu_id}",
+        "--ctx-size", str(settings["ctx_size"]),
+        "--batch-size", str(settings["batch_size"]),
+        "--parallel", str(settings["parallel"]),
+        "--n-gpu-layers", str(settings["n_gpu_layers"]),
+    ]
+    for arg in settings["extra_args"]:
+        cmd.extend(["--extra-arg", str(arg)])
+    if settings.get("tensor_split"):
+        cmd.extend(["--tensor-split", str(settings["tensor_split"])])
+    proc = ssh(*cmd, timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "runtime start failed").strip())
+    return proc.stdout.strip()
+
+
+def wait_ready(port: int, gpu_id: int, expected: str, timeout_s: int) -> dict:
+    import time
+
+    deadline = time.time() + timeout_s
+    last = {}
+    while time.time() < deadline:
+        last = remote_probe(port, gpu_id)
+        if str(last.get("loaded_model") or "").strip() == expected:
+            return last
+        time.sleep(5)
+    raise RuntimeError(f"runtime did not become ready with {expected}; last probe={last}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Load one model onto one rig GPU with safety checks")
+    parser.add_argument("--model", required=True, help="Model id from models.catalog.json")
+    parser.add_argument("--gpu", default="auto", help="Rig GPU index, or auto for worker single-GPU models")
+    parser.add_argument("--port", type=int, default=0, help="Runtime port; default from role/GPU config")
+    parser.add_argument("--role", choices=["brain", "worker"], default="brain")
+    parser.add_argument("--split-group", default="auto", help="Split group id for split models, or auto")
+    parser.add_argument("--name", default="", help="Docker container name")
+    parser.add_argument(
+        "--lease-owner",
+        default="",
+        help="Stable owner identity used to renew and release the GPU lease",
+    )
+    parser.add_argument("--yes", action="store_true", help="Assume yes for override prompts")
+    parser.add_argument("--force", action="store_true", help="Replace mismatched runtime without prompt")
+    parser.add_argument("--check-only", action="store_true", help="Run checks and report what would happen without loading")
+    parser.add_argument("--timeout", type=int, default=420, help="Seconds to wait for model readiness")
+    parser.add_argument(
+        "--lane",
+        choices=sorted(LANE_BLOCKS),
+        default="CHATTING",
+        help="Controller lane to lease while this runtime is active",
+    )
+    parser.add_argument(
+        "--lease-ttl-seconds",
+        type=int,
+        default=43200,
+        help="Lease lifetime; controllers should renew long-running allocations",
+    )
+    parser.add_argument("--json", action="store_true", help="Print final JSON summary")
+    args = parser.parse_args()
+
+    model = resolve_model(args.model)
+    preflight = run_preflight()
+    lane = args.lane.upper()
+    reserved_groups = reserved_split_group_ids(preflight)
+    blocked_gpus = reserved_split_members(reserved_groups)
+    is_split = model["placement"] == "split_gpu"
+    selected_group: dict | None = None
+    selected_probe: dict | None = None
+    gpus_arg: str | None = None
+
+    if args.role == "brain":
+        gpu_id = 0 if args.gpu == "auto" else int(args.gpu)
+        port = args.port or config_port_for_gpu(gpu_id, args.role)
+    elif is_split:
+        selected_group, member_probes = select_split_group(model, args.split_group, reserved_groups, lane)
+        members = split_group_members(selected_group)
+        if not members:
+            raise RuntimeError(f"split group {selected_group.get('id')} has no members")
+        gpu_id = members[0]
+        port = args.port or int(selected_group.get("port") or 0)
+        if not port:
+            raise RuntimeError(f"split group {selected_group.get('id')} has no port")
+        gpus_arg = "device=" + ",".join(str(x) for x in members)
+        selected_probe = remote_probe(port, gpu_id)
+    else:
+        if args.gpu == "auto":
+            gpu_id, port, selected_probe, _ = select_single_gpu([1, 2, 3, 4, 5], blocked_gpus, lane)
+        else:
+            gpu_id = int(args.gpu)
+            port = args.port or config_port_for_gpu(gpu_id, args.role)
+
+    name = args.name.strip() or (
+        "llama-brain"
+        if args.role == "brain"
+        else (f"llama-split-{selected_group['id']}" if selected_group else f"llama-gpu{gpu_id}")
+    )
+    settings = runtime_defaults(args.model, args.role, model["placement"])
+    if is_split:
+        settings["tensor_split"] = settings.get("tensor_split") or "1,1"
+
+    probe = selected_probe or remote_probe(port, gpu_id)
+    expected = model["expected_loaded_model"]
+    target_gpu_ids = split_group_members(selected_group) if selected_group else [gpu_id]
+    owner = args.lease_owner.strip() or f"load-gpu-runtime:{lane.lower()}:{socket.gethostname()}"
+    run_id = f"{args.role}:{name}:{args.model}"
+    warnings = needs_override(probe, expected)
+    if args.role == "worker" and not is_split and gpu_id in blocked_gpus:
+        warnings.append(f"GPU {gpu_id} is blocked by split reservation")
+    target_probes: dict[int, dict] = {}
+    for target_gpu_id in target_gpu_ids:
+        target_probe = probe if target_gpu_id == gpu_id else remote_probe(
+            config_port_for_gpu(target_gpu_id, "worker"), target_gpu_id
+        )
+        target_probes[target_gpu_id] = target_probe
+        lease = target_probe.get("lease")
+        if isinstance(lease, dict):
+            warnings.append(
+                f"GPU {target_gpu_id} is leased for {lease_lane(lease) or 'unknown'} "
+                f"by {lease_owner(lease)}"
+            )
+
+    existing_leases = {
+        str(target_probe["lease"].get("lease_id")): target_probe["lease"]
+        for target_probe in target_probes.values()
+        if isinstance(target_probe.get("lease"), dict)
+        and str(target_probe["lease"].get("lease_id") or "").strip()
+    }
+    owned_lease = None
+    if len(existing_leases) == 1:
+        candidate = next(iter(existing_leases.values()))
+        if (
+            str(candidate.get("owner") or "") == owner
+            and {int(value) for value in candidate.get("gpu_ids", [])} == set(target_gpu_ids)
+        ):
+            owned_lease = candidate
+    foreign_leases = [
+        lease for lease in existing_leases.values()
+        if owned_lease is None or lease.get("lease_id") != owned_lease.get("lease_id")
+    ]
+    if foreign_leases:
+        details = "; ".join(
+            f"{lease.get('lease_id')} ({lease.get('controller')}/{lease.get('owner')})"
+            for lease in foreign_leases
+        )
+        raise RuntimeError(
+            "target GPU lease conflict: " + details + ". Reconcile the process, port, and "
+            "runtime, then use manage_gpu_lease.py release --force-reconciled explicitly"
+        )
+
+    target_ports = [] if is_split else [port]
+
+    def ensure_lease() -> dict:
+        if owned_lease is not None:
+            return renew_lease(
+                str(owned_lease["lease_id"]),
+                owner,
+                args.lease_ttl_seconds,
+            )
+        return acquire_target(
+            target_gpu_ids,
+            target_ports,
+            lane,
+            owner,
+            run_id,
+            args.lease_ttl_seconds,
+        )
+
+    if str(probe.get("loaded_model") or "").strip() == expected:
+        print(f"[load-gpu-runtime] GPU {gpu_id} already serving {args.model} ({expected}) on port {port}")
+        if warnings:
+            print(f"[load-gpu-runtime] GPU {gpu_id} has active ownership signals:")
+            for warning in warnings:
+                print(f"  - {warning}")
+            if args.check_only:
+                if args.json:
+                    print(json.dumps({"ok": True, "already_ready": True, "check_only": True, "warnings": warnings, "probe": probe, "preflight": preflight}))
+                return 0
+            if not args.force and not ask("Lease this runtime for the requested lane anyway?", args.yes):
+                print("[load-gpu-runtime] cancelled")
+                return 2
+        elif args.check_only:
+            print("[load-gpu-runtime] no active conflict detected")
+            if args.json:
+                print(json.dumps({"ok": True, "already_ready": True, "check_only": True, "warnings": warnings, "probe": probe, "preflight": preflight}))
+            return 0
+        lease = ensure_lease()
+        if args.json:
+            print(json.dumps({"ok": True, "already_ready": True, "lease": lease, "lane": lane, "probe": probe, "preflight": preflight}))
+        return 0
+    if args.check_only:
+        target = f"split group {selected_group['id']} ({gpus_arg})" if selected_group else f"GPU {gpu_id}"
+        print(f"[load-gpu-runtime] check-only for {args.model} on {target}, port {port}, lane {lane}")
+        print(f"[load-gpu-runtime] expected runtime model: {expected}")
+        print(f"[load-gpu-runtime] observed runtime model: {probe.get('loaded_model') or 'none'}")
+        print(f"[load-gpu-runtime] GPU {gpu_id} memory: {probe.get('gpu_memory_used_mb')} MiB")
+        if warnings:
+            print("[load-gpu-runtime] warnings:")
+            for warning in warnings:
+                print(f"  - {warning}")
+        else:
+            print("[load-gpu-runtime] no active conflict detected")
+        if args.json:
+            print(json.dumps({"ok": True, "check_only": True, "warnings": warnings, "probe": probe, "preflight": preflight}))
+        return 0
+
+    if warnings:
+        print(f"[load-gpu-runtime] GPU {gpu_id} is not clean for {args.model}:")
+        for warning in warnings:
+            print(f"  - {warning}")
+        if not args.force and not ask("End the current runtime/task risk and start the requested model?", args.yes):
+            print("[load-gpu-runtime] cancelled")
+            return 2
+
+    target = f"split {selected_group['id']} ({gpus_arg})" if selected_group else f"GPU {gpu_id}"
+    print(f"[load-gpu-runtime] loading {args.model} on {target}, port {port}, container {name}, lane {lane}")
+    print(f"[load-gpu-runtime] image={settings['image']} ctx={settings['ctx_size']} batch={settings['batch_size']}")
+    lease = ensure_lease()
+    try:
+        stop_target_runtime(name, port, args.role)
+        container_id = start_runtime(name, model, gpu_id, port, settings, gpus_arg=gpus_arg)
+        final_probe = wait_ready(port, gpu_id, expected, args.timeout)
+    except Exception:
+        release_lease(str(lease["lease_id"]), owner)
+        raise
+    print(f"[load-gpu-runtime] ready: {args.model} ({expected}) on port {port}")
+    if args.json:
+        print(json.dumps({
+            "ok": True,
+            "model": args.model,
+            "gpu": gpu_id,
+            "lease": lease,
+            "lane": lane,
+            "split_group": selected_group,
+            "port": port,
+            "container": name,
+            "container_id": container_id,
+            "probe": final_probe,
+        }))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\n[load-gpu-runtime] interrupted", file=sys.stderr)
+        raise SystemExit(130)
+    except Exception as exc:
+        print(f"[load-gpu-runtime] ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1)

@@ -20,6 +20,14 @@ from .workers import load_brain_heartbeat, load_brain_state, load_gpu_telemetry,
 _TASK_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
 TASK_ERROR_LIMIT = 4000
 META_COMPLETE_LOOKBACK_SECONDS = 45 * 60
+LEASE_LANE_LABELS = {
+    "benchmarks": "BENCHING",
+    "plans": "TASKING",
+    "interactive": "CHATTING",
+    "supervision": "SUPERVISING",
+    "system": "SYSTEM",
+}
+ALL_GPU_LANES = ("BENCHING", "TASKING", "CHATTING", "SUPERVISING")
 
 
 def _clip_text(text: str, limit: int = TASK_ERROR_LIMIT) -> str:
@@ -31,6 +39,59 @@ def _clip_text(text: str, limit: int = TASK_ERROR_LIMIT) -> str:
     tail = max(1, int(limit * 0.45))
     omitted = len(text) - head - tail
     return text[:head] + f" ...[truncated {omitted} chars]... " + text[-tail:]
+
+
+def apply_gpu_leases(
+    rows: list[dict[str, Any]],
+    lease_state: dict[str, Any],
+) -> None:
+    """Overlay allocation authority onto configured/heartbeat GPU rows."""
+    by_gpu: dict[int, dict[str, Any]] = {}
+    leases = lease_state.get("leases") if isinstance(lease_state, dict) else []
+    for lease in leases if isinstance(leases, list) else []:
+        if not isinstance(lease, dict):
+            continue
+        for value in lease.get("gpu_ids", []) if isinstance(lease.get("gpu_ids"), list) else []:
+            try:
+                gpu_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if gpu_id in by_gpu:
+                by_gpu[gpu_id] = {
+                    "controller": "system",
+                    "lane": "CONTROL_ERROR",
+                    "owner": "duplicate-lease",
+                    "lease_error": f"GPU {gpu_id} appears in multiple leases",
+                }
+            else:
+                by_gpu[gpu_id] = lease
+
+    for row in rows:
+        try:
+            gpu_id = int(row.get("gpu_id"))
+        except (TypeError, ValueError):
+            continue
+        lease = by_gpu.get(gpu_id)
+        if not lease:
+            row.setdefault("leased", False)
+            row.setdefault("lease_controller", "")
+            row.setdefault("lease", None)
+            continue
+        controller = str(lease.get("controller") or "system").strip().lower()
+        lane_value = str(lease.get("lane") or controller).strip().lower()
+        lane = LEASE_LANE_LABELS.get(lane_value, lane_value.upper() or "LEASED")
+        owner = str(lease.get("owner") or controller or "unknown").strip()
+        row["leased"] = True
+        row["lease_controller"] = controller
+        row["lease"] = lease
+        row["busy"] = True
+        row["busy_lane"] = lane
+        row["busy_owner"] = owner
+        row["busy_reason"] = f"leased:{lane}"
+        row["available_for_lanes"] = {name: False for name in ALL_GPU_LANES}
+        row["available_lanes"] = []
+        row["blocked_lanes"] = list(ALL_GPU_LANES)
+        row["lane_status"] = "busy"
 
 
 def task_sort_key(task: dict[str, Any]) -> str:
@@ -340,6 +401,8 @@ def summarize(
     selected_batch_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Generate full dashboard summary data."""
+    control_policy = load_json(shared_path / "brain" / "control_policy.json")
+    gpu_leases = load_json(shared_path / "gpus" / "leases.json")
     brain = load_brain_state(shared_path)
     brain_hb = load_brain_heartbeat(shared_path)
     brain_state_mtime = file_mtime_iso(shared_path / "brain" / "state.json")
@@ -380,6 +443,52 @@ def summarize(
         if str(t.get("executor", "worker")).lower() == "brain":
             brain_holding.append(f"{t.get('name', t.get('task_id', '-'))} [queue]")
     brain_gpu_ids = list(config.get("brain", {}).get("gpus", []))
+    seen_gpu_ids = {w.get("gpu_id") for w in workers if w.get("type") == "gpu"}
+    for g in config.get("gpus", []) if isinstance(config.get("gpus"), list) else []:
+        if not isinstance(g, dict):
+            continue
+        gpu_id = g.get("id")
+        if gpu_id in brain_gpu_ids or gpu_id in seen_gpu_ids:
+            continue
+        telem = gpu_telemetry.get(gpu_id, {}) if isinstance(gpu_id, int) else {}
+        workers.append({
+            "name": g.get("name") or f"gpu-{gpu_id}",
+            "gpu_id": gpu_id,
+            "type": "gpu",
+            "state": "missing_heartbeat",
+            "model_loaded": False,
+            "loaded_model": None,
+            "loaded_tier": 0,
+            "runtime_placement": g.get("placement") or "single_gpu",
+            "runtime_group_id": None,
+            "busy": False,
+            "busy_lane": "",
+            "busy_owner": "",
+            "busy_reason": "missing_heartbeat",
+            "available_for_lanes": {},
+            "available_lanes": [],
+            "blocked_lanes": [],
+            "lane_status": "unknown",
+            "host": g.get("model") or "-",
+            "updated_at": None,
+            "age_s": None,
+            "gpu_temp_c": telem.get("gpu_temp_c"),
+            "cpu_temp_c": None,
+            "gpu_util": telem.get("gpu_util"),
+            "power_w": telem.get("power_w"),
+            "vram_used_mb": telem.get("vram_used_mb"),
+            "vram_total_mb": telem.get("vram_total_mb"),
+            "holding": [],
+            "thermal_event_type": None,
+            "thermal_event_detail": "",
+            "thermal_cause": "none",
+            "active_suite": "",
+            "active_task": "",
+            "active_progress": "",
+            "active_task_index": "",
+            "heartbeat_status": "missing",
+        })
+    workers.sort(key=lambda r: (r.get("type", ""), str(r.get("name", ""))))
     gpu_by_id = {}
     for w in workers:
         if w.get("type") == "gpu":
@@ -431,6 +540,14 @@ def summarize(
                 "gpu_id": gpu_id,
                 "type": "gpu",
                 "state": "online" if brain_hb else "no_heartbeat",
+                "busy": True if brain_hb else False,
+                "busy_lane": "BRAIN" if brain_hb else "",
+                "busy_owner": "brain" if brain_hb else "",
+                "busy_reason": "brain_runtime" if brain_hb else "",
+                "available_for_lanes": {"BENCHING": False, "TASKING": False, "CHATTING": False, "SUPERVISING": False} if brain_hb else {},
+                "available_lanes": [],
+                "blocked_lanes": ["BENCHING", "TASKING", "CHATTING", "SUPERVISING"] if brain_hb else [],
+                "lane_status": "busy" if brain_hb else "unknown",
                 "host": brain_hb.get("host") or brain_hb.get("hostname", "-"),
                 "updated_at": updated_at if isinstance(updated_at, str) else None,
                 "age_s": hb_age_s,
@@ -443,6 +560,9 @@ def summarize(
                 "holding": brain_holding[:],
                 "note": "brain heartbeat + nvidia-smi" if brain_hb else "configured brain GPU has no worker heartbeat",
             })
+
+    apply_gpu_leases(workers, gpu_leases)
+    apply_gpu_leases(brain_gpus, gpu_leases)
 
     alerts: list[dict[str, Any]] = []
     for w in workers:
@@ -590,6 +710,8 @@ def summarize(
 
     return {
         "generated_at": datetime.now().isoformat(),
+        "control_policy": control_policy,
+        "gpu_leases": gpu_leases,
         # Keep tab/card counts aligned with the same filtered lane source
         # that drives the visible list tables.
         "counts": {k: len(v) for k, v in lane_source.items()},

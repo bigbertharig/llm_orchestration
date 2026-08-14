@@ -71,7 +71,7 @@ def heartbeat_age_seconds(last_updated: str | None) -> int | None:
         return None
     try:
         dt = datetime.fromisoformat(last_updated)
-        return int((datetime.now() - dt).total_seconds())
+        return max(0, int((datetime.now() - dt).total_seconds()))
     except Exception:
         return None
 

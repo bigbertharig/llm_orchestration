@@ -96,3 +96,10 @@ tr:last-child td { border-bottom: 0; }
 .chip.complete { color:#4ad66d; background:rgba(74,214,109,.15); }
 .chip.failed { color:#ff6b6b; background:rgba(255,107,107,.15); }
 .chip.missing { color:#9db4c8; background:rgba(157,180,200,.12); }
+.chip.available { color:#38d89c; background:rgba(56,216,156,.14); }
+.chip.blocked { color:#ffcc66; background:rgba(255,204,102,.14); }
+.chip.BENCHING { color:#f9c74f; background:rgba(249,199,79,.16); }
+.chip.TASKING { color:#4cc9f0; background:rgba(76,201,240,.16); }
+.chip.CHATTING { color:#cba6f7; background:rgba(203,166,247,.16); }
+.chip.SUPERVISING { color:#7be495; background:rgba(74,214,109,.14); }
+.chip.BRAIN { color:#ff9a9a; background:rgba(255,107,107,.14); }
