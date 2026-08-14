@@ -1,23 +1,23 @@
 # LLM Orchestration Engine
 
-Distributed task orchestration system for running local LLM workloads across GPU and CPU workers. Uses a tiered intelligence hierarchy with a coordinator (brain) and parallel workers, managed from a Raspberry Pi 5 control plane.
+Distributed task orchestration system for running local LLM workloads across GPU and CPU workers. A local brain coordinates plans while GPU and CPU workers execute tasks through a shared filesystem control plane.
 
 ## Architecture
 
-- **RPi 5** (10.0.0.2): Control plane, NFS server, internet gateway, Claude Code, plan authoring
-- **GPU rig** (10.0.0.3): RTX 3090 Ti, runs brain + GPU workers via `llama-server`
+- **Operator host** (10.0.0.2): Repo checkout, plan authoring, dashboard, and operator wrappers
+- **GPU rig** (10.0.0.3): NFS source, brain GPU, worker GPUs, and `llama-server` runtimes
 - **CPU workers** (10.0.0.10+): Orange Pi Prime cluster (ARM64, 2GB RAM), claim CPU tasks over NFS
-- **Brain (Qwen 32B)**: Coordinator — interprets plans, creates tasks, monitors workers, validates results
-- **GPU workers (Qwen 7B)**: Execute LLM and script tasks on GPU
-- **Shared drive**: 4TB ext4 USB on RPi 5, NFS-shared to all nodes
+- **Brain**: Config-selected coordinator model that interprets plans, creates tasks, monitors workers, and validates results
+- **GPU workers**: Config-selected worker models that execute LLM and script tasks
+- **Shared drive**: 4TB ext4 storage attached to the GPU rig and NFS-mounted by the other nodes
 - **File-based coordination**: Tasks, state, and signals managed via shared filesystem — no message broker needed
 
 See [shared/workspace/architecture.md](shared/workspace/architecture.md) for detailed system design.
 
 ## Hardware
 
-- **Control plane**: Raspberry Pi 5 with 4TB ext4 USB drive
-- **GPU rig**: RTX 3090 Ti (24GB VRAM), connected via ethernet at 10.0.0.3
+- **Operator host**: Control plane at 10.0.0.2
+- **GPU rig**: RTX 3090-class brain GPU plus five 6GB worker GPUs at 10.0.0.3
 - **CPU workers**: Orange Pi Prime (Allwinner H5, 4-core ARM64, 2GB RAM) running Armbian
 - **Network**: 10.0.0.x subnet, gigabit switch, NFS-mounted shared drive on all nodes
 
@@ -28,8 +28,8 @@ See [shared/workspace/quickstart.md](shared/workspace/quickstart.md) for full se
 ### Installation
 
 ```bash
-# On RPi: activate venv and install dependencies
-source ~/ml-env/bin/activate
+# On the operator host: activate the orchestration venv and install dependencies
+source ~/llm-orchestration-venv/bin/activate
 pip install -r requirements.txt
 ```
 

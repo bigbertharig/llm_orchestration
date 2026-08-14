@@ -57,12 +57,24 @@ What to expect:
 
 ## Start The System
 
-Normal start:
+Normal start is the neutral base state:
 
 ```bash
 cd ~/llm_orchestration/shared/agents
 python3 startup.py
 ```
+
+Rig-side path note:
+- On the current GPU rig, the shared live agents directory is available at
+  `/mnt/shared/agents`. If `~/llm_orchestration` is not present on the rig, use:
+
+```bash
+cd /mnt/shared/agents
+python3 startup.py
+```
+
+- The operator-side checkout on the laptop may still be `/home/bryan/llm_orchestration`;
+  keep that repo on `main` for live orchestration scripts.
 
 What `startup.py` is responsible for:
 1. Read `config.json`
@@ -70,19 +82,33 @@ What `startup.py` is responsible for:
 3. Start the brain and load the brain model
 4. Reclaim configured worker runtime ports
 5. Start GPU agents cold by default
-6. Optionally queue startup warm loads if explicitly configured
+6. Do not warm worker models or auto-return to a hot worker unless an explicit mode config requests it
 
 Notes:
-- Brain model loading belongs to startup.
+- Normal startup intentionally loads the brain first even though chat and some benchmark runs may not need it immediately. The tradeoff is a slightly slower boot in exchange for a ready control plane and no surprise brain-load delay when plan execution starts.
 - Worker model loading belongs to orchestrator `meta` tasks.
 - Keep always-on worker-specific runtime services disabled so the orchestrator has single ownership of worker runtime ports.
 
 Use wrapper mode scripts only when you intentionally want that mode's startup behavior:
 
 ```bash
-python3 ~/llm_orchestration/scripts/start_default_mode.py
+python3 ~/llm_orchestration/scripts/start_plan_mode.py
 python3 ~/llm_orchestration/scripts/benchmarks/start_benchmark_mode.py
-python3 ~/llm_orchestration/scripts/benchmarks/start_custom_mode.py --brain-model ... --single-model ... --split-model ...
+python3 ~/llm_orchestration/scripts/benchmarks/start_custom_mode.py --models qwen3.5:4b qwen2.5-coder:7b ...
+```
+
+Boot-profile intent:
+- `startup.py`: `neutral`, brain up, workers cold, no workload controller admitted.
+- `start_plan_mode.py`: `plan_ready`, admits Plans, warms gpu-2 with `qwen2.5-coder:7b`, and enables auto-default repair.
+- `start_benchmark_mode.py`: `benchmark_ready`, admits benchmark runtime-prep work with cold workers and auto-default disabled.
+- `start_custom_mode.py`: benchmark-ready startup followed by explicit model loads.
+
+Boot profile and controller admission live in
+`shared/brain/control_policy.json`. Actual GPU ownership lives separately in
+`shared/gpus/leases.json`; inspect it on the rig with:
+
+```bash
+python3 /mnt/shared/scripts/manage_gpu_lease.py --shared-path /mnt/shared list
 ```
 
 Runtime preflight:

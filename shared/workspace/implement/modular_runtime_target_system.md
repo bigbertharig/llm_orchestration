@@ -1,9 +1,22 @@
 # Modular Runtime Target System
 
-Purpose: capture the desired end-state for runtime, benchmark, and plan
-execution, plus the concrete code paths that currently need cleanup.
+Purpose: capture the target architecture, the current implementation status,
+and the next cleanup steps for runtime, plan, and benchmark execution.
 
-## Desired System
+Latest audit: `system_unification_audit_2026-08-13.md`. It supersedes the
+priority ordering below where the two differ. In particular, shared campaign
+resource leases now precede further runtime-image work because live campaign
+containers and orchestrator startup can currently contend for the same worker
+ports.
+
+August 13 implementation update: the main repo now has controller-neutral GPU
+leases and separate boot-profile/controller-admission policy. Plan workers and
+brain resource decisions honor leases, and the dashboard renders their state.
+The historical `system_mode.json` status descriptions below are superseded by
+`control_policy.json`; Plan-owned lease acquisition and transactional profile
+transitions remain incomplete.
+
+## Target Architecture
 
 The system should behave as four clean layers:
 
@@ -12,8 +25,9 @@ The system should behave as four clean layers:
 - stable wrapper scripts
 - swappable llama.cpp version without agent code edits
 
-2. Control/mode layer
-- `start_default_mode.py`
+2. Control and admission layer
+- `control_policy.py`
+- `start_plan_mode.py`
 - `start_benchmark_mode.py`
 - `start_custom_mode.py`
 - `submit.py`
@@ -26,156 +40,148 @@ The system should behave as four clean layers:
 
 4. Resource ownership layer
 - each GPU owns its own runtime state
-- workload classes use explicit reservations
+- controllers acquire atomic leases for physical GPUs or split groups
 - a benchmark GPU should not claim plan tasks
 - a plan GPU should not be stolen by a benchmark launch
-- queued work should wait for the GPU/resource owner to become available
+- competing work should wait instead of colliding
 
-## Operational End-State
+## Current Status
 
-Normal operation:
-- all worker model loads/unloads happen through orchestrator meta tasks
-- all mode switches run through one supported control surface
-- runtime image upgrades are promoted by config, not code edits
-- debug-only direct runtime launches are isolated and never confused with orchestrator-owned runtimes
+### Done enough to treat as working
 
-Future coexistence target:
-- benchmarks and plans can run at the same time on different GPUs
-- workload scheduling respects GPU reservations and queueing
-- if a GPU is busy, competing work waits instead of colliding
+- runtime image selection is config-driven instead of hardcoded in `gpu_llama.py`
+- single-worker and split-worker launches both resolve runtime image/profile through shared config logic
+- runtime helpers have one canonical location under `shared/scripts/llama_runtime/`
+- normal startup is explicit `neutral`: brain up, worker GPUs cold
+- `control_policy.json` separates boot profile from controller admission
+- Plan and benchmark wrappers select their profiles explicitly
+- brain and worker claim paths honor controller admission
+- `gpu_leases.py` is the atomic single- and multi-GPU allocation authority
+- worker claims and brain placement exclude leased GPUs
+- leases fail closed after expiry until runtime reconciliation and explicit release
+- single-load heartbeat phases are explicit during load
+- worker heartbeat now reconciles against live `/v1/models` when cached state is stale
+- dashboard status overlays leases even when a worker heartbeat is missing
+- shared-path normalization has improved in repo-side wrappers such as `runtime_preflight.py`
 
-## What Exists Already
+### Partially done
 
-Good pieces already present:
-- config-driven llama runtime tuning profiles:
-  - `shared/agents/config*.json`
-  - `shared/agents/brain_core.py:resolve_llama_runtime_profile`
-- shared runtime helpers:
-  - `shared/scripts/llama_runtime/run_runtime.sh`
-  - `build_image.sh`
-  - `build_and_smoke_test.sh`
-- orchestrator-owned worker runtime path:
-  - `shared/agents/gpu_llama.py`
-  - `shared/agents/gpu_split.py`
-- benchmark wrappers:
-  - `scripts/benchmarks/start_benchmark_mode.py`
-  - `scripts/benchmarks/start_custom_mode.py`
-- return/default wrapper:
-  - `scripts/return_default.py`
-- live status helper:
-  - `scripts/status.py`
-- split reservation machinery:
-  - `shared/agents/gpu_split.py`
+- the shared authority exists, but each controller still needs complete acquire/renew/release integration
+- benchmark/custom/Plan transitions use preflight paths, but there is no transactional transition service
+- the operator runbook still spans multiple scripts and documents
+- runtime smoke/build helpers exist, but not yet as a complete stable/candidate promotion workflow
 
-## Gaps Found
+### Not done yet
 
-### 1. Runtime image selection was not layered
+- Plan-owned leases around scheduled runtime work
+- benchmark campaign lease integration in the benchmark repository
+- supervision lease integration in County Map
+- automatic reconciliation for expired leases
+- candidate/stable runtime image promotion flow
+- end-to-end mixed-controller validation on disjoint GPUs
 
-Before cleanup:
-- `gpu_llama.py` hardcoded `llama-runtime:sm61-sm86`
+## Historical Live Baseline
 
-Now fixed:
-- `llama_runtime_image` is config-driven
-- single and split launches both resolve image through shared config logic
+The April 2, 2026 validation below predates `control_policy.json` and leases. It
+is retained as recovery evidence, not as the current control contract:
 
-Still needed:
-- candidate/stable promotion workflow
-- image certification/smoke tooling
+- rig startup returns to:
+  - `system_mode.json = idle / startup_finished`
+- default warm worker returns to:
+  - `gpu-2 = ready_single`
+  - `loaded_model = qwen2.5-coder:7b`
+  - `/v1/models = 200`
+- reboot no longer leaves startup state ambiguous
+- reboot no longer leaves the worker heartbeat stale while runtime is already healthy
 
-### 2. Mode control is split across repo-side and shared-side paths
+Plan-side validation status:
 
-Current reality:
-- repo-side wrappers live under `~/llm_orchestration/scripts/benchmarks/`
-- shared-side runtime helpers live under `shared/scripts/llama_runtime/`
+- real production `github_analyzer/plan.md` parsed and executed
+- preserved queue state survived reboot
+- old restart deadlock was fixed
+  - before: preserved batch `load_llm` blocked startup enqueue while `idle` blocked that batch task from running
+  - now: startup default load runs first, then mode can return to `plans`
 
-This is acceptable, but only if docs and tests consistently describe the boundary.
+## Open Gaps
 
-Still needed:
-- one operator runbook for all mode transitions
-- a single preflight gate used by benchmark/custom/default transitions
+### 1. Controller lease lifecycles are incomplete
 
-### 3. Stale state still causes conflicts
+What remains:
+- Plans acquire and renew leases for runtime-owning work, then release after reconciliation
+- benchmark campaigns acquire canonical leases instead of directly assuming GPU ownership
+- supervision sessions acquire canonical leases from County Map without duplicating storage
+- each controller publishes stable `owner` and `run_id` values
 
-Observed classes of failure:
-- stale tasks in `tasks/processing/`
-- unmanaged debug containers occupying worker GPUs
-- ports responding with 503 or refusing while orchestration believes a load is active
-- worker restarts during intentional resets
+The benchmark and supervision repository changes are deliberately outside this
+repository's current implementation scope.
 
-Still needed:
-- strong preflight before mode switches and custom loads
-- explicit detection of unmanaged worker runtime containers
-- explicit port ownership checks
-- clearer cleanup of wedged `processing` tasks / heartbeats
+### 2. Preflight / cleanup gate is not final yet
 
-### 4. Pathing still drifts across machines
-
-Live path rules:
-- rig `10.0.0.3` uses `/mnt/shared/...`
-- laptop `10.0.0.2` uses `/media/bryan/shared/...`
+Current state:
+- better than before
+- still not the single definitive gate for all mode transitions
 
 Still needed:
-- all scripts that can run from either side should normalize shared paths
-- tests/docs should stop implying non-existent shared helper paths
-
-### 5. Runtime capability is pinned behind an old llama.cpp ref
-
-Observed:
-- current image uses llama.cpp `b8250`
-- Gemma 4 GGUFs fail with `unknown model architecture: 'gemma4'`
-
-Conclusion:
-- model support upgrades belong in the runtime image promotion flow
-
-## Concrete Code Areas To Change Next
-
-### Preflight / cleanup gate
-
-Likely targets:
-- `scripts/benchmarks/start_benchmark_mode.py`
-- `scripts/benchmarks/start_custom_mode.py`
-- `scripts/return_default.py`
-- `shared/scripts/prepare_llm_runtimes.py`
-
-Needed behaviors:
-- scan worker ports
+- scan worker ports deterministically
 - detect unmanaged llama containers
-- detect stale processing meta tasks
-- detect split reservations left active
-- either fail loudly or clean deterministically
+- detect stale processing/meta heartbeats
+- detect stale split reservations
+- fail loudly or clean deterministically
 
-### GPU reservation / workload class separation
+### 3. Profile transitions are not transactional
 
-Likely targets:
-- `shared/agents/gpu.py`
-- `shared/agents/gpu_tasks.py`
-- `shared/agents/gpu_state.py`
-- `shared/agents/gpu_split.py`
-- brain-side scheduling/resource logic
+Current state:
+- policy writes are atomic
+- leases are atomic
+- startup and wrappers still execute their steps independently
 
-Needed behaviors:
-- explicit GPU mode or reservation state
-- benchmark worker exclusion from plan-task claiming
-- queued handoff when the GPU becomes available
-
-### Runtime image promotion tooling
+Still needed:
+- preflight current processes, ports, runtimes, tasks, and leases
+- acquire or validate required resources
+- write the desired profile/admission policy
+- start or stop components
+- verify the resulting state or roll back clearly
 
 Likely targets:
-- `shared/scripts/llama_runtime/build_image.sh`
-- `shared/scripts/llama_runtime/build_and_smoke_test.sh`
-- maybe a new promotion wrapper script
+- a new shared transition service in `shared/agents/`
+- `scripts/start_plan_mode.py`
+- `scripts/benchmarks/start_benchmark_mode.py`
+- `scripts/runtime_preflight.py`
 
-Needed behaviors:
+### 4. Runtime image promotion flow is still missing
+
+Still needed:
 - build candidate image
 - smoke known-good single-worker model
 - smoke known-good split model
 - smoke new target family
 - promote by config change only after passing
 
+Likely targets:
+- `shared/scripts/llama_runtime/build_image.sh`
+- `shared/scripts/llama_runtime/build_and_smoke_test.sh`
+- possibly a dedicated promotion wrapper
+
 ## Recommended Next Sequence
 
-1. Finish stable smoke verification on the current image.
-2. Build the preflight/cleanup gate for mode transitions and custom loads.
-3. Add candidate runtime image build/smoke/promotion flow.
-4. Upgrade llama.cpp in a candidate image for Gemma 4.
-5. After runtime hardening, start the GPU reservation/workload-class separation work.
+1. Add Plan-owned lease lifecycle around runtime allocation and task execution.
+2. Add lease/process/port reconciliation to the unified preflight.
+3. Define the controller integration contract for benchmarks and supervision.
+4. Implement a transactional profile transition service.
+5. Add candidate runtime image build/smoke/promotion flow.
+
+## Bottom Line
+
+This track is not finished overall.
+
+What is finished enough:
+- neutral cold-start behavior
+- controller admission policy
+- atomic shared GPU lease authority
+- Plan-side exclusion and dashboard visibility
+
+What is next:
+- controller-owned lease lifecycles
+- stronger reconciliation and transitions
+- cross-repository controller adoption
+- runtime image promotion

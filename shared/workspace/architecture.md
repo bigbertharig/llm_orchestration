@@ -52,6 +52,12 @@ See [brain-behavior.md](brain-behavior.md) for detailed brain loop and task hand
 The brain is the authority for **shared coordination state**. Workers are the
 authority for **local execution mechanics**.
 
+GPU ownership is controller-neutral shared state. `gpu_leases.py` atomically
+allocates physical GPUs or groups, while `control_policy.py` separately records
+boot profile and controller admission. Plans, benchmarks, supervision, and
+interactive sessions retain their own controller semantics above these two
+contracts.
+
 This distinction matters for scaling. The goal is **not** for the brain to
 micromanage every worker action. The goal is for the brain to own only the
 decisions that must stay globally consistent across the system.
@@ -214,7 +220,10 @@ See [NETWORK_SETUP.md](NETWORK_SETUP.md) and [systems_prep.md](systems_prep.md) 
                                                          └──────────────────────────────┘
 ```
 
-**Communication is file-based only.** No network APIs between machines. The shared drive is the sole communication channel.
+**Coordination state is file-based.** Tasks, heartbeats, reservations, and brain
+state use the shared drive. Operator wrappers use SSH to execute rig-side
+controls, and runtime probes use rig-local HTTP endpoints; those paths do not
+replace the shared filesystem as the coordination authority.
 
 ---
 

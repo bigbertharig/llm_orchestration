@@ -24,6 +24,7 @@ ml-env/
 # Config files (machine-specific)
 config.json
 shared/agents/config.json
+shared/agents/config.plan.json
 
 # =============================================================================
 # Shared folder - selective sync

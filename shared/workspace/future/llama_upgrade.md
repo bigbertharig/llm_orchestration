@@ -111,14 +111,14 @@ Companion build/runtime spec:
 
 Current implementation artifacts:
 
-- [Dockerfile](/home/bryan/llm_orchestration/scripts/llama_runtime/Dockerfile)
-- [entrypoint.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/entrypoint.sh)
-- [build_image.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/build_image.sh)
-- [run_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh)
-- [stop_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/stop_runtime.sh)
-- [probe_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/probe_runtime.sh)
-- [smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/smoke_test.sh)
-- [build_and_smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/build_and_smoke_test.sh)
+- [Dockerfile](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/Dockerfile)
+- [entrypoint.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/entrypoint.sh)
+- [build_image.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/build_image.sh)
+- [run_runtime.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/run_runtime.sh)
+- [stop_runtime.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/stop_runtime.sh)
+- [probe_runtime.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/probe_runtime.sh)
+- [smoke_test.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/smoke_test.sh)
+- [build_and_smoke_test.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/build_and_smoke_test.sh)
 
 ## Verification Pass (2026-03-08)
 
@@ -175,7 +175,7 @@ Remaining non-agent Ollama references are now mostly in benchmark/history toolin
 Completed in this pass:
 
 - [quickstart.md](/home/bryan/llm_orchestration/shared/workspace/quickstart.md), [architecture.md](/home/bryan/llm_orchestration/shared/workspace/architecture.md), [PLAN_FORMAT.md](/home/bryan/llm_orchestration/shared/workspace/PLAN_FORMAT.md), and [README.md](/home/bryan/llm_orchestration/README.md) now present llama as the only active runtime path in normal operator docs.
-- [scripts/llama_runtime/README.md](/home/bryan/llm_orchestration/scripts/llama_runtime/README.md) now describes the directory as the active runtime surface instead of a migration-only bridge.
+- [shared/scripts/llama_runtime/README.md](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/README.md) now describes the directory as the active runtime surface instead of a migration-only bridge.
 - [hardware.py](/home/bryan/llm_orchestration/shared/agents/hardware.py), [NETWORK_SETUP.md](/home/bryan/llm_orchestration/shared/workspace/NETWORK_SETUP.md), [systems_prep.md](/home/bryan/llm_orchestration/shared/workspace/systems_prep.md), and [brain-behavior.md](/home/bryan/llm_orchestration/shared/workspace/brain-behavior.md) no longer describe the old Ollama path as current operator behavior.
 - Obsolete tracked helper [clear_ollama.py](/home/bryan/llm_orchestration/scripts/clear_ollama.py) was removed from the repo.
 
@@ -560,7 +560,7 @@ Primary files:
 - [gpu_core.py](/home/bryan/llm_orchestration/shared/agents/gpu_core.py)
 
 Plan:
-- [x] create dedicated image and launcher helpers under `scripts/llama_runtime/`
+- [x] create dedicated image and launcher helpers under `shared/scripts/llama_runtime/`
 - [x] add `gpu_llama.py`
 - [x] implement server start
 - [x] implement server stop
@@ -591,13 +591,13 @@ Rollback:
 Build the dedicated image:
 
 ```bash
-/home/bryan/llm_orchestration/scripts/llama_runtime/build_image.sh
+/home/bryan/llm_orchestration/shared/scripts/llama_runtime/build_image.sh
 ```
 
 Build and prove one worker runtime in one command:
 
 ```bash
-/home/bryan/llm_orchestration/scripts/llama_runtime/build_and_smoke_test.sh \
+/home/bryan/llm_orchestration/shared/scripts/llama_runtime/build_and_smoke_test.sh \
   --name llama-worker-gpu1 \
   --model /mnt/shared/models/qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
   --port 11436 \
@@ -607,7 +607,7 @@ Build and prove one worker runtime in one command:
 Start one worker runtime:
 
 ```bash
-/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh \
+/home/bryan/llm_orchestration/shared/scripts/llama_runtime/run_runtime.sh \
   --name llama-worker-gpu1 \
   --model /mnt/shared/models/qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
   --port 11436 \
@@ -617,13 +617,13 @@ Start one worker runtime:
 Probe readiness:
 
 ```bash
-/home/bryan/llm_orchestration/scripts/llama_runtime/probe_runtime.sh 11436
+/home/bryan/llm_orchestration/shared/scripts/llama_runtime/probe_runtime.sh 11436
 ```
 
 Stop the runtime:
 
 ```bash
-/home/bryan/llm_orchestration/scripts/llama_runtime/stop_runtime.sh llama-worker-gpu1
+/home/bryan/llm_orchestration/shared/scripts/llama_runtime/stop_runtime.sh llama-worker-gpu1
 ```
 
 ## Phase 2: Wire Single-GPU Agent Path

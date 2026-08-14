@@ -19,9 +19,9 @@ This document exists for three reasons:
 The orchestration system should normally be started through:
 
 - `shared/agents/startup.py`
-- `scripts/start_default_mode.py`
-- `scripts/start_benchmark_mode.py`
-- `scripts/start_custom_mode.py`
+- `scripts/start_plan_mode.py`
+- `scripts/benchmarks/start_benchmark_mode.py`
+- `scripts/benchmarks/start_custom_mode.py`
 
 Not by redoing machine-prep steps during ordinary operation.
 

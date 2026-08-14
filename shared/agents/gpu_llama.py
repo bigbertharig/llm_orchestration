@@ -8,9 +8,9 @@ External contract:
 - load_model / unload_model (same signatures)
 
 Runtime helpers used:
-- scripts/llama_runtime/run_runtime.sh
-- scripts/llama_runtime/stop_runtime.sh
-- scripts/llama_runtime/probe_runtime.sh
+- shared/scripts/llama_runtime/run_runtime.sh
+- shared/scripts/llama_runtime/stop_runtime.sh
+- shared/scripts/llama_runtime/probe_runtime.sh
 """
 
 import subprocess

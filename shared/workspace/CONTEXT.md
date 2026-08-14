@@ -7,12 +7,23 @@ Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 - `workspace/PLAN_FORMAT.md` (task schema)
 - `workspace/brain-behavior.md` (brain loop details)
 - `core/RULES.md` (immutable safety constraints)
+- `workspace/gpu_lane_reservations.md` (canonical GPU leases, admission policy, and lane display)
 
 ## Active Runtime Docs
+- `workspace/implement/system_unification_audit_2026-08-13.md` (latest whole-system audit and prioritized integration gaps)
 - `workspace/implement/runtime_unification_cleanup.md` (current cleanup track and next steps)
 - `workspace/implement/modular_runtime_target_system.md` (target modular system and code areas to change)
 - `shared/scripts/llama_runtime/README.md` (runtime image/build/run helpers)
 - `shared/plans/shoulders/benchmarking/README.md` (benchmark runtime usage and current runtime compatibility notes)
+
+## Benchmarking Docs
+- `shared/plans/shoulders/benchmarking/MODEL_LIBRARY.md` (model selection hub — best choices, inventory, links)
+- `shared/plans/shoulders/benchmarking/MODEL_SELECTION_FOR_PLANS.md` (plan-facing model choices by task type)
+- `shared/plans/shoulders/benchmarking/BENCHMARK_SCORES.md` (pure score tables — pipeline, code, reasoning, knowledge)
+- `shared/plans/shoulders/benchmarking/MODEL_RUNTIME_GUIDE.md` (per-model runtime requirements, flags, memory, compatibility)
+- `shared/plans/shoulders/benchmarking/BENCHMARK_LESSONS_LEARNED.md` (tuning histories, debugging narratives, fix details)
+- `shared/plans/shoulders/benchmarking/docker/README.md` (Docker suite operator guide)
+- `shared/plans/shoulders/benchmarking/docker/SEQUENCED_TEST_SUITES.md` (campaign sequencer and thinking-model flags)
 
 ## Key Paths
 - `shared/agents/` code + config
@@ -99,10 +110,17 @@ cd ~/llm_orchestration/shared/agents
 python3 startup.py
 ```
 
+Normal startup uses the `neutral` boot profile: brain runtime up, worker GPU agents cold, no startup
+worker warm load, and auto-default disabled. Brain-first boot is intentional
+even though chat and some benchmark runs may not need the brain immediately:
+the rig pays the brain-load cost once at startup so plans have a ready control
+plane later. Controller admission is recorded in `brain/control_policy.json`;
+GPU allocation is recorded separately in `gpus/leases.json`.
+
 Wrapper start modes when you intentionally want them:
 
 ```bash
-python3 ~/llm_orchestration/scripts/start_default_mode.py
+python3 ~/llm_orchestration/scripts/start_plan_mode.py
 python3 ~/llm_orchestration/scripts/benchmarks/start_benchmark_mode.py
 python3 ~/llm_orchestration/scripts/benchmarks/start_custom_mode.py --models qwen3.5:4b qwen2.5-coder:7b ...
 ```
@@ -119,6 +137,7 @@ nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
 ```
 
 Important:
+- inspect controller-owned GPU allocations with `python3 /mnt/shared/scripts/manage_gpu_lease.py --shared-path /mnt/shared list` on the rig
 - do not rely on a shared `status.py` path under `/mnt/shared`; there is no supported status helper there right now
 - if docs mention `/mnt/shared/scripts/status.py`, treat that as stale and use direct probes instead
 - `python3 ~/llm_orchestration/scripts/runtime_preflight.py --config config.benchmark.json --json` is the operator preflight entrypoint for current rig-state checks

@@ -54,14 +54,14 @@ Recommendation:
 
 Current implementation artifacts:
 
-- Dockerfile: [scripts/llama_runtime/Dockerfile](/home/bryan/llm_orchestration/scripts/llama_runtime/Dockerfile)
-- entrypoint: [scripts/llama_runtime/entrypoint.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/entrypoint.sh)
-- build helper: [scripts/llama_runtime/build_image.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/build_image.sh)
-- run helper: [scripts/llama_runtime/run_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh)
-- stop helper: [scripts/llama_runtime/stop_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/stop_runtime.sh)
-- probe helper: [scripts/llama_runtime/probe_runtime.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/probe_runtime.sh)
-- smoke-test helper: [scripts/llama_runtime/smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/smoke_test.sh)
-- build-and-smoke helper: [scripts/llama_runtime/build_and_smoke_test.sh](/home/bryan/llm_orchestration/scripts/llama_runtime/build_and_smoke_test.sh)
+- Dockerfile: [shared/scripts/llama_runtime/Dockerfile](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/Dockerfile)
+- entrypoint: [shared/scripts/llama_runtime/entrypoint.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/entrypoint.sh)
+- build helper: [shared/scripts/llama_runtime/build_image.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/build_image.sh)
+- run helper: [shared/scripts/llama_runtime/run_runtime.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/run_runtime.sh)
+- stop helper: [shared/scripts/llama_runtime/stop_runtime.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/stop_runtime.sh)
+- probe helper: [shared/scripts/llama_runtime/probe_runtime.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/probe_runtime.sh)
+- smoke-test helper: [shared/scripts/llama_runtime/smoke_test.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/smoke_test.sh)
+- build-and-smoke helper: [shared/scripts/llama_runtime/build_and_smoke_test.sh](/home/bryan/llm_orchestration/shared/scripts/llama_runtime/build_and_smoke_test.sh)
 
 Locked choices for the first implementation pass:
 
@@ -95,7 +95,7 @@ That means:
 Single worker:
 
 ```bash
-/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh \
+/home/bryan/llm_orchestration/shared/scripts/llama_runtime/run_runtime.sh \
   --name llama-worker-gpu2 \
   --model <gguf-path> \
   --port 11436 \
@@ -105,7 +105,7 @@ Single worker:
 Brain:
 
 ```bash
-/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh \
+/home/bryan/llm_orchestration/shared/scripts/llama_runtime/run_runtime.sh \
   --name llama-brain \
   --model <gguf-path> \
   --port 11434 \
@@ -115,7 +115,7 @@ Brain:
 Split:
 
 ```bash
-/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh \
+/home/bryan/llm_orchestration/shared/scripts/llama_runtime/run_runtime.sh \
   --name llama-split-pair-1-3 \
   --model <gguf-path> \
   --port 11440 \
