@@ -13,6 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import brain_core
+import control_policy
 import startup
 
 
@@ -244,6 +246,8 @@ class StartupIdempotenceTests(unittest.TestCase):
             shared = Path(tmp)
             queue = shared / "tasks" / "queue"
             queue.mkdir(parents=True, exist_ok=True)
+            private = shared / "brain" / "private_tasks"
+            private.mkdir(parents=True, exist_ok=True)
 
             for name, command in (
                 ("startup_single_default", "load_llm"),
@@ -258,11 +262,66 @@ class StartupIdempotenceTests(unittest.TestCase):
                     "name": name,
                 }
                 (queue / f"{name}.json").write_text(json.dumps(payload), encoding="utf-8")
+                (private / f"{name}-private.json").write_text(json.dumps(payload), encoding="utf-8")
 
             removed = startup._purge_stale_startup_meta_tasks(shared)
 
-            self.assertEqual(removed, 2)
+            self.assertEqual(removed, 4)
             self.assertEqual(list(queue.glob("*.json")), [])
+            self.assertEqual(list(private.glob("*.json")), [])
+
+    def test_startup_gate_ignores_obsolete_private_startup_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            private = shared / "brain" / "private_tasks"
+            gpu_dir = shared / "gpus" / "gpu_2"
+            private.mkdir(parents=True, exist_ok=True)
+            gpu_dir.mkdir(parents=True, exist_ok=True)
+
+            (private / "stale-split.json").write_text(
+                json.dumps(
+                    {
+                        "task_id": "stale-split",
+                        "task_class": "meta",
+                        "command": "load_split_llm",
+                        "batch_id": "system",
+                        "name": "startup_split_pair_1_3",
+                        "target_model": "qwen2.5-coder:14b",
+                        "load_mode": "split",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (gpu_dir / "heartbeat.json").write_text(
+                json.dumps(
+                    {
+                        "loaded_model": "qwen2.5-coder:7b",
+                        "runtime_placement": "single_gpu",
+                        "model_loaded": True,
+                        "capability_ready": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = {
+                "initial_hot_workers": 1,
+                "auto_default_gpu": "gpu-2",
+                "auto_default_model": "qwen2.5-coder:7b",
+                "startup_meta_tasks": [
+                    {
+                        "name": "startup_single_default",
+                        "command": "load_llm",
+                        "target_model": "qwen2.5-coder:7b",
+                        "load_mode": "single",
+                        "candidate_workers": ["gpu-2"],
+                    }
+                ],
+            }
+
+            gate = brain_core.startup_gate_status(shared, config)
+            self.assertTrue(gate["ready"])
+            self.assertEqual(gate["reason"], "")
 
     def test_purge_stale_startup_meta_tasks_removes_orphan_meta_heartbeat(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -288,7 +347,7 @@ class StartupIdempotenceTests(unittest.TestCase):
             self.assertEqual(removed, 1)
             self.assertFalse(orphan_hb.exists())
 
-    def test_enqueue_startup_meta_tasks_skips_when_non_system_work_exists(self):
+    def test_enqueue_startup_meta_tasks_allows_non_system_work(self):
         with tempfile.TemporaryDirectory() as tmp:
             shared = Path(tmp)
             queue = shared / "tasks" / "queue"
@@ -319,7 +378,13 @@ class StartupIdempotenceTests(unittest.TestCase):
             )
 
             queue_files = sorted(path.name for path in queue.glob("*.json"))
-            self.assertEqual(queue_files, ["batch-task.json"])
+            self.assertEqual(len(queue_files), 2)
+            payloads = [
+                json.loads((queue / name).read_text(encoding="utf-8"))
+                for name in queue_files
+            ]
+            names = {payload.get("name") for payload in payloads}
+            self.assertIn("startup_single_default", names)
 
     def test_enqueue_startup_meta_tasks_skips_when_load_meta_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -353,6 +418,96 @@ class StartupIdempotenceTests(unittest.TestCase):
             )
 
             self.assertEqual(list((shared / "tasks" / "queue").glob("*.json")), [])
+
+    def test_maybe_finalize_startup_policy_flips_to_startup_finished_when_gate_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            config = {"initial_hot_workers": 1}
+            control_policy.write_control_policy(
+                shared,
+                "neutral",
+                reason="startup_in_progress",
+                updated_by="startup.py",
+            )
+
+            original_gate = startup.startup_gate_status
+            startup.startup_gate_status = lambda _shared, _config: {"ready": True}
+            try:
+                changed = startup._maybe_finalize_startup_policy(shared, config)
+            finally:
+                startup.startup_gate_status = original_gate
+
+            self.assertTrue(changed)
+            payload = control_policy.read_control_policy(shared)
+            self.assertEqual(payload["boot_profile"], "neutral")
+            self.assertEqual(payload["reason"], "startup_finished")
+            self.assertEqual(payload["updated_by"], "startup.py")
+
+    def test_maybe_finalize_startup_policy_waits_until_gate_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            config = {"initial_hot_workers": 1}
+            control_policy.write_control_policy(
+                shared,
+                "neutral",
+                reason="startup_in_progress",
+                updated_by="startup.py",
+            )
+
+            original_gate = startup.startup_gate_status
+            startup.startup_gate_status = lambda _shared, _config: {
+                "ready": False,
+                "reason": "default_gpu_not_ready",
+            }
+            try:
+                changed = startup._maybe_finalize_startup_policy(shared, config)
+            finally:
+                startup.startup_gate_status = original_gate
+
+            self.assertFalse(changed)
+            payload = control_policy.read_control_policy(shared)
+            self.assertEqual(payload["boot_profile"], "neutral")
+            self.assertEqual(payload["reason"], "startup_in_progress")
+
+    def test_enqueue_startup_meta_tasks_ignores_non_system_load_meta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp)
+            queue = shared / "tasks" / "queue"
+            queue.mkdir(parents=True, exist_ok=True)
+            (queue / "batch-load.json").write_text(
+                json.dumps(
+                    {
+                        "task_id": "batch-load",
+                        "task_class": "meta",
+                        "command": "load_llm",
+                        "batch_id": "20260402_195559",
+                        "created_by": "brain",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            startup._enqueue_startup_meta_tasks(
+                shared_path=shared,
+                created_by="startup",
+                startup_meta_tasks=[
+                    {
+                        "name": "startup_single_default",
+                        "command": "load_llm",
+                        "target_model": "qwen2.5:7b",
+                        "candidate_workers": ["gpu-2"],
+                    }
+                ],
+            )
+
+            queue_files = sorted(path.name for path in queue.glob("*.json"))
+            self.assertEqual(len(queue_files), 2)
+            payloads = [
+                json.loads((queue / name).read_text(encoding="utf-8"))
+                for name in queue_files
+            ]
+            names = {payload.get("name") for payload in payloads}
+            self.assertIn("startup_single_default", names)
 
     def test_enqueue_startup_meta_tasks_skips_when_fresh_meta_heartbeat_exists(self):
         with tempfile.TemporaryDirectory() as tmp:

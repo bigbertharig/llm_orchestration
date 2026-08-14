@@ -13,8 +13,6 @@ import types
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-if "filelock" not in sys.modules:
-    sys.modules["filelock"] = types.SimpleNamespace(FileLock=object, Timeout=Exception)
 if "requests" not in sys.modules:
     sys.modules["requests"] = types.SimpleNamespace()
 

@@ -37,6 +37,7 @@ from gpu_constants import (
     SPLIT_ISSUE_BRAIN_TIMEOUT_SECONDS,
 )
 from gpu_core import GPUCoreMixin
+from gpu_leases import GPULeaseStateError, GPULeaseStore
 from gpu_llama import GPULlamaMixin
 from gpu_runtime import GPURuntimeMixin
 from gpu_split import GPUSplitMixin
@@ -50,6 +51,25 @@ logging.basicConfig(
     format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
     datefmt='%H:%M:%S'
 )
+
+LANE_ALIASES = {
+    "BENCHMARK": "BENCHING",
+    "BENCHMARKING": "BENCHING",
+    "BENCHMARKS": "BENCHING",
+    "TASK": "TASKING",
+    "PLAN": "TASKING",
+    "PLANS": "TASKING",
+    "CHAT": "CHATTING",
+    "INTERACTIVE": "CHATTING",
+    "SUPERVISION": "SUPERVISING",
+}
+LANE_BLOCKS = {
+    "BENCHING": {"TASKING", "CHATTING", "SUPERVISING"},
+    "TASKING": {"BENCHING", "CHATTING", "SUPERVISING"},
+    "CHATTING": {"BENCHING", "TASKING", "SUPERVISING"},
+    "SUPERVISING": {"BENCHING", "TASKING", "CHATTING"},
+}
+GPU_LANES = ("BENCHING", "TASKING", "CHATTING", "SUPERVISING")
 
 
 class GPUAgent(
@@ -111,7 +131,7 @@ class GPUAgent(
         self.gpu_state_dir = self.shared_path / "gpus" / f"gpu_{self.gpu_id}"
         self.gpu_state_dir.mkdir(parents=True, exist_ok=True)
         self.heartbeat_file = self.gpu_state_dir / "heartbeat.json"
-        self.benchmark_reservation_file = self.gpu_state_dir / "benchmark_reservation.json"
+        self.gpu_lease_store = GPULeaseStore(self.shared_path)
 
         # Signals
         self.signals_path = self.shared_path / "signals"
@@ -271,25 +291,92 @@ class GPUAgent(
         """Probe the active llama runtime health."""
         return self.check_llama_health()
 
-    def _read_benchmark_reservation(self) -> Dict[str, Any]:
-        """Read external benchmark reservation state for this GPU."""
-        path = self.benchmark_reservation_file
-        if not path.exists():
-            return {"reserved": False}
+    def _read_gpu_lease(self) -> Dict[str, Any]:
+        """Read controller-neutral ownership state for this GPU."""
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            self.logger.warning(f"Failed to read benchmark reservation file {path}: {e}")
-            return {"reserved": False, "reservation_error": "read_failed"}
-        if not isinstance(data, dict):
-            self.logger.warning(f"Invalid benchmark reservation payload in {path}: expected object")
-            return {"reserved": False, "reservation_error": "invalid_payload"}
-        data["reserved"] = bool(data.get("reserved", True))
-        return data
+            lease = self.gpu_lease_store.for_gpu(self.gpu_id)
+        except (GPULeaseStateError, OSError, ValueError) as exc:
+            self.logger.error(f"GPU lease state unavailable; blocking claims: {exc}")
+            return {
+                "leased": True,
+                "controller": "system",
+                "lane": "CONTROL_ERROR",
+                "owner": "gpu-lease-store",
+                "lease_error": str(exc),
+            }
+        if not lease:
+            return {"leased": False}
+        lease["leased"] = True
+        lease["expired"] = self.gpu_lease_store.is_expired(lease)
+        return lease
 
-    def _is_benchmark_reserved(self) -> bool:
-        return bool(self._read_benchmark_reservation().get("reserved", False))
+    def _is_gpu_leased(self) -> bool:
+        return bool(self._read_gpu_lease().get("leased", False))
+
+    def _normalize_lane(self, lane: Any) -> str:
+        normalized = str(lane or "").strip().upper()
+        return LANE_ALIASES.get(normalized, normalized)
+
+    def _current_lane_state(self, lease: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the GPU-owned lane availability view for heartbeat consumers."""
+        if lease.get("leased", False):
+            lane = self._normalize_lane(
+                lease.get("lane") or lease.get("controller")
+            ) or "RESERVED"
+            owner = str(
+                lease.get("owner")
+                or lease.get("controller")
+                or "unknown"
+            ).strip()
+            reason = f"leased:{lane}"
+            busy = True
+        elif self.active_workers or self.active_meta_task:
+            lane = "TASKING"
+            owner = self.name
+            reason = "active_task"
+            busy = True
+        elif self._is_runtime_transitioning():
+            lane = "TASKING"
+            owner = self.name
+            reason = f"runtime_transition:{self.runtime_state}"
+            busy = True
+        elif self._is_runtime_wedged():
+            lane = "TASKING"
+            owner = self.name
+            reason = "runtime_wedged"
+            busy = True
+        else:
+            lane = ""
+            owner = ""
+            reason = ""
+            busy = False
+
+        available_for = {}
+        blocked_by = {}
+        for requested_lane in GPU_LANES:
+            if not busy:
+                available_for[requested_lane] = True
+                blocked_by[requested_lane] = ""
+                continue
+            if lane == requested_lane:
+                available_for[requested_lane] = False
+                blocked_by[requested_lane] = reason
+                continue
+            if lane in LANE_BLOCKS.get(requested_lane, set()):
+                available_for[requested_lane] = False
+                blocked_by[requested_lane] = reason
+            else:
+                available_for[requested_lane] = False
+                blocked_by[requested_lane] = f"busy:{lane or 'unknown'}"
+
+        return {
+            "busy": busy,
+            "lane": lane,
+            "owner": owner,
+            "reason": reason,
+            "available_for_lanes": available_for,
+            "blocked_by_lane": blocked_by,
+        }
 
     def _write_heartbeat(self):
         """Write GPU-level heartbeat to filesystem. We are sole owner, no lock needed.
@@ -338,8 +425,9 @@ class GPUAgent(
             and self.model_loaded
             and bool(self.runtime_healthy)
         )
-        benchmark_reservation = self._read_benchmark_reservation()
-        reserved = bool(benchmark_reservation.get("reserved", False))
+        gpu_lease = self._read_gpu_lease()
+        leased = bool(gpu_lease.get("leased", False))
+        lane_state = self._current_lane_state(gpu_lease)
 
         heartbeat = {
             "gpu_id": self.gpu_id,
@@ -371,9 +459,15 @@ class GPUAgent(
             "runtime_port": self.runtime_port,
             "runtime_backend": self.runtime_backend,
             "runtime_api_base": self.runtime_api_base,
-            "reserved": reserved,
-            "reserved_for": str(benchmark_reservation.get("reserved_for", "") or ""),
-            "reservation": benchmark_reservation if reserved else None,
+            "leased": leased,
+            "lease_controller": str(gpu_lease.get("controller") or "") if leased else "",
+            "lease": gpu_lease if leased else None,
+            "busy": lane_state["busy"],
+            "busy_lane": lane_state["lane"],
+            "busy_owner": lane_state["owner"],
+            "busy_reason": lane_state["reason"],
+            "available_for_lanes": lane_state["available_for_lanes"],
+            "blocked_by_lane": lane_state["blocked_by_lane"],
             "split_health_issue": self._get_split_health_issue_heartbeat(),
             "global_load_owner_issue": dict(self.pending_global_load_owner_issue),
             "runtime_healthy": bool(self.runtime_healthy),

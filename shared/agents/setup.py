@@ -206,6 +206,17 @@ def build_config(assignment, runtime, system):
     worker_ids = [int(w["id"]) for w in assignment["gpus"] if w.get("id") is not None]
     warm_gpu_id = 2 if 2 in worker_ids else (worker_ids[0] if worker_ids else None)
     warm_gpu_name = f"gpu-{warm_gpu_id}" if warm_gpu_id is not None else ""
+    initial_hot_workers = min(
+        len(assignment["gpus"]),
+        max(0, int(assignment.get("initial_hot_workers", 0) or 0)),
+    )
+    ordered_worker_names = [warm_gpu_name] if warm_gpu_name else []
+    ordered_worker_names.extend(
+        str(worker["name"])
+        for worker in assignment["gpus"]
+        if str(worker.get("name") or "") and str(worker["name"]) != warm_gpu_name
+    )
+    warm_worker_names = ordered_worker_names[:initial_hot_workers]
     config = {
         "_generated_by": "setup.py",
         "_generated_at": datetime.now().isoformat(),
@@ -217,6 +228,8 @@ def build_config(assignment, runtime, system):
         },
         "shared_path": "../",
         "permissions_path": "permissions/",
+        "model_catalog_path": "models.catalog.json",
+        "llama_runtime_image": "llama-runtime:b10333",
         "runtime_backend": "llama",
         "model_search_roots": [
             "/mnt/shared/models",
@@ -226,33 +239,36 @@ def build_config(assignment, runtime, system):
         "worker_keep_alive": "30m",
         "brain_context_tokens": 8192,
         "worker_context_tokens": 8192,
+        "auto_default_enabled": bool(warm_worker_names),
+        "auto_default_idle_seconds": 90 if warm_worker_names else 999999,
         "auto_default_gpu": warm_gpu_name or "gpu-2",
         "auto_default_model": "qwen2.5-coder:7b",
-        "startup_warm_workers": [warm_gpu_name] if warm_gpu_name else [],
+        "startup_warm_workers": warm_worker_names,
         "startup_meta_tasks": [
             {
-                "name": "startup_single_default",
+                "name": f"startup_single_{worker_name}",
                 "command": "load_llm",
                 "target_model": "qwen2.5-coder:7b",
                 "load_mode": "single",
-                "candidate_workers": [warm_gpu_name or "gpu-2"],
-            },
+                "candidate_workers": [worker_name],
+            }
+            for worker_name in warm_worker_names
         ],
         "llama_single_defaults": {
-            "ctx_size": 2048,
+            "ctx_size": 16384,
             "batch_size": 64,
             "parallel": 1,
             "n_gpu_layers": 999,
         },
         "llama_split_defaults": {
-            "ctx_size": 4096,
+            "ctx_size": 16384,
             "batch_size": 128,
             "parallel": 1,
             "n_gpu_layers": 999,
         },
         "llama_single_profiles": {
             "qwen2.5:7b": {
-                "ctx_size": 2048,
+                "ctx_size": 16384,
                 "batch_size": 64,
                 "parallel": 1,
                 "n_gpu_layers": 999,
@@ -261,7 +277,7 @@ def build_config(assignment, runtime, system):
         },
         "llama_split_profiles": {
             "qwen2.5-coder:14b": {
-                "ctx_size": 4096,
+                "ctx_size": 16384,
                 "batch_size": 128,
                 "parallel": 1,
                 "n_gpu_layers": 999,
@@ -277,7 +293,8 @@ def build_config(assignment, runtime, system):
         },
         "gpus": [],
         "worker_mode": assignment["worker_mode"],
-        "initial_hot_workers": assignment.get("initial_hot_workers", 0),
+        "initial_hot_workers": initial_hot_workers,
+        "max_hot_workers": len(assignment["gpus"]),
         "timeouts": {
             "poll_interval_seconds": 5,
             "brain_think_seconds": 120,

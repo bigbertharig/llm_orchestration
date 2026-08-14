@@ -5,7 +5,7 @@
   "_discovery_mode": "standard",
   "_hardware": {
     "hostname": "gpu-rig",
-    "gpu_count": 5
+    "gpu_count": 6
   },
 
   "shared_path": "../",
@@ -21,18 +21,12 @@
   "worker_keep_alive": "30m",
   "brain_context_tokens": 8192,
   "worker_context_tokens": 8192,
+  "auto_default_enabled": false,
+  "auto_default_idle_seconds": 999999,
   "auto_default_gpu": "gpu-2",
   "auto_default_model": "qwen2.5-coder:7b",
-  "startup_warm_workers": ["gpu-2"],
-  "startup_meta_tasks": [
-    {
-      "name": "startup_single_default",
-      "command": "load_llm",
-      "target_model": "qwen2.5-coder:7b",
-      "load_mode": "single",
-      "candidate_workers": ["gpu-2"]
-    }
-  ],
+  "startup_warm_workers": [],
+  "startup_meta_tasks": [],
   "llama_single_defaults": {
     "ctx_size": 16384,
     "batch_size": 64,
@@ -138,18 +132,34 @@
       "permissions": "worker.json"
     },
     {
+      "name": "gpu-3",
+      "id": 3,
+      "vram_mb": 6144,
+      "model": "qwen2.5:7b",
+      "port": 11437,
+      "permissions": "worker.json"
+    },
+    {
       "name": "gpu-4",
       "id": 4,
       "vram_mb": 6144,
       "model": "qwen2.5:7b",
-      "port": 11437,
+      "port": 11438,
+      "permissions": "worker.json"
+    },
+    {
+      "name": "gpu-5",
+      "id": 5,
+      "vram_mb": 6144,
+      "model": "qwen2.5:7b",
+      "port": 11439,
       "permissions": "worker.json"
     }
   ],
 
   "worker_mode": "cold",
-  "initial_hot_workers": 1,
-  "max_hot_workers": 4,
+  "initial_hot_workers": 0,
+  "max_hot_workers": 5,
 
   "timeouts": {
     "poll_interval_seconds": 5,

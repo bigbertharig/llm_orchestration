@@ -74,11 +74,11 @@ class GPUThermalMixin:
             return
 
         try:
-            reservation = self._read_benchmark_reservation()
+            lease = self._read_gpu_lease()
         except Exception:
-            reservation = {"reserved": False}
-        if not bool(reservation.get("reserved", False)):
-            self._clear_thermal_runtime_recovery("reservation_released")
+            lease = {"leased": False}
+        if not bool(lease.get("leased", False)):
+            self._clear_thermal_runtime_recovery("lease_released")
             return
 
         last_attempt = float(

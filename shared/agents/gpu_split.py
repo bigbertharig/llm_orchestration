@@ -49,11 +49,7 @@ from gpu_constants import (
     SPLIT_RESERVATION_LOADING_STATES,
 )
 
-_LLAMA_SCRIPTS_DIR_SHARED = Path("/mnt/shared/scripts/llama_runtime")
-_LLAMA_SCRIPTS_DIR_REPO = Path(__file__).resolve().parent.parent.parent / "scripts" / "llama_runtime"
-_LLAMA_SCRIPTS_DIR = (
-    _LLAMA_SCRIPTS_DIR_SHARED if _LLAMA_SCRIPTS_DIR_SHARED.exists() else _LLAMA_SCRIPTS_DIR_REPO
-)
+_LLAMA_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts" / "llama_runtime"
 
 SPLIT_WARMUP_REQUEST_TIMEOUT_SECONDS = 25
 SPLIT_WARMUP_MAX_ATTEMPTS = 2

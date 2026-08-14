@@ -16,7 +16,11 @@ from filelock import FileLock, Timeout
 
 import requests
 
-from brain_core import resolve_llama_runtime_profile
+from brain_core import (
+    resolve_llama_runtime_profile,
+    startup_gate_status,
+)
+from control_policy import control_policy_allows_task
 from gpu_constants import (
     ATTESTATION_MISS_HARD_FAIL_THRESHOLD,
     ATTESTATION_MISS_SOFT_FAIL_THRESHOLD,
@@ -976,15 +980,15 @@ class GPUTaskMixin:
         # Emergency meta-tasks allowed during thermal pause
         THERMAL_EMERGENCY_META_COMMANDS = {"reset_gpu_runtime", "reset_split_runtime"}
 
-        reservation = self._read_benchmark_reservation()
-        if reservation.get("reserved", False):
-            reservation_owner = str(
-                reservation.get("owner")
-                or reservation.get("reserved_for")
-                or "benchmark"
+        lease = self._read_gpu_lease()
+        if lease.get("leased", False):
+            lease_owner = str(
+                lease.get("owner")
+                or lease.get("controller")
+                or "unknown"
             ).strip()
             self.logger.info(
-                f"TASKS_RESERVED: skip claiming queued work while reserved for {reservation_owner}"
+                f"TASKS_LEASED: skip claiming queued work while leased to {lease_owner}"
             )
             return []
 
@@ -1007,6 +1011,7 @@ class GPUTaskMixin:
             return []
 
         preferred = self._get_preferred_classes()
+        startup_gate = startup_gate_status(self.shared_path, self.config)
 
         def _task_priority_key(task: Dict[str, Any]) -> tuple:
             try:
@@ -1031,6 +1036,12 @@ class GPUTaskMixin:
                 if task.get("executor") == "brain":
                     continue
                 if task.get("task_class") == "brain":
+                    continue
+                policy_allowed, _policy_reason = control_policy_allows_task(self.shared_path, task)
+                if not policy_allowed:
+                    continue
+                batch_id = str(task.get("batch_id", "") or "").strip()
+                if batch_id != "system" and not startup_gate.get("ready", True):
                     continue
 
                 task_class = task.get("task_class", "cpu")
@@ -1075,6 +1086,12 @@ class GPUTaskMixin:
 
                     # Brain tasks are never claimable by GPU workers.
                     if task.get("executor") == "brain" or task.get("task_class") == "brain":
+                        continue
+                    policy_allowed, _policy_reason = control_policy_allows_task(self.shared_path, task)
+                    if not policy_allowed:
+                        continue
+                    batch_id = str(task.get("batch_id", "") or "").strip()
+                    if batch_id != "system" and not startup_gate.get("ready", True):
                         continue
 
                     task_class = task.get("task_class", "cpu")

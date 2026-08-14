@@ -6,14 +6,10 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-if "filelock" not in sys.modules:
-    sys.modules["filelock"] = types.SimpleNamespace(FileLock=object, Timeout=Exception)
 
 from brain_resources import BrainResourceMixin
 

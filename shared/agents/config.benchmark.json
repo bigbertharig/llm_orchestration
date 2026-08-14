@@ -55,13 +55,21 @@
       "ctx_size": 16384,
       "batch_size": 64,
       "parallel": 1,
-      "n_gpu_layers": 999
+      "n_gpu_layers": 999,
+      "extra_args": [
+        "--reasoning-budget",
+        "0"
+      ]
     },
     "qwen3.5:9b-q3km": {
       "ctx_size": 16384,
       "batch_size": 64,
       "parallel": 1,
-      "n_gpu_layers": 999
+      "n_gpu_layers": 999,
+      "extra_args": [
+        "--reasoning-budget",
+        "0"
+      ]
     },
     "deepseek-r1:7b": {
       "ctx_size": 16384,

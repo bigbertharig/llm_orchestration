@@ -24,6 +24,7 @@ import requests
 from gpu_constants import (
     RUNTIME_STATE_COLD,
     RUNTIME_STATE_LOADING_SINGLE,
+    RUNTIME_STATE_READY_SPLIT,
     RUNTIME_STATE_READY_SINGLE,
     RUNTIME_STATE_UNLOADING,
     SINGLE_META_TIMEOUT_SECONDS,
@@ -31,12 +32,9 @@ from gpu_constants import (
 from brain_core import resolve_llama_runtime_profile, resolve_model_search_roots
 from brain_core import resolve_llama_runtime_image
 
-# Path to runtime helper scripts.
-# Primary: shared drive (accessible from rig via NFS).
-# Fallback: repo-local scripts directory.
-_SCRIPTS_DIR_SHARED = Path("/mnt/shared/scripts/llama_runtime")
-_SCRIPTS_DIR_REPO = Path(__file__).resolve().parent.parent.parent / "scripts" / "llama_runtime"
-_SCRIPTS_DIR = _SCRIPTS_DIR_SHARED if _SCRIPTS_DIR_SHARED.exists() else _SCRIPTS_DIR_REPO
+# The shared tree is the only runtime-helper source of truth. This resolves to
+# /mnt/shared on the rig and the mounted shared directory in a repo checkout.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts" / "llama_runtime"
 
 # Readiness probe settings
 LLAMA_READINESS_TIMEOUT_SECONDS = SINGLE_META_TIMEOUT_SECONDS
@@ -90,6 +88,72 @@ class GPULlamaMixin:
             return None
         return f"http://127.0.0.1:{port}"
 
+    def _infer_serving_model_id(self, loaded_models: list[str]) -> Optional[str]:
+        """Infer the config-style serving model identifier for heartbeat repair."""
+        configured_model = str(getattr(self, "model", "") or "").strip()
+        if configured_model:
+            return configured_model
+
+        existing_loaded = str(getattr(self, "loaded_model", "") or "").strip()
+        if existing_loaded:
+            return existing_loaded
+
+        if len(loaded_models) == 1:
+            actual_id = str(loaded_models[0] or "").strip()
+            return actual_id or None
+
+        return None
+
+    def _reconcile_live_runtime_state(self, loaded_models: list[str]) -> None:
+        """Repair stale in-memory runtime state from a live /v1/models probe."""
+        inferred_model = self._infer_serving_model_id(loaded_models)
+        inferred_tier = 0
+        if inferred_model:
+            inferred_tier = int(
+                self.model_tier_by_id.get(
+                    inferred_model,
+                    getattr(self, "model_tier", 0) or getattr(self, "loaded_tier", 0) or 0,
+                )
+            )
+
+        self.model_loaded = True
+        self.loaded_model = inferred_model
+        self.loaded_tier = inferred_tier
+        self.runtime_port = self._llama_probe_port()
+        self.runtime_api_base = self._llama_api_base()
+
+        runtime_state = (
+            RUNTIME_STATE_READY_SPLIT
+            if str(getattr(self, "runtime_placement", "") or "").strip() == "split_gpu"
+            else RUNTIME_STATE_READY_SINGLE
+        )
+        self._set_runtime_state(
+            runtime_state,
+            task_id=getattr(self, "runtime_transition_task_id", None),
+            phase="runtime_health_reconciled",
+        )
+        self.logger.info(
+            f"RUNTIME_HEALTH_RECONCILED worker={self.name} state={runtime_state} "
+            f"model={inferred_model or '-'}"
+        )
+
+    def _clear_single_runtime_loaded(self, *, task_id: Optional[str] = None, phase: str = "single_cleared") -> None:
+        """Reset single-runtime state after startup cleanup or unload."""
+        self.model_loaded = False
+        self.loaded_model = None
+        self.loaded_tier = 0
+        self.runtime_placement = "single_gpu"
+        self.runtime_group_id = None
+        self.runtime_port = self.port
+        self.runtime_api_base = self._llama_api_base()
+        self.runtime_consecutive_failures = 0
+        self.runtime_healthy = True
+        self._set_runtime_state(
+            RUNTIME_STATE_COLD,
+            task_id=task_id,
+            phase=phase,
+        )
+
     def start_llama(self):
         """Prepare the llama runtime on agent startup.
 
@@ -103,6 +167,7 @@ class GPULlamaMixin:
         # Clean up orphaned container from a previous crash/restart
         container_name = self._llama_container_name()
         self._stop_llama_container(container_name)
+        self._clear_single_runtime_loaded(phase="startup_cold_reset")
         self.logger.info(
             f"llama runtime initialized (cold) on GPU {self.gpu_id}, port {self.port}"
         )
@@ -239,15 +304,6 @@ class GPULlamaMixin:
             health["note"] = "no_runtime_configured"
             return health
 
-        # When cold (no model loaded), there is no container to probe.
-        # Report healthy — the agent is simply idle.
-        if not self.model_loaded:
-            health["healthy"] = True
-            health["note"] = "cold_no_container"
-            self.runtime_consecutive_failures = 0
-            self.runtime_healthy = True
-            return health
-
         try:
             start = time.time()
             resp = requests.get(
@@ -266,7 +322,15 @@ class GPULlamaMixin:
                 health["healthy"] = True
                 self.runtime_consecutive_failures = 0
                 self.runtime_healthy = True
+                if (not self.model_loaded) and self.runtime_state == RUNTIME_STATE_COLD:
+                    self._reconcile_live_runtime_state(health["loaded_models"])
             else:
+                if not self.model_loaded:
+                    health["healthy"] = True
+                    health["note"] = "cold_no_container"
+                    self.runtime_consecutive_failures = 0
+                    self.runtime_healthy = True
+                    return health
                 self.runtime_consecutive_failures += 1
                 self.logger.warning(
                     f"llama health check returned {resp.status_code} "
@@ -274,6 +338,12 @@ class GPULlamaMixin:
                 )
 
         except Exception as e:
+            if not self.model_loaded:
+                health["healthy"] = True
+                health["note"] = "cold_no_container"
+                self.runtime_consecutive_failures = 0
+                self.runtime_healthy = True
+                return health
             self.runtime_consecutive_failures += 1
             self.logger.warning(
                 f"llama health check failed: {e} "
@@ -292,13 +362,13 @@ class GPULlamaMixin:
             try:
                 recovering_model = str(self.loaded_model or "").strip()
                 thermal_pause_active = bool(getattr(self, "thermal_pause_active", False))
-                benchmark_reserved = False
+                gpu_leased = False
                 try:
-                    benchmark_reserved = bool(self._is_benchmark_reserved())
+                    gpu_leased = bool(self._is_gpu_leased())
                 except Exception:
-                    benchmark_reserved = False
+                    gpu_leased = False
                 thermal_recovery_mode = bool(
-                    thermal_pause_active and benchmark_reserved and recovering_model
+                    thermal_pause_active and gpu_leased and recovering_model
                 )
                 if thermal_recovery_mode:
                     self._schedule_thermal_runtime_recovery(
@@ -309,17 +379,7 @@ class GPULlamaMixin:
                     self._clear_thermal_runtime_recovery("non_thermal_health_recovery")
 
                 self.stop_llama()
-                self.runtime_consecutive_failures = 0
-                self.runtime_healthy = True
-                self.model_loaded = False
-                self.loaded_model = None
-                self.loaded_tier = 0
-                self.runtime_placement = "single_gpu"
-                self.runtime_group_id = None
-                self.runtime_port = self.port
-                self.runtime_api_base = self._llama_api_base()
-                self._set_runtime_state(
-                    RUNTIME_STATE_COLD,
+                self._clear_single_runtime_loaded(
                     phase=(
                         "llama_health_recovery_thermal_grace"
                         if thermal_recovery_mode
@@ -439,6 +499,13 @@ class GPULlamaMixin:
             split=False,
         )
 
+        def _set_single_load_phase(phase: str) -> None:
+            self._set_runtime_state(
+                RUNTIME_STATE_LOADING_SINGLE,
+                task_id=task_id,
+                phase=phase,
+            )
+
         def _do_load():
             remaining_budget = deadline - time.time()
             if remaining_budget <= 0:
@@ -458,9 +525,11 @@ class GPULlamaMixin:
                 return
 
             # Stop any existing container first
+            _set_single_load_phase("stopping_existing_container")
             self._stop_llama_container(container_name)
 
             # Start new container
+            _set_single_load_phase("starting_container")
             run_script = str(_SCRIPTS_DIR / "run_runtime.sh")
             cmd = [
                 run_script,
@@ -505,6 +574,7 @@ class GPULlamaMixin:
 
             # Wait for readiness with remaining budget
             readiness_budget = max(10, int(deadline - time.time()))
+            _set_single_load_phase("waiting_runtime_ready")
 
             # Poll with meta-task heartbeat
             url = f"http://127.0.0.1:{self.port}/v1/models"
@@ -512,10 +582,12 @@ class GPULlamaMixin:
             last_wait_log_at = time.time()
 
             while time.time() < readiness_deadline:
+                _set_single_load_phase("waiting_runtime_ready")
                 self._touch_meta_task(phase="load_llm_waiting_ready")
                 try:
                     r = requests.get(url, timeout=3)
                     if r.status_code == 200:
+                        _set_single_load_phase("validating_runtime_ready")
                         self._assert_full_gpu_offload(container_name, target_model)
                         return  # Ready!
                 except Exception:

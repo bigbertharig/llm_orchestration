@@ -6,17 +6,11 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-if "filelock" not in sys.modules:
-    sys.modules["filelock"] = types.SimpleNamespace(FileLock=object, Timeout=Exception)
-if "requests" not in sys.modules:
-    sys.modules["requests"] = types.SimpleNamespace()
 
 import gpu_tasks
 from gpu_tasks import GPUTaskMixin
@@ -40,8 +34,20 @@ class MockClaimGpu(GPUTaskMixin):
         self.logger = MagicMock()
         self.queue_path = tmpdir / "queue"
         self.processing_path = tmpdir / "processing"
+        self.shared_path = tmpdir
+        self.config = {
+            "initial_hot_workers": 0,
+            "startup_meta_tasks": [],
+        }
         self.queue_path.mkdir(parents=True, exist_ok=True)
         self.processing_path.mkdir(parents=True, exist_ok=True)
+        policy_path = tmpdir / "brain" / "control_policy.json"
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        policy_path.write_text(
+            '{"schema_version":1,"boot_profile":"plan_ready",'
+            '"admitted_controllers":["plans"]}',
+            encoding="utf-8",
+        )
         self.thermal_pause_active = False
         self.thermal_pause_until = 0
         self.thermal_pause_reasons = []
@@ -60,7 +66,7 @@ class MockClaimGpu(GPUTaskMixin):
         self.active_workers = {}
         self.claimed_vram = 0
         self.port = 11436
-        self._reservation = {"reserved": False}
+        self._lease = {"leased": False}
 
     def _get_preferred_classes(self):
         return ["llm"]
@@ -92,8 +98,8 @@ class MockClaimGpu(GPUTaskMixin):
     def _scan_emergency_meta_tasks(self, _commands):
         return []
 
-    def _read_benchmark_reservation(self):
-        return dict(self._reservation)
+    def _read_gpu_lease(self):
+        return dict(self._lease)
 
 
 class MockSpawnGpu(GPUWorkerMixin):
@@ -174,10 +180,14 @@ class WorkerRuntimeReadinessTests(unittest.TestCase):
             self.assertFalse(task_file.exists())
             self.assertTrue((gpu.processing_path / "task-1.json").exists())
 
-    def test_claim_tasks_skips_all_work_when_reserved_for_benchmark(self):
+    def test_claim_tasks_skips_all_work_when_leased_to_another_controller(self):
         with tempfile.TemporaryDirectory() as tmp:
             gpu = MockClaimGpu(Path(tmp), runtime_state="ready_single")
-            gpu._reservation = {"reserved": True, "owner": "bench-pipeline"}
+            gpu._lease = {
+                "leased": True,
+                "controller": "supervision",
+                "owner": "county-session",
+            }
             task = {
                 "task_id": "task-1",
                 "task_class": "llm",

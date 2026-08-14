@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from filelock import FileLock, Timeout
+from brain_core import startup_gate_status
+from control_policy import control_policy_allows_task
 
 
 class BrainDispatchMixin:
@@ -475,6 +477,8 @@ class BrainDispatchMixin:
 
     def claim_brain_tasks(self):
         """Look for tasks that need brain processing."""
+        startup_gate = startup_gate_status(self.shared_path, self.config)
+
         def _task_priority_key(task: Dict[str, Any]) -> tuple:
             try:
                 priority = int(task.get("priority", 5))
@@ -497,11 +501,17 @@ class BrainDispatchMixin:
             task_type = task.get("type", "")
             executor = str(task.get("executor", "worker")).lower()
             task_class = str(task.get("task_class", "")).lower()
+            batch_id = str(task.get("batch_id", "") or "").strip()
             is_brain_task = (
                 task_type in {"execute_plan", "decide"}
                 or executor == "brain"
                 or task_class == "brain"
             )
+            policy_allowed, _policy_reason = control_policy_allows_task(self.shared_path, task)
+            if not policy_allowed:
+                continue
+            if batch_id != "system" and not startup_gate.get("ready", True):
+                continue
             if is_brain_task:
                 staged.append((task_file, task))
 
@@ -526,6 +536,12 @@ class BrainDispatchMixin:
                     task_type = task.get("type", "")
                     executor = str(task.get("executor", "worker")).lower()
                     task_class = str(task.get("task_class", "")).lower()
+                    policy_allowed, _policy_reason = control_policy_allows_task(self.shared_path, task)
+                    if not policy_allowed:
+                        continue
+                    batch_id = str(task.get("batch_id", "") or "").strip()
+                    if batch_id != "system" and not startup_gate.get("ready", True):
+                        continue
 
                     # Brain handles: execute_plan, decide, system, and tasks marked executor=brain
                     if task_type == "execute_plan":

@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import requests
-
 from brain_constants import DEFAULT_LLM_MIN_TIER
 
 
@@ -189,6 +188,151 @@ def resolve_runtime_chat_endpoint(config: dict) -> str:
     if backend != "llama":
         raise ValueError(f"Unsupported runtime_backend: {backend}")
     return f"{runtime_base}/v1/chat/completions"
+
+
+def _iter_startup_meta_tasks(shared_path: Path) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+    roots = [
+        shared_path / "tasks" / "queue",
+        shared_path / "tasks" / "processing",
+        shared_path / "brain" / "private_tasks",
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        for task_file in root.glob("*.json"):
+            if task_file.name.endswith(".heartbeat.json"):
+                continue
+            try:
+                task = json.loads(task_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if str(task.get("batch_id", "")).strip() != "system":
+                continue
+            if str(task.get("task_class", "")).strip() != "meta":
+                continue
+            command = str(task.get("command", "")).strip()
+            if command not in {"load_llm", "load_split_llm"}:
+                continue
+            tasks.append(task)
+    return tasks
+
+
+def _matches_expected_startup_meta_task(task: dict[str, Any], startup_meta_tasks: list[dict[str, Any]] | None) -> bool:
+    if not isinstance(startup_meta_tasks, list) or not startup_meta_tasks:
+        return True
+
+    task_name = str(task.get("name", "")).strip()
+    task_command = str(task.get("command", "")).strip()
+    task_target_model = str(task.get("target_model", "")).strip()
+    task_load_mode = str(task.get("load_mode", "")).strip()
+
+    for expected in startup_meta_tasks:
+        if not isinstance(expected, dict):
+            continue
+        expected_command = str(expected.get("command", "")).strip()
+        if expected_command != task_command:
+            continue
+        expected_name = str(expected.get("name", "")).strip()
+        if expected_name and expected_name == task_name:
+            return True
+        expected_target_model = str(expected.get("target_model", "")).strip()
+        expected_load_mode = str(expected.get("load_mode", "")).strip()
+        if (
+            expected_target_model
+            and expected_target_model == task_target_model
+            and (not expected_load_mode or expected_load_mode == task_load_mode)
+        ):
+            return True
+    return False
+
+
+def startup_gate_status(shared_path: Path, config: dict) -> dict[str, Any]:
+    """Return whether non-system work should be gated behind startup success."""
+    initial_hot_workers = max(0, int(config.get("initial_hot_workers", 0) or 0))
+    startup_meta_tasks = config.get("startup_meta_tasks")
+    startup_meta_expected = isinstance(startup_meta_tasks, list) and bool(startup_meta_tasks)
+    default_gpu, default_model = resolve_auto_default_target(config)
+
+    if initial_hot_workers <= 0 and not startup_meta_expected:
+        return {
+            "ready": True,
+            "reason": "",
+            "default_gpu": default_gpu,
+            "default_model": default_model,
+            "pending_startup_tasks": [],
+        }
+
+    pending = [
+        task
+        for task in _iter_startup_meta_tasks(shared_path)
+        if _matches_expected_startup_meta_task(task, startup_meta_tasks)
+    ]
+    if pending:
+        return {
+            "ready": False,
+            "reason": "startup_meta_pending",
+            "default_gpu": default_gpu,
+            "default_model": default_model,
+            "pending_startup_tasks": [
+                str(task.get("name") or task.get("task_id") or "").strip()
+                for task in pending
+            ],
+        }
+
+    if initial_hot_workers <= 0:
+        return {
+            "ready": True,
+            "reason": "",
+            "default_gpu": default_gpu,
+            "default_model": default_model,
+            "pending_startup_tasks": [],
+        }
+
+    hb_path = shared_path / "gpus" / default_gpu.replace("-", "_") / "heartbeat.json"
+    if not hb_path.exists():
+        return {
+            "ready": False,
+            "reason": "default_gpu_heartbeat_missing",
+            "default_gpu": default_gpu,
+            "default_model": default_model,
+            "pending_startup_tasks": [],
+        }
+    try:
+        heartbeat = json.loads(hb_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "ready": False,
+            "reason": "default_gpu_heartbeat_unreadable",
+            "default_gpu": default_gpu,
+            "default_model": default_model,
+            "pending_startup_tasks": [],
+        }
+
+    loaded_model = str(heartbeat.get("loaded_model") or "").strip()
+    placement = str(heartbeat.get("runtime_placement") or "").strip()
+    model_loaded = bool(heartbeat.get("model_loaded"))
+    capability_ready = bool(heartbeat.get("capability_ready"))
+    if model_loaded and capability_ready and loaded_model == default_model and placement != "split_gpu":
+        return {
+            "ready": True,
+            "reason": "",
+            "default_gpu": default_gpu,
+            "default_model": default_model,
+            "pending_startup_tasks": [],
+        }
+
+    return {
+        "ready": False,
+        "reason": "default_gpu_not_ready",
+        "default_gpu": default_gpu,
+        "default_model": default_model,
+        "pending_startup_tasks": [],
+        "observed_loaded_model": loaded_model,
+        "observed_model_loaded": model_loaded,
+        "observed_capability_ready": capability_ready,
+        "observed_runtime_placement": placement,
+    }
 
 
 class BrainCoreMixin:
@@ -805,11 +949,10 @@ class BrainCoreMixin:
         gguf_path = self._resolve_brain_gguf_path()
         brain_port = int(self._brain_runtime_base_url().rsplit(":", 1)[-1])
         gpu_device = str(self.gpus[0]) if self.gpus else "0"
+        profile = resolve_llama_runtime_profile(self.config, model_id=self.model)
 
         # Use the same runtime helpers as workers
-        scripts_dir_shared = Path("/mnt/shared/scripts/llama_runtime")
-        scripts_dir_repo = Path(__file__).resolve().parent.parent.parent / "scripts" / "llama_runtime"
-        scripts_dir = scripts_dir_shared if scripts_dir_shared.exists() else scripts_dir_repo
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts" / "llama_runtime"
         run_script = str(scripts_dir / "run_runtime.sh")
 
         cmd = [
@@ -821,6 +964,16 @@ class BrainCoreMixin:
             "--image", resolve_llama_runtime_image(self.config),
             "--ctx-size", str(self.brain_num_ctx),
         ]
+        if profile.get("batch_size") is not None:
+            cmd.extend(["--batch-size", str(profile["batch_size"])])
+        if profile.get("parallel") is not None:
+            cmd.extend(["--parallel", str(profile["parallel"])])
+        if profile.get("memory_limit"):
+            cmd.extend(["--memory-limit", str(profile["memory_limit"])])
+        if profile.get("memory_swap"):
+            cmd.extend(["--memory-swap", str(profile["memory_swap"])])
+        for extra_arg in profile.get("extra_args", []):
+            cmd.extend(["--extra-arg", str(extra_arg)])
 
         self.logger.info(f"BRAIN_LLAMA_CMD: {' '.join(cmd)}")
         start_time = time.time()

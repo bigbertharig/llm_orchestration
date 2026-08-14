@@ -40,8 +40,11 @@ shared/agents/permissions/
 # SYNC: Shared benchmark tooling committed into the main repo
 !shared/scripts/
 shared/scripts/*
+!shared/scripts/llama_runtime/
+!shared/scripts/llama_runtime/**
 !shared/scripts/benchmarks/
 !shared/scripts/benchmarks/**
+!shared/scripts/manage_gpu_lease.py
 shared/scripts/**/__pycache__/
 shared/scripts/**/*.pyc
 shared/scripts/benchmarks/containers/images/

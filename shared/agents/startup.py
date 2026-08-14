@@ -27,7 +27,8 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
-from brain_core import resolve_runtime_base_url
+from brain_core import resolve_runtime_base_url, startup_gate_status
+from control_policy import read_control_policy, write_control_policy
 from hardware import scan_gpus, scan_runtime, scan_cpu_temps
 
 # =============================================================================
@@ -112,6 +113,27 @@ def _orchestrator_is_healthy(
         if gpu_age > stale_seconds:
             return False
 
+    return True
+
+
+def _maybe_finalize_startup_policy(shared_path: Path, config: dict) -> bool:
+    """Mark startup complete once the configured startup gate is satisfied."""
+    policy = read_control_policy(shared_path)
+    if str(policy.get("boot_profile") or "").strip() != "neutral":
+        return False
+    if str(policy.get("reason") or "").strip() != "startup_in_progress":
+        return False
+
+    gate = startup_gate_status(shared_path, config)
+    if not bool(gate.get("ready")):
+        return False
+
+    write_control_policy(
+        shared_path,
+        "neutral",
+        reason="startup_finished",
+        updated_by="startup.py",
+    )
     return True
 
 
@@ -298,6 +320,67 @@ def _clear_stale_heartbeats(shared_path: Path, worker_gpus: list):
         print(f"Cleared {removed} stale heartbeat file(s) before startup")
 
 
+def _docker_container_running(name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    return result.returncode == 0 and "true" in result.stdout.lower()
+
+
+def _purge_stale_split_reservations(shared_path: Path) -> int:
+    """Remove split reservations that no longer have a live runtime behind them."""
+    split_dir = shared_path / "signals" / "split_llm"
+    if not split_dir.exists():
+        return 0
+
+    removed = 0
+    for reservation_path in sorted(split_dir.glob("pair_*.json")):
+        try:
+            reservation = json.loads(reservation_path.read_text(encoding="utf-8"))
+        except Exception:
+            reservation = {}
+
+        status = str(reservation.get("status") or "").strip()
+        if status not in {"loading", "ready", "waiting_partner"}:
+            continue
+
+        group_id = str(reservation.get("group_id") or reservation_path.stem).strip()
+        try:
+            port = int(reservation.get("port") or 0)
+        except Exception:
+            port = 0
+
+        container_running = _docker_container_running(f"llama-split-{group_id}")
+        listener_up = port > 0 and _is_port_open(port)
+        if container_running or listener_up:
+            continue
+
+        related = [
+            reservation_path,
+            reservation_path.with_name(f"{reservation_path.name}.lock"),
+            reservation_path.with_name(f"{reservation_path.stem}.runtime_owner.json"),
+            reservation_path.with_name(f"{reservation_path.stem}.runtime_owner.json.lock"),
+            reservation_path.with_name(f"{reservation_path.stem}.runtime.log"),
+        ]
+        for path in related:
+            try:
+                if path.exists():
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                pass
+
+    if removed:
+        print(f"Cleared {removed} stale split reservation artifact(s) before startup")
+    return removed
+
+
 def _reclaim_worker_port(port: int, gpu_name: str):
     """Fail-fast reclaim for worker ports.
 
@@ -403,7 +486,6 @@ def _count_existing_meta_tasks(shared_path: Path, command: str) -> int:
 def _startup_meta_enqueue_blockers(shared_path: Path) -> list[str]:
     """Return reasons startup warm tasks should not be enqueued now."""
     reasons: list[str] = []
-    saw_non_system_work = False
     saw_load_meta = False
 
     for folder in ("queue", "processing"):
@@ -422,10 +504,12 @@ def _startup_meta_enqueue_blockers(shared_path: Path) -> list[str]:
             command = str(task.get("command", "")).strip()
             task_class = str(task.get("task_class", "")).strip()
 
-            if task_class == "meta" and command in {"load_llm", "load_split_llm"}:
+            if (
+                batch_id == "system"
+                and task_class == "meta"
+                and command in {"load_llm", "load_split_llm"}
+            ):
                 saw_load_meta = True
-            if batch_id and batch_id != "system":
-                saw_non_system_work = True
 
     processing_dir = shared_path / "tasks" / "processing"
     if processing_dir.exists():
@@ -440,8 +524,6 @@ def _startup_meta_enqueue_blockers(shared_path: Path) -> list[str]:
             if bool(hb.get("is_meta")):
                 saw_load_meta = True
 
-    if saw_non_system_work:
-        reasons.append("active_non_system_tasks")
     if saw_load_meta:
         reasons.append("load_meta_in_flight")
     return reasons
@@ -451,8 +533,12 @@ def _purge_stale_startup_meta_tasks(shared_path: Path) -> int:
     """Remove startup-created load meta tasks left behind from prior runs."""
     removed = 0
     heartbeat_stale_seconds = 180
-    for folder in ("queue", "processing"):
-        path = shared_path / "tasks" / folder
+    task_roots: list[tuple[str, Path]] = [
+        ("queue", shared_path / "tasks" / "queue"),
+        ("processing", shared_path / "tasks" / "processing"),
+        ("private", shared_path / "brain" / "private_tasks"),
+    ]
+    for folder, path in task_roots:
         if not path.exists():
             continue
         for task_file in path.glob("*.json"):
@@ -1116,6 +1202,12 @@ def main():
         config["permissions_path"] = str(
             (agents_dir / config["permissions_path"]).resolve()
         )
+    write_control_policy(
+        Path(config["shared_path"]),
+        "neutral",
+        reason="startup_in_progress",
+        updated_by="startup.py",
+    )
 
     expected_gpu_ids = []
     if not args.brain_only:
@@ -1173,6 +1265,7 @@ def main():
 
     # Fresh startup status baseline: clear stale heartbeat snapshots from old runs.
     _clear_stale_heartbeats(Path(config["shared_path"]), hw["available_workers"])
+    _purge_stale_split_reservations(Path(config["shared_path"]))
 
     clear_ready_flags()
 
@@ -1317,6 +1410,8 @@ def main():
 
     # Monitor processes and handle restart signals
     while True:
+        _maybe_finalize_startup_policy(shared_path, config)
+
         # Check for brain-requested worker restart (thermal recovery full reset)
         restart_signal = _check_restart_workers_signal(shared_path)
         if restart_signal and gpus_to_start and not args.brain_only:

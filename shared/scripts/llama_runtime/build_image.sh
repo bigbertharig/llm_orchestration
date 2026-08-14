@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-IMAGE_TAG="${IMAGE_TAG:-llama-runtime:sm61-sm86}"
+IMAGE_TAG="${IMAGE_TAG:-llama-runtime:b10333}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 docker build \

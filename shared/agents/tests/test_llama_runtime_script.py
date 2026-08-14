@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path("/home/bryan/llm_orchestration/scripts/llama_runtime/run_runtime.sh")
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "llama_runtime" / "run_runtime.sh"
 
 
 class LlamaRuntimeScriptTests(unittest.TestCase):
@@ -44,6 +44,10 @@ class LlamaRuntimeScriptTests(unittest.TestCase):
     def test_dry_run_keeps_single_gpu_device_request_unquoted(self):
         out = self._dry_run("device=2")
         self.assertIn("--gpus device=2", out)
+
+    def test_dry_run_uses_promoted_default_image(self):
+        out = self._dry_run("device=2")
+        self.assertIn("llama-runtime:b10333", out)
 
 
 if __name__ == "__main__":

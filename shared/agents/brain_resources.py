@@ -722,33 +722,33 @@ class BrainResourceMixin:
                     continue
         return False
 
-    def _gpu_reservation_info(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        reservation = state.get("reservation")
-        if isinstance(reservation, dict):
-            info = dict(reservation)
-            info["reserved"] = bool(info.get("reserved", state.get("reserved", True)))
+    def _gpu_lease_info(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        lease = state.get("lease")
+        if isinstance(lease, dict):
+            info = dict(lease)
+            info["leased"] = bool(state.get("leased", True))
             return info
-        if not state.get("reserved", False):
-            return {"reserved": False}
+        if not state.get("leased", False):
+            return {"leased": False}
         return {
-            "reserved": True,
-            "reserved_for": str(state.get("reserved_for", "") or "").strip(),
+            "leased": True,
+            "controller": str(state.get("lease_controller", "") or "").strip(),
         }
 
-    def _is_gpu_reserved(self, state: Dict[str, Any]) -> bool:
-        return bool(self._gpu_reservation_info(state).get("reserved", False))
+    def _is_gpu_leased(self, state: Dict[str, Any]) -> bool:
+        return bool(self._gpu_lease_info(state).get("leased", False))
 
-    def _reserved_gpu_names(self, gpu_states: Dict[str, Dict[str, Any]]) -> List[str]:
+    def _leased_gpu_names(self, gpu_states: Dict[str, Dict[str, Any]]) -> List[str]:
         return sorted(
             gpu_name
             for gpu_name, state in gpu_states.items()
-            if self._is_gpu_reserved(state)
+            if self._is_gpu_leased(state)
         )
 
     def _single_hot_gpu_rows(self, gpu_states: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         for gpu_name, state in gpu_states.items():
-            if self._is_gpu_reserved(state):
+            if self._is_gpu_leased(state):
                 continue
             if not state.get("model_loaded", False):
                 continue
@@ -2089,8 +2089,8 @@ class BrainResourceMixin:
             if not self._is_fresh_gpu_state(state):
                 # Stale heartbeat - cannot be trusted for real-work detection
                 continue
-            if self._is_gpu_reserved(state):
-                reasons.append(f"reserved:{gpu_name}")
+            if self._is_gpu_leased(state):
+                reasons.append(f"leased:{gpu_name}")
             active_tasks = state.get("active_tasks", [])
             if isinstance(active_tasks, list) and active_tasks:
                 # Check if any are non-meta tasks
@@ -2152,8 +2152,8 @@ class BrainResourceMixin:
                 # Stale heartbeat - cannot be trusted as authoritative busy signal
                 # Skip entirely - don't block idle detection based on stale data
                 continue
-            if self._is_gpu_reserved(state):
-                reasons.append(f"reserved:{gpu_name}")
+            if self._is_gpu_leased(state):
+                reasons.append(f"leased:{gpu_name}")
             active_tasks = state.get("active_tasks", [])
             if isinstance(active_tasks, list) and active_tasks:
                 reasons.append(f"active_tasks:{gpu_name}")
@@ -2473,11 +2473,11 @@ class BrainResourceMixin:
 
         # Get GPU agent states from heartbeats (moved earlier for thermal recovery)
         gpu_states = self._get_gpu_states()
-        reserved_gpus = self._reserved_gpu_names(gpu_states)
+        leased_gpus = self._leased_gpu_names(gpu_states)
         orchestration_gpu_states = {
             gpu_name: state
             for gpu_name, state in gpu_states.items()
-            if gpu_name not in reserved_gpus
+            if gpu_name not in leased_gpus
         }
 
         # Check for thermal recovery escalation (brain-level)
@@ -2529,7 +2529,7 @@ class BrainResourceMixin:
                 "running_gpus": list(running_gpus.keys()),
                 "hot_gpus": gpus_with_model,
                 "split_loaded": split_loaded,
-                "reserved_gpus": reserved_gpus,
+                "leased_gpus": leased_gpus,
                 "max_loaded_tier": max_loaded_tier,
                 "queue_stats": queue_stats
             })
@@ -2639,7 +2639,7 @@ class BrainResourceMixin:
                     members = g.get("members", [])
                     if not all(member in running_gpus for member in members):
                         continue
-                    if any(member in reserved_gpus for member in members):
+                    if any(member in leased_gpus for member in members):
                         continue
                     if any(member in unhealthy_gpus for member in members):
                         continue

@@ -13,8 +13,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-if "filelock" not in sys.modules:
-    sys.modules["filelock"] = types.SimpleNamespace(FileLock=object, Timeout=Exception)
 if "requests" not in sys.modules:
     sys.modules["requests"] = types.SimpleNamespace()
 
@@ -226,7 +224,7 @@ class BrainResourceMetaBlockingTests(unittest.TestCase):
                 ],
             )
 
-    def test_reserved_hot_gpu_is_excluded_from_hot_capacity(self):
+    def test_leased_hot_gpu_is_excluded_from_hot_capacity(self):
         with tempfile.TemporaryDirectory() as tmp:
             brain = MockBrainResources(Path(tmp))
             now = datetime.now().isoformat()
@@ -239,8 +237,8 @@ class BrainResourceMetaBlockingTests(unittest.TestCase):
                     "runtime_placement": "single_gpu",
                     "loaded_model": "qwen2.5:7b",
                     "loaded_tier": 1,
-                    "reserved": True,
-                    "reserved_for": "benchmark",
+                    "leased": True,
+                    "lease_controller": "supervision",
                     "last_updated": now,
                 },
                 "gpu-2": {
@@ -260,7 +258,7 @@ class BrainResourceMetaBlockingTests(unittest.TestCase):
 
             self.assertEqual(brain.inserted, [{"command": "load_llm", "meta": {}}])
 
-    def test_reserved_gpu_blocks_global_idle_detection(self):
+    def test_leased_gpu_blocks_global_idle_detection(self):
         with tempfile.TemporaryDirectory() as tmp:
             brain = MockBrainResources(Path(tmp))
             brain.active_batches = {}
@@ -272,8 +270,8 @@ class BrainResourceMetaBlockingTests(unittest.TestCase):
                 {"total_llm": 0},
                 {
                     "gpu-1": {
-                        "reserved": True,
-                        "reserved_for": "benchmark",
+                        "leased": True,
+                        "lease_controller": "supervision",
                         "last_updated": datetime.now().isoformat(),
                         "active_tasks": [],
                         "meta_task_active": False,
@@ -282,7 +280,7 @@ class BrainResourceMetaBlockingTests(unittest.TestCase):
             )
 
             self.assertFalse(is_idle)
-            self.assertIn("reserved:gpu-1", reasons)
+            self.assertIn("leased:gpu-1", reasons)
 
 
 if __name__ == "__main__":
