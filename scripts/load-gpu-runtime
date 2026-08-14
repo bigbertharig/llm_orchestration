@@ -318,6 +318,9 @@ def lease_owner(lease: dict | None) -> str:
 
 def gpu_is_available(probe: dict, current_lane: str) -> tuple[bool, list[str]]:
     reasons: list[str] = []
+    lease_error = str(probe.get("lease_error") or "").strip()
+    if lease_error:
+        reasons.append(f"GPU lease state unavailable: {lease_error}")
     available_for_lanes = probe.get("available_for_lanes")
     if isinstance(available_for_lanes, dict) and available_for_lanes.get(current_lane) is False:
         reason = str(probe.get("busy_reason") or "").strip() or "busy"
@@ -459,6 +462,9 @@ def ask(prompt: str, assume_yes: bool) -> bool:
 
 def needs_override(probe: dict, expected: str) -> list[str]:
     warnings: list[str] = []
+    lease_error = str(probe.get("lease_error") or "").strip()
+    if lease_error:
+        warnings.append(f"GPU lease state unavailable: {lease_error}")
     loaded = str(probe.get("loaded_model") or "").strip()
     if loaded and loaded != expected:
         warnings.append(f"port {probe['port']} is serving {loaded}, expected {expected}")
