@@ -12,6 +12,29 @@ This is a shared format spec, not a plan template for one specific workflow.
 
 ---
 
+## Plan Update Checklist
+
+When asked to "update a plan to the current/new plan format", do all of this:
+
+1. Read this format doc.
+2. Read the target plan's local docs and existing `plan.md`.
+3. Preserve the plan's workflow intent and existing useful scripts.
+4. Normalize required sections, task fields, dependencies, outputs, and stale inputs.
+5. For every LLM task, check
+   `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION_FOR_PLANS.md`.
+6. Update model inputs, `llm_model`, `llm_min_tier`, and `llm_placement` to match
+   the current best benchmark-backed model for each task role.
+7. Keep plan prompts role-specific; do not blindly copy benchmark prompts into
+   plan scripts unless that prompt is actually the right task prompt.
+8. Validate commands for unresolved placeholders.
+9. Run lightweight syntax/schema checks for edited scripts or JSON where practical.
+
+This checklist is part of the plan-format update contract. A plan-format refresh
+that leaves stale model routing in place is incomplete unless the task explicitly
+asks to skip model updates.
+
+---
+
 ## Core Purpose
 
 A plan tells the brain:
@@ -35,6 +58,9 @@ Important boundary:
   - Canonical runtime prep script: `/mnt/shared/scripts/prepare_llm_runtimes.py`
   - This script includes stale launch-lock cleanup, deterministic load order, and split-runtime recovery.
   - Plans should not duplicate force-unload/restart/load-scan logic unless they truly require custom behavior.
+- For plan updates that touch LLM tasks, check the benchmarking selection guide
+  before choosing model inputs or `llm_model` fields:
+  `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION_FOR_PLANS.md`
 
 ---
 
@@ -143,7 +169,7 @@ Important boundary:
 - `executor: brain` means "run this with the active brain runtime."
 - Plans must not choose the concrete brain model or brain endpoint.
 - Brain tasks should consume runtime-injected `BRAIN_MODEL` and `BRAIN_API_BASE`.
-- Brain tasks should consume the runtime-injected llama variables only; do not depend on legacy Ollama-era env names.
+- Brain tasks should consume the runtime-injected llama variables only.
 - Plans may still choose worker-side model demand when that is part of the workflow contract.
 
 ### Task Class Values
@@ -386,6 +412,20 @@ Use them anyway. They make plans easier to reason about and easier to audit.
 
 ## LLM Task Rules
 
+### Model Selection Step
+
+Every plan update that touches LLM work should include a model-selection pass:
+1. classify each LLM task by role, such as extraction, code generation, code review, deep reasoning, document QA, or final synthesis
+2. check `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION_FOR_PLANS.md`
+3. choose the best model per role, not one global worker model by habit
+4. set `llm_model`, `llm_min_tier`, and `llm_placement` explicitly for worker-owned LLM tasks
+5. leave `executor: brain` model choice to the active brain runtime
+
+Benchmark profiles and plan prompts are separate layers. Benchmarking tracks the
+known-good runtime settings and benchmark prompt for each model. Plan scripts may
+use task-specific prompts, but runtime requirements such as placement, context
+size, split readiness, and model quirks should remain explicit and documented.
+
 ### LLM Placement
 
 Valid values:
@@ -541,26 +581,17 @@ Avoid these mistakes in any plan:
 - If a repo needs environment bootstrap, include it in the plan command; the format doc should stay generic.
 - If a plan uses unusual task fields or conventions, document them in that plan's `## Notes` section, not here.
 
-## Migration Notes
+## LLM Runtime API
 
-### Ollama to llama-server (completed for research_assistant shoulder)
+All plan scripts use the llama-server OpenAI-compatible API:
 
-The LLM runtime changed from Ollama to llama-server. All plan scripts that call a local LLM must use the OpenAI-compatible API, not the legacy Ollama API.
+- Runtime base URL: read from `WORKER_API_BASE`.
+- Completion endpoint: `{WORKER_API_BASE}/v1/completions`
+- Chat endpoint: `{WORKER_API_BASE}/v1/chat/completions`
+- Completion payload: `{"model": m, "prompt": p, "temperature": t, "max_tokens": n}`
+- Completion response: `resp.json()["choices"][0]["text"]`
 
-Old (Ollama):
-- Endpoint: `{BASE_URL}/api/generate`
-- Payload: `{"model": m, "prompt": p, "stream": false, "format": "json", "options": {"temperature": t, "num_predict": n}}`
-- Response: `resp.json()["response"]`
-
-New (llama-server):
-- Endpoint: `{BASE_URL}/v1/completions`
-- Payload: `{"model": m, "prompt": p, "temperature": t, "max_tokens": n}`
-- Response: `resp.json()["choices"][0]["text"]`
-
-Key differences:
-- No `"stream"` field (llama-server completions are non-streaming by default)
-- No `"format": "json"` (enforce JSON output via prompt instructions instead)
-- `"options"` dict is flattened: `temperature` and `max_tokens` are top-level
-- Response path changes from `.response` to `.choices[0].text`
-
-When updating other plan scripts, grep for `/api/generate` to find remaining Ollama call sites.
+No other LLM API format is supported. Legacy Ollama-era plans/scripts must be
+upgraded before submission. The submit path fails immediately when active plan
+files or scripts reference `WORKER_OLLAMA_URL`, `/api/generate`, `call_ollama`,
+or Ollama service assumptions.

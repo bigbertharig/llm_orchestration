@@ -36,6 +36,75 @@ SHARED_ALIASES = (
     "/media/bryan/shared",
 )
 EXISTING_FILE_CONFIG_KEYS = ("QUERY_FILE",)
+LEGACY_OLLAMA_MARKERS = (
+    "WORKER_OLLAMA_URL",
+    "OLLAMA_URL",
+    "call_ollama",
+    "/api/generate",
+    "ollama",
+)
+LEGACY_SCAN_SUFFIXES = {".md", ".py", ".sh"}
+LEGACY_SCAN_SKIP_DIRS = {
+    ".git",
+    ".submit_runtime",
+    "__pycache__",
+    "history",
+    "archive",
+}
+
+
+def _find_legacy_ollama_refs(plan_path: Path) -> list[dict]:
+    """Find old Ollama runtime references that must be upgraded before submit."""
+    findings: list[dict] = []
+    for path in sorted(plan_path.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(plan_path)
+        if any(part in LEGACY_SCAN_SKIP_DIRS for part in rel.parts):
+            continue
+        if path.suffix.lower() not in LEGACY_SCAN_SUFFIXES:
+            continue
+        if path.suffix.lower() == ".md" and path.name not in {"plan.md", "cloud_search_plan.md"}:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        lowered = text.lower()
+        for marker in LEGACY_OLLAMA_MARKERS:
+            haystack = lowered if marker == "ollama" else text
+            needle = marker if marker != "ollama" else marker
+            if needle not in haystack:
+                continue
+            line_no = 1
+            for idx, line in enumerate(text.splitlines(), start=1):
+                compare = line.lower() if marker == "ollama" else line
+                if needle in compare:
+                    line_no = idx
+                    break
+            findings.append(
+                {
+                    "path": str(rel),
+                    "line": line_no,
+                    "marker": marker,
+                }
+            )
+            break
+    return findings
+
+
+def _print_legacy_ollama_error(findings: list[dict]) -> None:
+    print("Error: legacy Ollama-era plan detected.")
+    print("Upgrade this plan to the llama runtime API before submitting.")
+    print("Required changes:")
+    print("  - use WORKER_API_BASE for the worker runtime endpoint")
+    print("  - call the OpenAI-compatible llama-server API, e.g. /v1/chat/completions")
+    print("  - remove WORKER_OLLAMA_URL, /api/generate, call_ollama, and Ollama service assumptions")
+    print("Legacy references:")
+    for item in findings[:20]:
+        print(f"  - {item['path']}:{item['line']} marker={item['marker']}")
+    if len(findings) > 20:
+        print(f"  ... {len(findings) - 20} more")
 
 
 def _to_runtime_shared_path(path_text: str) -> str:
@@ -295,6 +364,11 @@ def main():
         starter_file.relative_to(plan_path)
     except ValueError:
         print(f"Error: starter plan file must be inside plan directory: {starter_file}")
+        return 1
+
+    legacy_ollama_refs = _find_legacy_ollama_refs(plan_path)
+    if legacy_ollama_refs:
+        _print_legacy_ollama_error(legacy_ollama_refs)
         return 1
 
     try:

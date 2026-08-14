@@ -188,9 +188,31 @@ def clear_active_batch(batch_id: str = None):
             print(f"Removed batch: {batch_id}")
         else:
             print(f"Batch {batch_id} not found in active batches")
+        for field in ("batch_queue", "pending_tasks"):
+            value = state.get(field)
+            if isinstance(value, list):
+                before = len(value)
+                state[field] = [
+                    item for item in value
+                    if not isinstance(item, dict) or item.get("batch_id") != batch_id
+                ]
+                removed = before - len(state[field])
+                if removed:
+                    print(f"Removed {removed} {field} item(s) for batch: {batch_id}")
+            elif isinstance(value, dict) and batch_id in value:
+                del value[batch_id]
+                print(f"Removed {field} entry for batch: {batch_id}")
     else:
         count = len(state.get("active_batches", {}))
         state["active_batches"] = {}
+        if isinstance(state.get("batch_queue"), list):
+            state["batch_queue"] = []
+        if isinstance(state.get("pending_tasks"), list):
+            state["pending_tasks"] = []
+        elif isinstance(state.get("pending_tasks"), dict):
+            state["pending_tasks"] = {}
+        state["status"] = "idle"
+        state["pid"] = None
         print(f"Cleared {count} active batch(es)")
 
     with open(STATE_FILE, "w") as f:
