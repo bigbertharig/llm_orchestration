@@ -509,7 +509,7 @@ def build_runtime_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
     # With mmap (default in run_runtime.sh), GGUF file pages are reclaimable
     # under cgroup pressure. Anonymous memory scales with ctx_size (KV cache
     # scratch buffers), not model size:
-    #   single (ctx 4096):  peaks ~0.8-1.6 GB anon
+    #   single (ctx 4096-8192): peaks ~0.8-3 GB anon depending on model
     #   brain  (ctx 16384): peaks ~8-9 GB anon
     #   split:              similar to brain (large ctx for 14B models)
     if slot.tier == "brain":
@@ -517,7 +517,7 @@ def build_runtime_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
     elif slot.tier == "split":
         cmd.extend(["--memory-limit", "10g", "--memory-swap", "12g"])
     else:
-        cmd.extend(["--memory-limit", "2g", "--memory-swap", "3g"])
+        cmd.extend(["--memory-limit", "4g", "--memory-swap", "5g"])
 
     # Tensor split for multi-GPU
     if len(slot.gpu_ids) > 1:
@@ -614,7 +614,8 @@ def build_suite_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
             "-v", f"{BENCHMARKING_SCRIPTS}:/benchmark-scripts:ro",
         ]
         if spec.get("container_gpu_access"):
-            cmd.extend(["--gpus", f"device={gpu_spec}"])
+            docker_gpu_spec = f'"device={gpu_spec}"' if len(slot.gpu_ids) > 1 else f"device={gpu_spec}"
+            cmd.extend(["--gpus", docker_gpu_spec])
         if spec.get("env_file_supported") and cfg.get("env_file"):
             cmd.extend(["--env-file", str(cfg["env_file"])])
         cmd.extend([
