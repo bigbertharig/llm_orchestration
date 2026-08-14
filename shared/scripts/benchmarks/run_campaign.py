@@ -509,7 +509,7 @@ def build_runtime_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
     # With mmap (default in run_runtime.sh), GGUF file pages are reclaimable
     # under cgroup pressure. Anonymous memory scales with ctx_size (KV cache
     # scratch buffers), not model size:
-    #   single (ctx 4096-8192): peaks ~0.8-3 GB anon depending on model
+    #   single (ctx 4096-8192): observed up to 6.3 GB anon depending on workload
     #   brain  (ctx 16384): peaks ~8-9 GB anon
     #   split:              similar to brain (large ctx for 14B models)
     if slot.tier == "brain":
@@ -517,7 +517,7 @@ def build_runtime_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
     elif slot.tier == "split":
         cmd.extend(["--memory-limit", "10g", "--memory-swap", "12g"])
     else:
-        cmd.extend(["--memory-limit", "4g", "--memory-swap", "5g"])
+        cmd.extend(["--memory-limit", "8g", "--memory-swap", "10g"])
 
     # Tensor split for multi-GPU
     if len(slot.gpu_ids) > 1:
@@ -634,7 +634,11 @@ def build_suite_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
         if spec.get("hardware_id_required"):
             cmd.extend(["--hardware-id", hardware_id])
         if suite == "bench-runtime":
-            cmd.extend(["--gpu-ids", gpu_spec])
+            # NVIDIA_VISIBLE_DEVICES is renumbered from zero inside the suite
+            # container. Preserve host IDs in hardware_id, but query telemetry
+            # using the container-local namespace.
+            local_gpu_spec = ",".join(str(i) for i in range(len(slot.gpu_ids)))
+            cmd.extend(["--gpu-ids", local_gpu_spec])
         cmd.extend(suite_args)
 
     else:
@@ -810,10 +814,12 @@ class Scheduler:
         state: CampaignState,
         on_failure: str = "continue",
         dry_run: bool = False,
+        max_active_models: Optional[int] = None,
     ):
         self.state = state
         self.on_failure = on_failure
         self.dry_run = dry_run
+        self.max_active_models = max_active_models
         self.load_lock = False  # only one model loads at a time
         self.loading_block: Optional[str] = None
         self.occupied: Dict[str, str] = {}  # slot_name -> block_id
@@ -839,7 +845,20 @@ class Scheduler:
             return None
         members = self._runtime_group_members(group)
         index = members.index(block)
-        return members[index + 1] if index + 1 < len(members) else None
+        return next(
+            (candidate for candidate in members[index + 1:] if candidate.status != COMPLETED),
+            None,
+        )
+
+    def _active_model_groups(self) -> Set[str]:
+        groups = set()
+        for block_id in self.occupied.values():
+            block = self.state.blocks.get(block_id)
+            if block is None:
+                continue
+            group = str(block.config.get("runtime_group", "")).strip()
+            groups.add(group or block.block_id)
+        return groups
 
     def handoff_runtime(self, block: BlockState) -> bool:
         """Start the next suite in a runtime group without reloading its model."""
@@ -854,6 +873,15 @@ class Scheduler:
             for dep in successor.depends_on
             if dep in self.state.blocks
         ):
+            return False
+        if not self.dry_run and not probe_health(slot.port):
+            log(
+                f"Block {block.block_id}: runtime on port {slot.port} is no "
+                "longer healthy; successor will reload it"
+            )
+            stop_runtime(block.runtime_container)
+            block.runtime_container = None
+            self.occupied.pop(slot.name, None)
             return False
 
         successor.assigned_slot = slot
@@ -936,6 +964,12 @@ class Scheduler:
         for bid, bs in self.state.blocks.items():
             if bs.status != WAITING_GPU:
                 continue
+
+            if self.max_active_models is not None:
+                group = str(bs.config.get("runtime_group", "")).strip() or bs.block_id
+                active_groups = self._active_model_groups()
+                if group not in active_groups and len(active_groups) >= self.max_active_models:
+                    continue
 
             slot = find_free_slot(bs.placement, self.occupied)
             if slot is None:
@@ -1321,6 +1355,13 @@ def main() -> None:
         help="What to do when a block fails (default: continue)",
     )
     parser.add_argument(
+        "--max-active-models",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Limit concurrently active model/runtime groups (use 1 for sequential models)",
+    )
+    parser.add_argument(
         "--limit-override",
         type=int,
         default=None,
@@ -1340,6 +1381,8 @@ def main() -> None:
         help="Print detailed commands and debug info",
     )
     args = parser.parse_args()
+    if args.max_active_models is not None and args.max_active_models < 1:
+        parser.error("--max-active-models must be at least 1")
     _VERBOSE = args.verbose
 
     manifest_path = args.manifest.resolve()
@@ -1425,6 +1468,7 @@ def main() -> None:
         state=state,
         on_failure=args.on_failure,
         dry_run=args.dry_run,
+        max_active_models=args.max_active_models,
     )
 
     def signal_handler(signum: int, frame: Any) -> None:
