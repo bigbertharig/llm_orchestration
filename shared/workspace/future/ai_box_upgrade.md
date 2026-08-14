@@ -235,3 +235,4 @@ unchanged. The evolution is a vocabulary change from "GPUs and VRAM" to
 - [Multiple Models Memory Management](https://www.sitepoint.com/multiple-local-models-memory-management/)
 - GPU rig audit: `workspace/archive/gpu_rig_audit_2026-02-11.md`
 - Current architecture: `workspace/architecture.md`
+- **Hardware build options & cost breakdowns**: [distributed_work_guide.md](../distributed_work_guide.md#hardware-upgrade-options-compared-april-2026-pricing) — TRX50 vs WRX90 builds, GPU comparisons, RAM strategy, full pricing
