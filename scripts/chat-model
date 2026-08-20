@@ -1,0 +1,60 @@
+#!/bin/bash
+# Load a catalog model for an interactive chat, then release its GPU lease.
+
+set -euo pipefail
+
+BASE_DIR="/home/bryan/llm_orchestration"
+MODEL="${1:?usage: chat-model MODEL brain|single|split [TARGET]}"
+MODE="${2:?usage: chat-model MODEL brain|single|split [TARGET]}"
+TARGET="${3:-}"
+OWNER="chat-model:$(hostname):$$"
+PORT=""
+
+release_chat_lease() {
+    ssh -o BatchMode=yes gpu python3 - "$OWNER" <<'PY' || true
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/mnt/shared/agents")
+from gpu_leases import GPULeaseStore
+
+owner = sys.argv[1]
+store = GPULeaseStore(Path("/mnt/shared"))
+for lease in store.list_leases():
+    if str(lease.get("owner") or "") == owner:
+        store.release(str(lease["lease_id"]), owner=owner)
+PY
+}
+
+case "$MODE" in
+    brain)
+        PORT=11434
+        LOAD_ARGS=(--gpu 0 --port "$PORT" --role brain --name llama-brain)
+        ;;
+    single)
+        GPU="${TARGET:-2}"
+        PORT="$((11434 + GPU))"
+        LOAD_ARGS=(--gpu "$GPU" --port "$PORT" --role worker --name "llama-gpu${GPU}")
+        ;;
+    split)
+        GROUP="${TARGET:-pair_1_3}"
+        case "$GROUP" in
+            pair_1_3) PORT=11440 ;;
+            pair_4_5) PORT=11441 ;;
+            *) echo "chat-model: unsupported split group: $GROUP" >&2; exit 2 ;;
+        esac
+        LOAD_ARGS=(--role worker --split-group "$GROUP" --port "$PORT" --name "llama-split-${GROUP}")
+        ;;
+    *)
+        echo "chat-model: mode must be brain, single, or split" >&2
+        exit 2
+        ;;
+esac
+
+"$BASE_DIR/scripts/load-gpu-runtime" \
+    --model "$MODEL" \
+    "${LOAD_ARGS[@]}" \
+    --lease-owner "$OWNER"
+
+trap release_chat_lease EXIT
+ssh -t gpu "python3 /home/bryan/llm_orchestration/scripts/chat_runtime.py --port $PORT --model $MODEL"
