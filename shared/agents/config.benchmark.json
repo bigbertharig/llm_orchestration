@@ -1,199 +1,248 @@
 {
-  "_generated_by": "setup.py",
-  "_generated_at": "2026-02-11T13:00:43.703028",
-  "_discovery_mode": "standard",
-  "_hardware": {
-    "hostname": "bryan-System-Product-Name",
-    "gpu_count": 5
-  },
-  "shared_path": "../",
-  "permissions_path": "permissions/",
-  "llama_runtime_image": "llama-runtime:b10333",
-  "runtime_backend": "llama",
-  "model_search_roots": [
-    "/home/bryan/model-hotset",
-    "/mnt/shared/models"
-  ],
-  "runtime_host": "http://localhost:11434",
-  "brain_keep_alive": "30m",
-  "worker_keep_alive": "30m",
-  "brain_context_tokens": 8192,
-  "worker_context_tokens": 8192,
-  "auto_default_gpu": "gpu-2",
-  "auto_default_model": "qwen2.5-coder:7b",
-  "startup_warm_workers": [],
-  "startup_meta_tasks": [],
-  "llama_single_defaults": {
-    "ctx_size": 16384,
-    "batch_size": 64,
-    "parallel": 1,
-    "n_gpu_layers": 999
-  },
-  "llama_split_defaults": {
-    "ctx_size": 16384,
-    "batch_size": 128,
-    "parallel": 1,
-    "n_gpu_layers": 999
-  },
-  "llama_single_profiles": {
-    "mistral:7b-instruct": {
-      "ctx_size": 12288,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999
+    "_generated_by": "setup.py",
+    "_generated_at": "2026-02-11T13:00:43.703028",
+    "_discovery_mode": "standard",
+    "_hardware": {
+        "hostname": "bryan-System-Product-Name",
+        "gpu_count": 5
     },
-    "qwen2.5-coder:7b": {
-      "ctx_size": 16384,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999,
-      "extra_args": [
-        "--no-warmup"
-      ]
+    "shared_path": "../",
+    "permissions_path": "permissions/",
+    "llama_runtime_image": "llama-runtime:b10333",
+    "runtime_backend": "llama",
+    "model_search_roots": [
+        "/home/bryan/model-hotset",
+        "/mnt/shared/models"
+    ],
+    "runtime_host": "http://localhost:11434",
+    "brain_keep_alive": "30m",
+    "worker_keep_alive": "30m",
+    "brain_context_tokens": 8192,
+    "worker_context_tokens": 8192,
+    "auto_default_enabled": false,
+    "auto_default_idle_seconds": 999999,
+    "auto_default_gpu": "gpu-2",
+    "auto_default_model": "qwen2.5-coder:7b",
+    "startup_warm_workers": [],
+    "startup_meta_tasks": [],
+    "llama_single_defaults": {
+        "ctx_size": 16384,
+        "batch_size": 64,
+        "parallel": 1,
+        "n_gpu_layers": 999
     },
-    "qwen3.5:4b": {
-      "ctx_size": 16384,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999,
-      "extra_args": [
-        "--reasoning-budget",
-        "0"
-      ]
+    "llama_split_defaults": {
+        "ctx_size": 16384,
+        "batch_size": 128,
+        "parallel": 1,
+        "n_gpu_layers": 999
     },
-    "qwen3.5:9b-q3km": {
-      "ctx_size": 16384,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999,
-      "extra_args": [
-        "--reasoning-budget",
-        "0"
-      ]
+    "llama_single_profiles": {
+        "mistral:7b-instruct": {
+            "ctx_size": 12288,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999
+        },
+        "qwen2.5-coder:7b": {
+            "ctx_size": 16384,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+            "extra_args": [
+                "--no-warmup"
+            ]
+        },
+        "ministral-3:8b": {
+            "ctx_size": 8192,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+            "image": "llama-runtime:b8884-candidate"
+        },
+        "ministral-3:3b": {
+            "ctx_size": 8192,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+            "image": "llama-runtime:b8884-candidate"
+        },
+        "qwen3-coder:30b-a3b": {
+            "ctx_size": 16384,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+            "image": "llama-runtime:b8884-candidate"
+        },
+        "qwen3.5:27b": {
+            "ctx_size": 16384,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+            "image": "llama-runtime:b8884-candidate",
+            "extra_args": [
+                "--reasoning-budget",
+                "0"
+            ]
+        },
+        "qwen3.5:4b": {
+            "ctx_size": 16384,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+            "extra_args": [
+                "--reasoning-budget",
+                "0"
+            ]
+        },
+        "qwen3.5:9b-q3km": {
+            "ctx_size": 16384,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+            "extra_args": [
+                "--reasoning-budget",
+                "0"
+            ]
+        },
+        "qwen3.6:27b": {
+            "ctx_size": 16384,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+            "extra_args": [
+                "--reasoning-budget",
+                "0"
+            ]
+        },
+        "deepseek-r1:7b": {
+            "ctx_size": 16384,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999
+        }
     },
-    "deepseek-r1:7b": {
-      "ctx_size": 16384,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999
-    }
-  },
-  "llama_split_profiles": {
-    "qwen2.5-coder:14b": {
-      "ctx_size": 16384,
-      "batch_size": 128,
-      "parallel": 1,
-      "n_gpu_layers": 999,
-      "tensor_split": "1,1",
-      "extra_args": [
-        "--no-warmup"
-      ],
-      "meta_timeout_seconds": 600
-    }
-  },
-  "review_lap_models": {
-    "extractor": {
-      "preferred": "qwen2.5-coder:7b",
-      "fallback": "qwen2.5-coder:14b"
+    "llama_split_profiles": {
+        "ministral-3:14b": {
+            "ctx_size": 8192,
+            "batch_size": 64,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+            "image": "llama-runtime:b8884-candidate"
+        },
+        "qwen2.5-coder:14b": {
+            "ctx_size": 16384,
+            "batch_size": 128,
+            "parallel": 1,
+            "n_gpu_layers": 999,
+            "tensor_split": "1,1",
+            "extra_args": [
+                "--no-warmup"
+            ],
+            "meta_timeout_seconds": 600
+        }
     },
-    "verifier": {
-      "preferred": "qwen2.5-coder:14b",
-      "fallback": "qwen2.5-coder:7b"
+    "review_lap_models": {
+        "extractor": {
+            "preferred": "qwen2.5-coder:7b",
+            "fallback": "qwen2.5-coder:14b"
+        },
+        "verifier": {
+            "preferred": "qwen2.5-coder:14b",
+            "fallback": "qwen2.5-coder:7b"
+        },
+        "adjudicator": {
+            "preferred": "qwen2.5-coder:14b",
+            "fallback": "qwen2.5-coder:7b"
+        }
     },
-    "adjudicator": {
-      "preferred": "qwen2.5-coder:14b",
-      "fallback": "qwen2.5-coder:7b"
-    }
-  },
-  "brain": {
-    "name": "brain",
-    "model": "qwen2.5:32b",
+    "brain": {
+        "name": "brain",
+        "model": "qwen3.6:27b",
+        "gpus": [
+            0
+        ]
+    },
     "gpus": [
-      0
-    ]
-  },
-  "gpus": [
-    {
-      "name": "gpu-1",
-      "id": 1,
-      "vram_mb": 6144,
-      "model": "qwen2.5-coder:7b",
-      "port": 11435,
-      "permissions": "worker.json"
+        {
+            "name": "gpu-1",
+            "id": 1,
+            "vram_mb": 6144,
+            "model": "qwen2.5-coder:7b",
+            "port": 11435,
+            "permissions": "worker.json"
+        },
+        {
+            "name": "gpu-2",
+            "id": 2,
+            "vram_mb": 6144,
+            "model": "qwen2.5-coder:7b",
+            "port": 11436,
+            "permissions": "worker.json"
+        },
+        {
+            "name": "gpu-3",
+            "id": 3,
+            "vram_mb": 6144,
+            "model": "qwen2.5-coder:7b",
+            "port": 11437,
+            "permissions": "worker.json"
+        },
+        {
+            "name": "gpu-4",
+            "id": 4,
+            "vram_mb": 6144,
+            "model": "qwen2.5-coder:7b",
+            "port": 11438,
+            "permissions": "worker.json"
+        },
+        {
+            "name": "gpu-5",
+            "id": 5,
+            "vram_mb": 6144,
+            "model": "qwen2.5-coder:7b",
+            "port": 11439,
+            "permissions": "worker.json"
+        }
+    ],
+    "worker_mode": "cold",
+    "initial_hot_workers": 0,
+    "max_hot_workers": 5,
+    "timeouts": {
+        "poll_interval_seconds": 5,
+        "brain_think_seconds": 120,
+        "worker_task_seconds": 0
     },
-    {
-      "name": "gpu-2",
-      "id": 2,
-      "vram_mb": 6144,
-      "model": "qwen2.5-coder:7b",
-      "port": 11436,
-      "permissions": "worker.json"
-    },
-    {
-      "name": "gpu-3",
-      "id": 3,
-      "vram_mb": 6144,
-      "model": "qwen2.5-coder:7b",
-      "port": 11437,
-      "permissions": "worker.json"
-    },
-    {
-      "name": "gpu-4",
-      "id": 4,
-      "vram_mb": 6144,
-      "model": "qwen2.5-coder:7b",
-      "port": 11438,
-      "permissions": "worker.json"
-    },
-    {
-      "name": "gpu-5",
-      "id": 5,
-      "vram_mb": 6144,
-      "model": "qwen2.5-coder:7b",
-      "port": 11439,
-      "permissions": "worker.json"
-    }
-  ],
-  "worker_mode": "cold",
-  "initial_hot_workers": 0,
-  "max_hot_workers": 5,
-  "timeouts": {
-    "poll_interval_seconds": 5,
-    "brain_think_seconds": 120,
-    "worker_task_seconds": 0
-  },
-  "resource_limits": {
-    "max_temp_c": 100,
-    "gpu_temp_warning_c": 88,
-    "gpu_temp_critical_c": 93,
-    "cpu_temp_warning_c": 85,
-    "cpu_temp_critical_c": 99,
-    "max_vram_percent": 95,
-    "max_power_w": 140
-  },
-  "retry_policy": {
-    "max_attempts": 3
-  },
-  "thermal_pause": {
-    "initial_seconds": 30,
-    "max_seconds": 300,
-    "backoff_factor": 1.8,
-    "resume_margin_c": 4
-  },
-  "thermal_recovery": {
-    "cpu_overheat_trigger_seconds": 300,
-    "targeted_reset_interval_seconds": 60,
-    "max_targeted_resets_per_incident": 5,
-    "full_reset_cooldown_seconds": 300,
-    "enable_full_reset_escalation": true,
-    "same_gpu_reset_backoff_seconds": 120
-  },
-  "cpu_agent": {
     "resource_limits": {
-      "cpu_temp_warning_c": 85,
-      "cpu_temp_critical_c": 95
+        "max_temp_c": 100,
+        "gpu_temp_warning_c": 88,
+        "gpu_temp_critical_c": 93,
+        "cpu_temp_warning_c": 85,
+        "cpu_temp_critical_c": 99,
+        "max_vram_percent": 95,
+        "max_power_w": 140
+    },
+    "retry_policy": {
+        "max_attempts": 3
+    },
+    "thermal_pause": {
+        "initial_seconds": 30,
+        "max_seconds": 300,
+        "backoff_factor": 1.8,
+        "resume_margin_c": 4
+    },
+    "thermal_recovery": {
+        "cpu_overheat_trigger_seconds": 300,
+        "targeted_reset_interval_seconds": 60,
+        "max_targeted_resets_per_incident": 5,
+        "full_reset_cooldown_seconds": 300,
+        "enable_full_reset_escalation": true,
+        "same_gpu_reset_backoff_seconds": 120
+    },
+    "cpu_agent": {
+        "resource_limits": {
+            "cpu_temp_warning_c": 85,
+            "cpu_temp_critical_c": 95
+        }
     }
-  },
-  "auto_default_enabled": false,
-  "auto_default_idle_seconds": 999999
 }
