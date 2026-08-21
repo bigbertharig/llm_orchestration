@@ -72,3 +72,33 @@ about 98% free swap immediately before the event.
 - `/mnt/shared/logs/brain_decisions.log`
 
 The interrupted run must not be promoted to validated/full evidence.
+
+## Controlled Retry
+
+At approximately 20:03 PDT, the rig was cleanly rebooted over SSH after the
+owner confirmed wiring and fan operation. The new boot ID is
+`a8626138-dc2c-4f3b-97fd-bfc4724d9457`. The previous boot completed an orderly
+systemd shutdown and the new boot reported no new hardware, MCE, NVIDIA Xid, or
+filesystem-recovery errors.
+
+Startup and campaign telemetry is being sampled every two seconds with
+`/mnt/shared/scripts/startup_thermal_monitor.py`.
+
+- Clean normal startup peaked at 68C CPU package temperature.
+- A retry with two concurrent models averaged 84C over its final two minutes
+  and reached 89-90C. It was stopped cleanly before reaching the critical limit.
+- The active retry is `20260820_modern_validation_l50_retry3`, sequential with
+  `--max-active-models 1`.
+- Sequential Qwen 3.5 27B inference generally runs around 82-87C but has
+  produced a brief 90C sample. GPU 0 runs near 450W and 71-74C.
+- The active telemetry guard sends SIGTERM to the campaign runner at 95C so its
+  independently managed benchmark containers are stopped before the 100C CPU
+  hardware limit.
+
+Active evidence:
+
+- `/mnt/shared/logs/startup_thermal_clean_reboot_20260820_200248.csv`
+- `/mnt/shared/logs/startup_thermal_modern_retry_20260820_200607.csv`
+- `/mnt/shared/logs/startup_thermal_modern_retry_guarded_20260820_201429.csv`
+- `/mnt/shared/logs/startup_thermal_modern_retry_guarded_20260820_201429.events.log`
+- `/mnt/shared/logs/benchmarks/campaign-20260820_modern_validation_l50_retry3.log`
