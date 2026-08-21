@@ -8,6 +8,7 @@ import csv
 import glob
 import os
 from pathlib import Path
+import signal
 import subprocess
 import time
 
@@ -120,6 +121,8 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--duration", type=int, default=1800)
     parser.add_argument("--interval", type=float, default=2.0)
+    parser.add_argument("--abort-cpu-c", type=float, default=0.0)
+    parser.add_argument("--abort-pid", type=int)
     args = parser.parse_args()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -128,6 +131,7 @@ def main() -> int:
     started = time.time()
     last_total, last_idle = read_cpu_ticks()
     last_event = 0.0
+    abort_sent = False
 
     fieldnames = [
         "timestamp",
@@ -189,6 +193,26 @@ def main() -> int:
                     )
                     events.write(process_snapshot() + "\n\n")
                 last_event = sample_time
+
+            if (
+                not abort_sent
+                and args.abort_pid
+                and args.abort_cpu_c > 0
+                and package_c is not None
+                and package_c >= args.abort_cpu_c
+            ):
+                with events_path.open("a", buffering=1) as events:
+                    events.write(
+                        f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} "
+                        f"THERMAL_ABORT cpu_package_c={package_c} "
+                        f"threshold_c={args.abort_cpu_c} pid={args.abort_pid}\n"
+                    )
+                    events.write(process_snapshot() + "\n\n")
+                try:
+                    os.kill(args.abort_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                abort_sent = True
 
             time.sleep(max(0.1, args.interval - (time.time() - sample_time)))
     return 0
