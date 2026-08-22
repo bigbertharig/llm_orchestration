@@ -1,4 +1,4 @@
-# Human Action Required: Benchmark Thermal Shutdown
+# Resolved Hardware Check: Benchmark Thermal Shutdown
 
 Date: 2026-08-20
 Campaign: `modern_models_validation_202608/20260820_modern_validation_l50`
@@ -102,3 +102,22 @@ Active evidence:
 - `/mnt/shared/logs/startup_thermal_modern_retry_guarded_20260820_201429.csv`
 - `/mnt/shared/logs/startup_thermal_modern_retry_guarded_20260820_201429.events.log`
 - `/mnt/shared/logs/benchmarks/campaign-20260820_modern_validation_l50_retry3.log`
+
+## Closure
+
+The owner checked the wiring and all fans, and the clean-reboot diagnostics did
+not identify a hardware or boot fault. Sequential retry
+`20260820_modern_validation_l50_retry3` completed all 12 manifest lanes without
+activating the 95C guard. Across the guarded run, CPU package temperature peaked
+at 94C, with 16 samples at or above 90C and none at or above 95C; GPU temperature
+peaked at 79C. This clears the physical-check action, but sequential execution
+and the 95C campaign guard remain required on this host.
+
+The post-run evidence audit found a separate benchmark-controller defect. The
+three brain lanes reused an existing `qwen3.6:27b` server on port 11434 while
+attributing results to Qwen3.5, Qwen Coder, and Devstral. Those brain records are
+invalid and were removed from the canonical ledger. The Ministral 14B/8B
+reasoning/runtime and Ministral 3B code/runtime results used the requested model
+runtimes and remain valid. Brain-only validation must wait for endpoint identity
+enforcement; this is tracked in
+`workspace/implement/benchmark_runtime_identity_preflight.md`.
