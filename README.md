@@ -91,6 +91,34 @@ See [shared/workspace/PLAN_FORMAT.md](shared/workspace/PLAN_FORMAT.md) for plan 
 ## Project Structure
 
 ```
+
+## Source And Live Deployment
+
+The Git checkout is the canonical source tree. Its `shared/` directory is a
+versioned deployment image; it is not the live NFS mount.
+
+- source: `/home/bryan/llm_orchestration/shared`
+- live on the Pi: `/media/bryan/shared`
+- live on the GPU rig: `/mnt/shared`
+
+Compare source with the live Pi mount without changing anything:
+
+```bash
+python3 scripts/sync_shared_source.py --live-root /media/bryan/shared
+```
+
+Deploy only changed or missing tracked source files, without deleting runtime
+or untracked files:
+
+```bash
+python3 scripts/sync_shared_source.py \
+  --live-root /media/bryan/shared \
+  --apply
+```
+
+The sync command always excludes `shared/core/**` and
+`shared/agents/permissions/**`. Machine-specific configs and runtime state are
+not tracked and are never removed by the command.
 llm_orchestration/
 ├── scripts/              # RPi utilities (submit.py, dashboard.py, watch.py)
 └── shared/               # 4TB ext4 USB, NFS-shared to all nodes
