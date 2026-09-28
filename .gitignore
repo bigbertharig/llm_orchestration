@@ -46,6 +46,22 @@ shared/scripts/*
 !shared/scripts/benchmarks/
 !shared/scripts/benchmarks/**
 !shared/scripts/manage_gpu_lease.py
+# Canonical rig/worker operations used directly from the shared mount.
+!shared/scripts/batch_runtime_diag.py
+!shared/scripts/brain_watchdog.py
+!shared/scripts/cleanup_llama_runtime_state.py
+!shared/scripts/cleanup_task_heartbeats.py
+!shared/scripts/cpu_agent.py
+!shared/scripts/cpu_queue_guard.py
+!shared/scripts/generate_batch_summary.py
+!shared/scripts/gpu_rig_prep_for_image.sh
+!shared/scripts/gpu_worker_watchdog.py
+!shared/scripts/manage_model_hotset.py
+!shared/scripts/prepare_llm_runtimes.py
+!shared/scripts/restart_cpu_workers.sh
+!shared/scripts/restart_gpu_agents.py
+!shared/scripts/start_dashboard.sh
+!shared/scripts/summarize_history_run.py
 shared/scripts/**/__pycache__/
 shared/scripts/**/*.pyc
 shared/scripts/benchmarks/containers/images/
