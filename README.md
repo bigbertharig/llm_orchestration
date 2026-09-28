@@ -50,6 +50,23 @@ cd ~/llm_orchestration/scripts
 python3 -m dashboard --port 8787
 ```
 
+### Interactive Model Access
+
+The optional Pi-side model access API gives LAN gateways a narrow session
+contract over the existing runtime loader and GPU leases. It binds to localhost
+by default; only the client-facing gateway needs a LAN listener.
+
+```bash
+ORCHESTRATOR_API_KEY=replace-me \
+python3 scripts/model_access_api.py \
+  --shared-root /media/bryan/shared \
+  --rig-host 10.0.0.3
+```
+
+See
+[`shared/workspace/implement/interactive_model_access.md`](shared/workspace/implement/interactive_model_access.md)
+for the API contract and current model allowlist.
+
 ## Plans
 
 Plans define workflows as markdown files. Each plan contains:

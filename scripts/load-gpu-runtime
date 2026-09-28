@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -19,8 +20,26 @@ from pathlib import Path
 
 
 BASE_DIR = Path("/home/bryan/llm_orchestration")
-LOCAL_CATALOG = BASE_DIR / "shared" / "agents" / "models.catalog.json"
-LOCAL_CONFIG = BASE_DIR / "shared" / "agents" / "config.json"
+
+
+def local_shared_root() -> Path:
+    configured = os.getenv("LLM_ORCHESTRATION_SHARED_ROOT", "").strip()
+    candidates = [
+        Path(configured) if configured else None,
+        BASE_DIR / "shared",
+        Path("/media/bryan/shared"),
+        Path("/mnt/shared"),
+    ]
+    for candidate in candidates:
+        if candidate and (candidate / "agents" / "models.catalog.json").is_file():
+            return candidate
+    checked = ", ".join(str(path) for path in candidates if path)
+    raise RuntimeError(f"cannot locate shared orchestration tree; checked: {checked}")
+
+
+LOCAL_SHARED_ROOT = local_shared_root()
+LOCAL_CATALOG = LOCAL_SHARED_ROOT / "agents" / "models.catalog.json"
+LOCAL_CONFIG = LOCAL_SHARED_ROOT / "agents" / "config.json"
 REMOTE_HOST = "gpu"
 REMOTE_RUN_RUNTIME = "/mnt/shared/scripts/llama_runtime/run_runtime.sh"
 REMOTE_RUNTIME_PREFLIGHT = "/mnt/shared/scripts/runtime_preflight.py"
@@ -762,7 +781,19 @@ def main() -> int:
             return 0
         lease = ensure_lease()
         if args.json:
-            print(json.dumps({"ok": True, "already_ready": True, "lease": lease, "lane": lane, "probe": probe, "preflight": preflight}))
+            print(json.dumps({
+                "ok": True,
+                "already_ready": True,
+                "model": args.model,
+                "runtime_model": expected,
+                "gpu": gpu_id,
+                "lease": lease,
+                "lane": lane,
+                "split_group": selected_group,
+                "port": port,
+                "probe": probe,
+                "preflight": preflight,
+            }))
         return 0
     if args.check_only:
         target = f"split group {selected_group['id']} ({gpus_arg})" if selected_group else f"GPU {gpu_id}"
@@ -804,6 +835,7 @@ def main() -> int:
         print(json.dumps({
             "ok": True,
             "model": args.model,
+            "runtime_model": expected,
             "gpu": gpu_id,
             "lease": lease,
             "lane": lane,
