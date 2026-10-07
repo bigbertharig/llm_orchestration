@@ -1,12 +1,15 @@
 #!/home/bryan/llm-orchestration-venv/bin/python
 """Rig mode selector. Runs on the GPU rig; other machines call it over SSH.
 
-    ssh rig rig status
-    ssh rig rig start <orchestration|bench|remote> [profile ...] [--force]
-    ssh rig rig stop
+    ssh rig rig status [--json]
+    ssh rig rig start <orchestration|bench> [--force]
+    ssh rig rig start remote [profile ...] [--force]
+    ssh rig rig stop [profile ...]
 
 One mode at a time. Boot leaves the rig idle (nothing running, no model on any GPU).
-`start` refuses while another mode is active unless --force is given.
+`start` refuses while a different mode is active unless --force is given.
+Remote mode is additive: `start remote <id>` loads that profile onto free GPUs that match
+its requirements, alongside profiles already loaded. `stop <id>` unloads one profile.
 Design: shared/workspace/implement/rig_boot_modes.md
 """
 
@@ -19,6 +22,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -36,15 +40,20 @@ STACK_UNITS = {
     "orchestration": "llm-orchestration.service",
     "bench": "llm-bench.service",
 }
-# control_policy profile written once a stack mode is ready.
-STACK_POLICY = {
+# control_policy profile written once a mode is ready.
+MODE_POLICY = {
     "orchestration": "plan_ready",
     "bench": "benchmark_ready",
+    "remote": "custom",
 }
 MODES = ("orchestration", "bench", "remote")
 BRAIN_PORT = 11434
+# Remote profiles get the lowest free port in this range (all inside the desktop rig-llm tunnel).
+REMOTE_PORTS = range(11434, 11442)
 REMOTE_CONTAINER_PREFIX = "rig-remote-"
 REMOTE_MEMORY_LIMIT = "20g"
+# A GPU counts as free for remote placement only if nearly empty (catches strays).
+GPU_FREE_MAX_USED_MB = 1000
 STACK_READY_TIMEOUT_S = 600
 REMOTE_READY_TIMEOUT_S = 600
 LOCK_WAIT_S = 5
@@ -52,10 +61,13 @@ LOCK_WAIT_S = 5
 EXIT_FAIL = 1
 EXIT_BUSY = 2
 EXIT_LOCKED = 3
+EXIT_NO_CAPACITY = 4
 
 
 class RigError(RuntimeError):
-    pass
+    def __init__(self, msg: str, code: int = EXIT_FAIL):
+        super().__init__(msg)
+        self.code = code
 
 
 def say(msg: str) -> None:
@@ -79,31 +91,42 @@ def read_state() -> dict:
     return json.loads(STATE_PATH.read_text(encoding="utf-8"))
 
 
-def write_state(**fields) -> dict:
-    state = {"mode": "idle", "status": "idle", "since": now_iso(), "from": caller()}
-    state.update(fields)
+def save_state(state: dict) -> dict:
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     tmp.replace(STATE_PATH)
     return state
 
 
-def acquire_lock():
-    fh = open(LOCK_PATH, "w")
-    deadline = time.time() + LOCK_WAIT_S
-    while True:
-        try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return fh
-        except BlockingIOError:
-            if time.time() >= deadline:
-                st = read_state()
-                say(
-                    f"locked: another rig command is running "
-                    f"({st.get('status')} {st.get('mode')}, from {st.get('from')})"
-                )
-                sys.exit(EXIT_LOCKED)
-            time.sleep(0.5)
+def write_state(**fields) -> dict:
+    state = {"mode": "idle", "status": "idle", "since": now_iso(), "from": caller()}
+    state.update(fields)
+    return save_state(state)
+
+
+class Lock:
+    """Exclusive rig lock. Held only for quick state changes, never while a model loads."""
+
+    def __enter__(self):
+        self.fh = open(LOCK_PATH, "w")
+        deadline = time.time() + LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except BlockingIOError:
+                if time.time() >= deadline:
+                    st = read_state()
+                    self.fh.close()
+                    raise RigError(
+                        f"locked: another rig command is running "
+                        f"({st.get('status')} {st.get('mode')}, from {st.get('from')})",
+                        EXIT_LOCKED,
+                    )
+                time.sleep(0.5)
+
+    def __exit__(self, *exc):
+        self.fh.close()
 
 
 def write_policy(profile: str, reason: str) -> None:
@@ -131,14 +154,16 @@ def expected_gpu_ids() -> list[int]:
 
 def gpu_check() -> dict:
     proc = run(
-        ["nvidia-smi", "--query-gpu=index,name,memory.used", "--format=csv,noheader"],
+        ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used",
+         "--format=csv,noheader,nounits"],
         check=False,
     )
     visible = []
     for line in proc.stdout.splitlines():
         parts = [p.strip() for p in line.split(",")]
-        if parts and parts[0].isdigit():
-            visible.append({"index": int(parts[0]), "name": parts[1], "mem_used": parts[2]})
+        if len(parts) == 4 and parts[0].isdigit():
+            visible.append({"index": int(parts[0]), "name": parts[1],
+                            "total_mb": int(parts[2]), "used_mb": int(parts[3])})
     expected = expected_gpu_ids()
     missing = sorted(set(expected) - {g["index"] for g in visible})
     errors = [l.strip() for l in proc.stderr.splitlines() if l.strip()]
@@ -187,7 +212,8 @@ def unit_active(unit: str) -> bool:
 
 # ---------------------------------------------------------------- stop
 
-def do_stop() -> None:
+def stop_everything() -> None:
+    """Stop any mode and return to idle. Caller holds the lock."""
     for unit in STACK_UNITS.values():
         if unit_active(unit):
             say(f"  stopping {unit}")
@@ -203,7 +229,27 @@ def do_stop() -> None:
     write_state(mode="idle", status="idle")
 
 
-# ---------------------------------------------------------------- start
+def drop_remote_profile(state: dict, pid: str, error: str | None = None) -> dict:
+    """Unload one remote profile; go idle when none remain. Caller holds the lock."""
+    entry = state.get("profiles", {}).pop(pid, None)
+    if entry:
+        run(["docker", "rm", "-f", entry["container"]], check=False, timeout=60)
+    if error:
+        state["error"] = error
+    if not state.get("profiles"):
+        write_policy("neutral", "rig_idle")
+        return save_state({"mode": "idle", "status": "idle", "since": now_iso(),
+                           "from": caller(), **({"error": error} if error else {})})
+    return save_state(refresh_remote_status(state))
+
+
+def refresh_remote_status(state: dict) -> dict:
+    loading = any(p["state"] == "loading" for p in state["profiles"].values())
+    state["status"] = "loading" if loading else "ready"
+    return state
+
+
+# ---------------------------------------------------------------- stack modes
 
 def start_stack(mode: str) -> dict:
     unit = STACK_UNITS[mode]
@@ -231,147 +277,288 @@ def start_stack(mode: str) -> dict:
         time.sleep(3)
     else:
         raise RigError(f"{mode} not ready within {STACK_READY_TIMEOUT_S}s")
-    write_policy(STACK_POLICY[mode], f"rig_start_{mode}")
+    write_policy(MODE_POLICY[mode], f"rig_start_{mode}")
     return {"unit": unit, "ports": {BRAIN_PORT: served_model(BRAIN_PORT)}}
 
 
-def load_remote_profiles(requested: list[str]) -> list[dict]:
+def cmd_start_stack(args) -> int:
+    with Lock():
+        st = read_state()
+        if st["mode"] != "idle":
+            if not args.force:
+                return report_busy(st, args.mode)
+            say(f"stopping {st['mode']} (forced by {caller()})...")
+            stop_everything()
+        g = gpu_check()
+        if not g["ok"]:
+            raise RigError(f"GPU check failed: missing {g['missing']} {g['errors']}; power-cycle the rig")
+        say(f"starting {args.mode}...")
+        write_state(mode=args.mode, status="starting")
+        try:
+            detail = start_stack(args.mode)
+        except Exception as exc:
+            say(f"FAILED: {exc}")
+            say("cleaning up -> idle")
+            try:
+                stop_everything()
+            finally:
+                write_state(mode="idle", status="idle", error=f"{args.mode}: {str(exc)[:500]}")
+            return EXIT_FAIL
+        write_state(mode=args.mode, status="ready", detail=detail)
+    say(f"done: {args.mode} ready")
+    for port, what in detail.get("ports", {}).items():
+        say(f"  :{port}  {what}")
+    return 0
+
+
+def report_busy(st: dict, wanted: str) -> int:
+    say(f"busy: {st['mode']} ({st['status']}, since {st.get('since')}, from {st.get('from')})")
+    say(f"re-run with --force to stop {st['mode']} and start {wanted}")
+    return EXIT_BUSY
+
+
+# ---------------------------------------------------------------- remote mode
+
+def published_profiles() -> dict[str, dict]:
     lib = json.loads(LIBRARY_PATH.read_text(encoding="utf-8"))
     profiles = {p["id"]: p for p in lib.get("remote_profiles", [])}
     if not profiles:
         raise RigError(f"no remote_profiles in {LIBRARY_PATH}")
-    if requested:
-        unknown = [r for r in requested if r not in profiles]
-        if unknown:
-            raise RigError(f"unknown remote profile(s) {unknown}; published: {sorted(profiles)}")
-        chosen = [profiles[r] for r in requested]
-    else:
-        chosen = [p for p in profiles.values() if p.get("default")]
-    used_gpus: dict[int, str] = {}
-    used_ports: dict[int, str] = {}
-    for p in chosen:
-        for g in p["gpus"]:
-            if g in used_gpus:
-                raise RigError(f"profiles {used_gpus[g]} and {p['id']} both need GPU {g}")
-            used_gpus[g] = p["id"]
-        if p["port"] in used_ports:
-            raise RigError(f"profiles {used_ports[p['port']]} and {p['id']} both need port {p['port']}")
-        used_ports[p["port"]] = p["id"]
     catalog = {m["id"]: m for m in json.loads(CATALOG_PATH.read_text())["models"]}
-    for p in chosen:
+    for p in profiles.values():
         if p["model"] not in catalog:
             raise RigError(f"profile {p['id']}: model {p['model']} not in models.catalog.json")
+        if not p.get("gpus_needed"):
+            raise RigError(f"profile {p['id']}: gpus_needed is required")
         p["gguf_path"] = catalog[p["model"]]["gguf_path"]
-    return chosen
+    return profiles
 
 
-def start_remote(requested: list[str]) -> dict:
-    profiles = load_remote_profiles(requested)
-    ports = {}
-    for p in profiles:
-        name = REMOTE_CONTAINER_PREFIX + p["id"]
-        run(["docker", "rm", "-f", name], check=False)
-        cmd = [
-            str(RUN_RUNTIME), "--name", name, "--model", p["gguf_path"],
-            "--port", str(p["port"]), "--gpus", "device=" + ",".join(map(str, p["gpus"])),
-            "--ctx-size", str(p["ctx_size"]), "--batch-size", str(p["batch_size"]),
-            "--parallel", str(p["parallel"]), "--memory-limit", REMOTE_MEMORY_LIMIT,
-        ]
-        if p.get("tensor_split"):
-            cmd += ["--tensor-split", p["tensor_split"]]
-        for a in p.get("extra_args", []):
-            cmd += ["--extra-arg", a]
-        say(f"  loading {p['id']} ({p['model']}) on GPU {p['gpus']} -> :{p['port']}")
-        run(cmd, timeout=60)
-    for p in profiles:
-        name = REMOTE_CONTAINER_PREFIX + p["id"]
-        deadline = time.time() + REMOTE_READY_TIMEOUT_S
-        while True:
-            if http_get(f"http://127.0.0.1:{p['port']}/health")[0] == 200:
-                break
-            running = run(["docker", "inspect", "-f", "{{.State.Running}}", name], check=False).stdout.strip()
-            if running != "true":
-                logs = run(["docker", "logs", "--tail", "20", name], check=False)
-                raise RigError(f"{p['id']} container exited:\n{logs.stdout}{logs.stderr}")
-            if time.time() > deadline:
-                raise RigError(f"{p['id']} not ready within {REMOTE_READY_TIMEOUT_S}s")
-            time.sleep(3)
-        ports[p["port"]] = f"{p['id']} ({p['model']}, ctx {p['ctx_size']})"
-        say(f"  ready {p['id']} on :{p['port']}")
-    write_policy("custom", "rig_start_remote")
-    return {"profiles": [p["id"] for p in profiles], "ports": ports}
+def place_profile(profile: dict, free_gpus: list[dict]) -> list[int] | None:
+    """Pick one free GPU per requirement, smallest card that fits first (keeps big cards free).
+
+    Returns GPU indexes in requirement order (that order matches tensor_split), or None.
+    """
+    reqs = list(enumerate(profile["gpus_needed"]))
+    reqs.sort(key=lambda r: -int(r[1]["min_vram_mb"]))
+    pool = sorted(free_gpus, key=lambda g: (g["total_mb"], g["index"]))
+    chosen: dict[int, int] = {}
+    for pos, req in reqs:
+        fit = next((g for g in pool if g["total_mb"] >= int(req["min_vram_mb"])), None)
+        if fit is None:
+            return None
+        chosen[pos] = fit["index"]
+        pool.remove(fit)
+    return [chosen[i] for i in range(len(profile["gpus_needed"]))]
+
+
+def launch_profile(p: dict, gpus: list[int], port: int) -> str:
+    name = REMOTE_CONTAINER_PREFIX + p["id"]
+    run(["docker", "rm", "-f", name], check=False)
+    cmd = [
+        str(RUN_RUNTIME), "--name", name, "--model", p["gguf_path"],
+        "--port", str(port), "--gpus", "device=" + ",".join(map(str, gpus)),
+        "--ctx-size", str(p["ctx_size"]), "--batch-size", str(p["batch_size"]),
+        "--parallel", str(p["parallel"]), "--memory-limit", REMOTE_MEMORY_LIMIT,
+    ]
+    if p.get("tensor_split"):
+        cmd += ["--tensor-split", p["tensor_split"]]
+    for a in p.get("extra_args", []):
+        cmd += ["--extra-arg", a]
+    run(cmd, timeout=60)
+    return name
+
+
+def remote_loaded_summary(state: dict) -> str:
+    profiles = state.get("profiles", {})
+    if not profiles:
+        return "none"
+    return ", ".join(f"{pid} (GPU {e['gpus']}, :{e['port']}, {e['state']})" for pid, e in profiles.items())
+
+
+def claim_remote(requested: list[str], force: bool) -> tuple[list[str], int | None]:
+    """Under the lock: enter remote mode if needed, place and launch new profiles.
+
+    Returns (profile ids to wait on, early exit code or None).
+    """
+    profiles = published_profiles()
+    unknown = [r for r in requested if r not in profiles]
+    if unknown:
+        raise RigError(f"unknown remote profile(s) {unknown}; published: {sorted(profiles)}")
+    wanted = requested or [pid for pid, p in profiles.items() if p.get("default")]
+
+    st = read_state()
+    if st["mode"] not in ("idle", "remote") or (force and st["mode"] != "idle"):
+        if not force:
+            return [], report_busy(st, "remote")
+        say(f"stopping {st['mode']} (forced by {caller()})...")
+        stop_everything()
+        st = read_state()
+
+    g = gpu_check()
+    entering = st["mode"] == "idle"
+    if entering:
+        if not g["ok"]:
+            raise RigError(f"GPU check failed: missing {g['missing']} {g['errors']}; power-cycle the rig")
+        st = {"mode": "remote", "status": "loading", "since": now_iso(), "from": caller(), "profiles": {}}
+
+    loaded = st.setdefault("profiles", {})
+    used_gpus = {i for e in loaded.values() for i in e["gpus"]}
+    used_ports = {e["port"] for e in loaded.values()}
+    free = [x for x in g["visible"] if x["index"] not in used_gpus and x["used_mb"] <= GPU_FREE_MAX_USED_MB]
+
+    plan = []
+    for pid in wanted:
+        if pid in loaded:
+            say(f"  {pid}: already {loaded[pid]['state']} on :{loaded[pid]['port']}")
+            continue
+        gpus = place_profile(profiles[pid], free)
+        port = next((p for p in REMOTE_PORTS if p not in used_ports and not served_model(p)), None)
+        if gpus is None or port is None:
+            need = ", ".join(f"{r['min_vram_mb']}MB" for r in profiles[pid]["gpus_needed"])
+            free_desc = ", ".join(f"GPU{x['index']} {x['total_mb']}MB" for x in free) or "none"
+            raise RigError(
+                f"no capacity for {pid} (needs GPUs >= [{need}]; free: {free_desc}). "
+                f"loaded: {remote_loaded_summary(st)}. Unload with `rig stop <profile>`.",
+                EXIT_NO_CAPACITY,
+            )
+        free = [x for x in free if x["index"] not in gpus]
+        used_ports.add(port)
+        plan.append((pid, gpus, port))
+
+    if entering:
+        write_policy(MODE_POLICY["remote"], "rig_start_remote")
+    for pid, gpus, port in plan:
+        p = profiles[pid]
+        say(f"  loading {pid} ({p['model']}) on GPU {gpus} -> :{port}")
+        container = launch_profile(p, gpus, port)
+        loaded[pid] = {"model": p["model"], "port": port, "gpus": gpus, "ctx_size": p["ctx_size"],
+                       "state": "loading", "container": container, "since": now_iso(), "from": caller()}
+        save_state(refresh_remote_status(st))  # per launch, so a later launch failure can't orphan it
+    if loaded:
+        save_state(refresh_remote_status(st))
+    return wanted, None
+
+
+def wait_remote(pid: str) -> str | None:
+    """Wait (without the lock) until a profile is ready. Returns an error string or None."""
+    deadline = time.time() + REMOTE_READY_TIMEOUT_S
+    while True:
+        entry = read_state().get("profiles", {}).get(pid)
+        if entry is None:
+            return f"{pid} was unloaded while waiting"
+        if entry["state"] == "ready":
+            return None
+        if http_get(f"http://127.0.0.1:{entry['port']}/health")[0] == 200:
+            with Lock():
+                st = read_state()
+                if pid in st.get("profiles", {}):
+                    st["profiles"][pid]["state"] = "ready"
+                    save_state(refresh_remote_status(st))
+            return None
+        running = run(["docker", "inspect", "-f", "{{.State.Running}}", entry["container"]],
+                      check=False).stdout.strip()
+        if running != "true" or time.time() > deadline:
+            logs = run(["docker", "logs", "--tail", "15", entry["container"]], check=False)
+            why = "container exited" if running != "true" else f"not ready within {REMOTE_READY_TIMEOUT_S}s"
+            err = f"{pid}: {why}\n{logs.stdout}{logs.stderr}".strip()
+            with Lock():
+                drop_remote_profile(read_state(), pid, error=err[:800])
+            return err
+        time.sleep(3)
+
+
+def cmd_start_remote(args) -> int:
+    with Lock():
+        wanted, early = claim_remote(args.profiles, args.force)
+    if early is not None:
+        return early
+    errors = [e for pid in wanted if (e := wait_remote(pid))]
+    st = read_state()
+    for pid, e in st.get("profiles", {}).items():
+        if pid in wanted:
+            say(f"  ready {pid} on :{e['port']} (GPU {e['gpus']}, ctx {e['ctx_size']})")
+    if errors:
+        for e in errors:
+            say(f"FAILED: {e}")
+        return EXIT_FAIL
+    say("done: remote ready")
+    return 0
 
 
 # ---------------------------------------------------------------- commands
 
-def cmd_status(_args) -> int:
+def status_payload() -> dict:
     st = read_state()
-    say(f"mode: {st['mode']}   status: {st['status']}   since: {st.get('since', '-')}   from: {st.get('from', '-')}")
-    if st.get("detail"):
-        say(f"detail: {json.dumps(st['detail'])}")
-    if st.get("error"):
-        say(f"last error: {st['error']}")
     g = gpu_check()
-    say(f"gpus: {len(g['visible'])}/{g['expected']} visible" + (f"  MISSING {g['missing']}" if g["missing"] else ""))
+    profiles = [
+        {"id": pid, **{k: e[k] for k in ("model", "port", "gpus", "ctx_size", "state", "since", "from")}}
+        for pid, e in st.get("profiles", {}).items()
+    ]
+    return {
+        "mode": st["mode"], "status": st["status"], "since": st.get("since"), "from": st.get("from"),
+        "last_error": st.get("error"), "profiles": profiles, "detail": st.get("detail"),
+        "gpus": {"visible": len(g["visible"]), "expected": g["expected"], "missing": g["missing"]},
+    }
+
+
+def cmd_status(args) -> int:
+    s = status_payload()
+    if args.json:
+        print(json.dumps(s, indent=2))
+        return 0
+    say(f"mode: {s['mode']}   status: {s['status']}   since: {s['since'] or '-'}   from: {s['from'] or '-'}")
+    for p in s["profiles"]:
+        say(f"  {p['id']:<10} {p['state']:<8} :{p['port']}  GPU {p['gpus']}  ctx {p['ctx_size']}  ({p['model']})")
+    if s["detail"]:
+        say(f"detail: {json.dumps(s['detail'])}")
+    if s["last_error"]:
+        say(f"last error: {s['last_error']}")
+    g = s["gpus"]
+    say(f"gpus: {g['visible']}/{g['expected']} visible" + (f"  MISSING {g['missing']}" if g["missing"] else ""))
     ports = live_ports()
     say("ports: " + (", ".join(f":{p} {m}" for p, m in ports.items()) if ports else "none serving"))
-    if st["mode"] == "idle" and (ports or any(unit_active(u) for u in STACK_UNITS.values())):
+    if s["mode"] == "idle" and (ports or any(unit_active(u) for u in STACK_UNITS.values())):
         say("WARNING: state says idle but something is running; run `rig stop` to clean up")
     return 0
 
 
 def cmd_start(args) -> int:
-    if args.mode != "remote" and args.profiles:
+    if args.mode == "remote":
+        return cmd_start_remote(args)
+    if args.profiles:
         raise RigError("profiles are only valid for remote mode")
-    lock = acquire_lock()
-    st = read_state()
-    if st["mode"] != "idle":
-        if not args.force:
-            say(f"busy: {st['mode']} ({st['status']}, since {st.get('since')}, from {st.get('from')})")
-            say(f"re-run with --force to stop {st['mode']} and start {args.mode}")
-            return EXIT_BUSY
-        say(f"stopping {st['mode']} (forced by {caller()})...")
-        do_stop()
-    g = gpu_check()
-    if not g["ok"]:
-        raise RigError(f"GPU check failed: missing {g['missing']} {g['errors']}; power-cycle the rig")
-    say(f"starting {args.mode}...")
-    write_state(mode=args.mode, status="starting")
-    try:
-        detail = start_remote(args.profiles) if args.mode == "remote" else start_stack(args.mode)
-    except Exception as exc:
-        say(f"FAILED: {exc}")
-        say("cleaning up -> idle")
-        try:
-            do_stop()
-        finally:
-            write_state(mode="idle", status="idle", error=f"{args.mode}: {str(exc)[:500]}")
-        return EXIT_FAIL
-    write_state(mode=args.mode, status="ready", detail=detail)
-    say(f"done: {args.mode} ready")
-    for port, what in detail.get("ports", {}).items():
-        say(f"  :{port}  {what}")
-    lock.close()
-    return 0
+    return cmd_start_stack(args)
 
 
-def cmd_stop(_args) -> int:
-    acquire_lock()
-    st = read_state()
-    say(f"stopping {st['mode']}...")
-    write_state(mode=st["mode"], status="stopping")
-    do_stop()
+def cmd_stop(args) -> int:
+    with Lock():
+        st = read_state()
+        if args.profiles:
+            if st["mode"] != "remote":
+                raise RigError(f"profile stop only applies in remote mode (mode is {st['mode']})")
+            missing = [p for p in args.profiles if p not in st.get("profiles", {})]
+            if missing:
+                raise RigError(f"not loaded: {missing}; loaded: {remote_loaded_summary(st)}")
+            for pid in args.profiles:
+                say(f"unloading {pid}...")
+                st = drop_remote_profile(st, pid)
+            say(f"mode: {st['mode']}; loaded: {remote_loaded_summary(st)}")
+            return 0
+        say(f"stopping {st['mode']}...")
+        save_state({**st, "status": "stopping"})
+        stop_everything()
     say("idle")
     return 0
 
 
 def cmd_boot(_args) -> int:
     """Called by rig-boot.service at power-on: record idle + GPU health."""
-    acquire_lock()
-    g = gpu_check()
-    write_policy("neutral", "rig_idle")
-    err = None if g["ok"] else f"boot GPU check: missing {g['missing']}"
-    write_state(mode="idle", status="idle", **({"error": err} if err else {}), **{"from": "boot"})
+    with Lock():
+        g = gpu_check()
+        write_policy("neutral", "rig_idle")
+        err = None if g["ok"] else f"boot GPU check: missing {g['missing']}"
+        write_state(mode="idle", status="idle", **({"error": err} if err else {}), **{"from": "boot"})
     say(f"rig idle; gpus {len(g['visible'])}/{g['expected']}" + (f" MISSING {g['missing']}" if g["missing"] else ""))
     return 0 if g["ok"] else EXIT_FAIL
 
@@ -382,20 +569,24 @@ def main() -> int:
         return EXIT_FAIL
     ap = argparse.ArgumentParser(prog="rig", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("status").set_defaults(fn=cmd_status)
+    s = sub.add_parser("status")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_status)
     s = sub.add_parser("start")
     s.add_argument("mode", choices=MODES)
     s.add_argument("profiles", nargs="*", help="remote profile ids (default: profiles marked default)")
     s.add_argument("--force", action="store_true", help="stop the current mode first")
     s.set_defaults(fn=cmd_start)
-    sub.add_parser("stop").set_defaults(fn=cmd_stop)
+    s = sub.add_parser("stop")
+    s.add_argument("profiles", nargs="*", help="remote profile ids to unload (default: stop everything)")
+    s.set_defaults(fn=cmd_stop)
     sub.add_parser("boot").set_defaults(fn=cmd_boot)
     args = ap.parse_args()
     try:
         return args.fn(args)
     except RigError as exc:
         say(f"error: {exc}")
-        return EXIT_FAIL
+        return exc.code
 
 
 if __name__ == "__main__":
