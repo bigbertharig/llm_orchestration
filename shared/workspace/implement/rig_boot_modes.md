@@ -10,7 +10,17 @@ v1 as built:
   Profiles: `chat-27b` (qwen3.6:27b, GPU 0+4, ctx 65536, :11434, `--reasoning off`) and
   `coder-7b` (qwen2.5-coder:7b, GPU 1, ctx 16384, :11435). Both are defaults. Load times: 2m17s cold, 29s warm.
 - Watchdog no-ops unless mode is orchestration or bench.
-- Exit codes: 0 ok, 1 failed (rig left idle), 2 busy, 3 another rig command running.
+- Exit codes: 0 ok, 1 failed (rig left idle), 2 busy, 3 another rig command running, 4 no capacity.
+
+v1.1 (2026-10-06, desktop spec "rig gateway + dynamic remote_profiles"):
+- Profiles state requirements (`gpus_needed: [{min_vram_mb}]`), not fixed GPUs/ports. Placement takes
+  the smallest free card that fits each requirement (keeps the 3090 free for profiles that need it).
+  Port = lowest free in 11434-11441. Simple allocator in rig.py: the orchestrator's lease code
+  assumes running workers, which remote mode doesn't have.
+- Remote is additive (`rig start remote <id>` alongside loaded ones), `rig stop <id>` unloads one,
+  `rig status --json`. The lock is held only for state changes, never while a model loads.
+- Gateway: `~/llm-gateway` (stdlib, no deps) as `rig-gateway.service` on the rig, 127.0.0.1:8080.
+  Verified on the rig: model list, warm stream/non-stream, 404, cold on-demand load (25s for coder-7b).
 Related: `/home/bryan/Desktop/CLAUDE_COORDINATION.md`.
 
 ## Principle: keep it basic
