@@ -130,6 +130,10 @@ fi
 # --flash-attn on: enables flash attention, reduces VRAM for KV cache operations
 # -ctk q8_0:       quantize KV cache keys from f16 to q8_0 (halves KV cache size)
 # -ctv q8_0:       quantize KV cache values from f16 to q8_0
+# -lv 4:           llama.cpp b10333+ defaults to verbosity 3, which drops the
+#                  "load_tensors: offloaded N/N layers to GPU" line. gpu_llama.py
+#                  _assert_full_gpu_offload() requires it; without it every load
+#                  times out at the readiness budget. (2026-10-06)
 DOCKER_MEMORY_ARGS=(--oom-score-adj 500)
 if [ -n "${MEMORY_LIMIT}" ]; then
   DOCKER_MEMORY_ARGS+=(--memory "${MEMORY_LIMIT}")
@@ -160,6 +164,7 @@ CMD=(
   --flash-attn on
   -ctk q8_0
   -ctv q8_0
+  -lv 4
 )
 
 if [ "${#LLAMA_VISIBLE_DEVICES[@]}" -gt 0 ]; then
