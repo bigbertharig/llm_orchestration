@@ -107,6 +107,20 @@ The `rig` selector stays the rig-side primitive either way. Planned hardware: NV
 (500 GB, model hotset), better CPU cooler; later 8x GTX 1070 + 3090. GPU count comes from
 `agents/config.json`, so rig.py's GPU check follows config changes.
 
+Storage plan (user, 2026-10-06):
+| Tier | Device | Holds |
+|---|---|---|
+| rig boot SSD | Kingston SATA 120 GB (`/`) | OS, Docker images, a few files. 56 GB used after cleanup; ~40 GB once `~/model-hotset` moves off |
+| active models (to add) | 500 GB NVMe on a PCIe x1 slot | published remote_profiles + current benchmark candidates (~67 GB today) |
+| archive + general store | WD 4 TB **USB HDD** (`/mnt/shared`, NFS) -> **to be replaced by a NAS** | all 354 GB of models, plans, data, logs. Single disk, no redundancy today |
+Why: cold loads read the USB HDD at ~150 MB/s (27B: 2m17s cold vs 29s from page cache).
+To do when the NVMe is in: mount by UUID with `nofail`. rig.py prefers the NVMe copy of a catalog
+GGUF if present, else the HDD path, and `rig status` reports which. Small copy/evict command
+(replaces the Ollama-era `manage_model_hotset.py`). Verify 6/6 GPUs + no new Xid after install.
+Cleanup done 2026-10-06: Docker 43 -> 17 images (removed 22 untagged, bench-knowledge-v2, CUDA 12.6.3
+bases, hello-world, 7 exited containers), rig `~/ml-env` + `~/dataprep_venv` (unreferenced), pip cache,
+journal capped at 500M (`/etc/systemd/journald.conf.d/size.conf`).
+
 Deferred (upgrade later): mode coexistence, lease-split between modes, gateway/model_access_api
 session leases, auto-default/return-to-default logic, scheduler-only brain.
 
