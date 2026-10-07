@@ -36,18 +36,30 @@ no automatic swapping or cross-mode coordination. Upgrade later if usage changes
 | `bench` | brain + workers in benchmark config, `benchmarks` admitted | full catalog |
 | `remote` | worker runtimes on request, `interactive` admitted, no brain model; may use **all GPUs** | published profiles |
 
-### One CLI on the Pi
+### Mode selector: `rig` command on the rig, called over SSH
+
+The rig runs headless. Idle = it sits and waits, and **sshd is the listener** (no daemon).
+Any machine (desktop, Pi) drives it with `ssh rig rig <cmd>`.
 
 ```
-rig status                 # current mode, loaded models + ports, GPU health
-rig start orchestration    # refuses if another mode is active
-rig start bench
-rig start remote [profile ...]
-rig stop                   # unload everything, stop the stack -> idle
+rig status                      # mode, since, started-from, models+ports, GPU health
+rig start <mode> [profile ...]  # orchestration | bench | remote
+rig start <mode> --force        # stop current mode first, then start
+rig stop                        # unload everything, stop the stack -> idle
 ```
 
-Basic rules: `start` fails with a clear error if not idle (no auto-swap). `stop` always returns
-to idle. The stack runs under systemd, never as stray processes.
+Rules (basic, no auto-swap):
+- Idle: `start` boots the mode and blocks until ready, printing `starting <mode>... done` + ports.
+- Busy: `start` prints `busy: <mode> (since <time>, from <ip>)` and exits non-zero.
+  `--force` stops the current mode, then starts the new one.
+- `stop` always ends at idle and is safe to repeat.
+- State: one file on the rig (`/mnt/shared/brain/rig_mode.json`: mode, since, from = `$SSH_CLIENT` ip,
+  ports) under a lock, so two callers can't start modes at the same time.
+- The stack runs under systemd (`llm-mode@<mode>.service` or similar), never as stray processes.
+- Fails loud: if a GPU is missing or a load fails, `start` reports it and leaves the rig idle.
+
+Lives on the rig (e.g. `/mnt/shared/scripts/rig`, symlinked into `~/bin`). The Pi and desktop keep
+no logic, just `ssh rig rig ...`.
 
 ### Published model profiles
 - `model_task_library.json` = named profiles -> `{model, fallback, placement, ctx}`. Runtime detail
@@ -62,7 +74,7 @@ to idle. The stack runs under systemd, never as stray processes.
 
 1. Idle boot: change `llm-orchestrator.service` to preflight-only (or disable it and add a
    `rig-preflight.service`). Add `idle` to `control_policy.py`. Watchdog no-ops when idle.
-2. `rig` CLI (Pi) wrapping existing pieces: startup.py configs, control_policy,
+2. `rig` mode selector (on the rig, via SSH) wrapping existing pieces: startup.py configs, control_policy,
    `prepare_llm_runtimes.py`, kill/unload. Replaces start_*_mode scripts once it works.
 3. Refresh `model_task_library.json` (stale 2026-04-28) from current BEST_OF results; add
    brain-tier + interactive 32k+ profiles.
