@@ -363,6 +363,8 @@ def launch_profile(p: dict, gpus: list[int], port: int) -> str:
     ]
     if p.get("tensor_split"):
         cmd += ["--tensor-split", p["tensor_split"]]
+    if p.get("image"):
+        cmd += ["--image", p["image"]]
     for a in p.get("extra_args", []):
         cmd += ["--extra-arg", a]
     run(cmd, timeout=60)
