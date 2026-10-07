@@ -43,6 +43,9 @@ shared/agents/permissions/
 shared/scripts/*
 !shared/scripts/llama_runtime/
 !shared/scripts/llama_runtime/**
+!shared/scripts/rig/
+!shared/scripts/rig/**
+shared/scripts/rig/__pycache__/
 !shared/scripts/benchmarks/
 !shared/scripts/benchmarks/**
 !shared/scripts/manage_gpu_lease.py

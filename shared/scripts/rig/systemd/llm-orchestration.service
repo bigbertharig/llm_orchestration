@@ -1,0 +1,16 @@
+# Stack for `rig start orchestration`. Not enabled at boot (no [Install]); rig.py starts/stops it.
+[Unit]
+Description=LLM stack: orchestration (startup.py --config config.json)
+After=network-online.target remote-fs.target
+Wants=network-online.target remote-fs.target
+
+[Service]
+Type=simple
+User=bryan
+Group=bryan
+WorkingDirectory=/home/bryan
+ExecStart=/home/bryan/llm-orchestration-venv/bin/python /mnt/shared/agents/startup.py --config /mnt/shared/agents/config.json
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30

@@ -1,0 +1,16 @@
+# Power-on: leave the rig idle (nothing running) and record GPU health.
+# Modes are started on demand with `rig start <mode>` (see ../rig.py).
+[Unit]
+Description=Rig boot to idle (record state + GPU check)
+After=network-online.target remote-fs.target nvidia-persistenced.service
+Wants=network-online.target remote-fs.target
+
+[Service]
+Type=oneshot
+User=bryan
+Group=bryan
+ExecStart=/bin/bash -c 'for i in $(seq 1 90); do [ -x /mnt/shared/scripts/rig/rig.py ] && exec /mnt/shared/scripts/rig/rig.py boot; sleep 2; done; echo "rig.py not found" >&2; exit 1'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

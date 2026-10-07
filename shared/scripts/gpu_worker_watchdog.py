@@ -300,6 +300,10 @@ def main() -> int:
     args = ap.parse_args()
 
     shared = Path(args.shared_path)
+    # Workers only exist in the orchestrator stack modes; idle/remote must stay untouched.
+    rig_mode = load_json(shared / "brain" / "rig_mode.json", {}).get("mode", "idle")
+    if rig_mode not in ("orchestration", "bench"):
+        return 0
     cfg = load_json(shared / "agents" / "config.json", {})
     if not cfg:
         raise SystemExit("missing or invalid config.json")
