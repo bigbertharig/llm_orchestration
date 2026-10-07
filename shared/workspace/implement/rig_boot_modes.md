@@ -1,6 +1,16 @@
 # Rig Boot Modes + Published Model Profiles
 
-Status: AGREED DIRECTION, not implemented (2026-10-06, Pi session, decisions from the user).
+Status: v1 IMPLEMENTED 2026-10-06 (work items 1, 2, and a first cut of 5). Verified: reboot -> idle,
+all three modes start/stop, busy refusal, --force switch. Items 3-4 still open.
+
+v1 as built:
+- `shared/scripts/rig/rig.py` (rig: `/usr/local/bin/rig`), units in `shared/scripts/rig/systemd/`
+  installed to `/etc/systemd/system/`. `rig-boot.service` enabled. Old `llm-orchestrator.service` removed.
+- Remote = plain llama containers `rig-remote-<profile>` via run_runtime.sh. No orchestrator.
+  Profiles: `chat-27b` (qwen3.6:27b, GPU 0+4, ctx 65536, :11434, `--reasoning off`) and
+  `coder-7b` (qwen2.5-coder:7b, GPU 1, ctx 16384, :11435). Both are defaults. Load times: 2m17s cold, 29s warm.
+- Watchdog no-ops unless mode is orchestration or bench.
+- Exit codes: 0 ok, 1 failed (rig left idle), 2 busy, 3 another rig command running.
 Related: `/home/bryan/Desktop/CLAUDE_COORDINATION.md`.
 
 ## Principle: keep it basic
@@ -80,6 +90,12 @@ no logic, just `ssh rig rig ...`.
    brain-tier + interactive 32k+ profiles.
 4. Enforce published-only loads outside bench.
 5. Remote: serve profiles by name (tunnel ports first; gateway later).
+
+Future direction (user, 2026-10-06): the Pi as the single coordinator. The desktop tells the Pi
+what it wants, and the Pi drives the rig (`ssh rig rig ...`), the Pi CPU cluster, and workers.
+The `rig` selector stays the rig-side primitive either way. Planned hardware: NVMe on a PCIe x1 slot
+(500 GB, model hotset), better CPU cooler; later 8x GTX 1070 + 3090. GPU count comes from
+`agents/config.json`, so rig.py's GPU check follows config changes.
 
 Deferred (upgrade later): mode coexistence, lease-split between modes, gateway/model_access_api
 session leases, auto-default/return-to-default logic, scheduler-only brain.

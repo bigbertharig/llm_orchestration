@@ -103,27 +103,26 @@ Rule of thumb:
 
 ### Start The System
 
-Normal orchestrator start:
+The rig boots **idle**: nothing running, no model on any GPU (`rig-boot.service`).
+Pick one mode at a time with the `rig` mode selector, from any machine:
 
 ```bash
-cd ~/llm_orchestration/shared/agents
-python3 startup.py
+ssh 10.0.0.3 rig status
+ssh 10.0.0.3 rig start orchestration   # brain (27B on GPU0) + 5 cold workers, plans admitted
+ssh 10.0.0.3 rig start bench           # same stack, config.benchmark.json, benchmarks admitted
+ssh 10.0.0.3 rig start remote [profile ...]  # published remote_profiles, no orchestrator
+ssh 10.0.0.3 rig start <mode> --force  # replace whatever mode is running
+ssh 10.0.0.3 rig stop                  # back to idle
 ```
 
-Normal startup uses the `neutral` boot profile: brain runtime up, worker GPU agents cold, no startup
-worker warm load, and auto-default disabled. Brain-first boot is intentional
-even though chat and some benchmark runs may not need the brain immediately:
-the rig pays the brain-load cost once at startup so plans have a ready control
-plane later. Controller admission is recorded in `brain/control_policy.json`;
-GPU allocation is recorded separately in `gpus/leases.json`.
-
-Wrapper start modes when you intentionally want them:
-
-```bash
-python3 ~/llm_orchestration/scripts/start_plan_mode.py
-python3 ~/llm_orchestration/scripts/benchmarks/start_benchmark_mode.py
-python3 ~/llm_orchestration/scripts/benchmarks/start_custom_mode.py --models qwen3.5:4b qwen2.5-coder:7b ...
-```
+- `start` refuses (exit 2) if another mode is running and reports who started it and when.
+- Stack modes run under systemd (`llm-orchestration.service` / `llm-bench.service`).
+  Never start `startup.py` by hand.
+- Remote profiles live in `plans/shoulders/benchmarking/model_task_library.json` (`remote_profiles`).
+- State: `brain/rig_mode.json`. Code: `shared/scripts/rig/rig.py`. Design: `workspace/implement/rig_boot_modes.md`.
+- Loading benchmark models while in bench mode: `start_custom_mode.py --models ... --skip-benchmark-start`.
+  Without `--skip-benchmark-start` the old wrapper restarts the stack outside systemd.
+  `start_plan_mode.py` / `start_benchmark_mode.py` are superseded by `rig start`.
 
 ### Check The Rig
 
@@ -296,10 +295,8 @@ Do not treat internal `reset_gpu_runtime` meta tasks as the normal operator tool
 ### Stop The System
 
 ```bash
-pkill -f "brain.py|gpu.py"
+ssh 10.0.0.3 rig stop
 ```
-
-Or stop foreground `startup.py` with `Ctrl+C`.
 
 ## Dashboard Actions
 
