@@ -1,5 +1,7 @@
 # Interactive Model Access
 
+> **Superseded 2026-10-15** by [model_roles.json](../../plans/shoulders/benchmarking/model_roles.json) (which model and settings to use per lane and job) and [model_registry.json](../../plans/shoulders/benchmarking/model_registry.json) (every tested model with its profiles), resolved by [scripts/active/model_library.py](../../plans/shoulders/benchmarking/scripts/active/model_library.py). Model choices, statuses, and settings in this document are history and are no longer updated; `models.catalog.json` and `model_tuning_profiles.json` are now generated from the registry.
+
 Status: initial Pi-side API implemented on the
 `feature/interactive-model-access` branch.
 
