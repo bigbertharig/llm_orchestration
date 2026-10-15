@@ -27,13 +27,19 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+# Rig-local tree: the checkout this file lives in (<LOCAL>/scripts/rig/rig.py). State, config,
+# catalog, profiles and the runtime script come from here, so idle/remote never need the network.
+LOCAL = Path(__file__).resolve().parents[2]
+# Network storage (shared drive, later a NAS). Only the orchestration/bench stacks, the control
+# policy they read, and the model archive live here; it may be missing at any time.
 SHARED = Path("/mnt/shared")
-STATE_PATH = SHARED / "brain" / "rig_mode.json"
-LOCK_PATH = SHARED / "brain" / "rig_mode.lock"
-CONFIG_PATH = SHARED / "agents" / "config.json"
-CATALOG_PATH = SHARED / "agents" / "models.catalog.json"
-LIBRARY_PATH = SHARED / "plans" / "shoulders" / "benchmarking" / "model_task_library.json"
-RUN_RUNTIME = SHARED / "scripts" / "llama_runtime" / "run_runtime.sh"
+STATE_PATH = LOCAL / "brain" / "rig_mode.json"
+STATE_MIRROR_PATH = SHARED / "brain" / "rig_mode.json"  # read by watchers on the Pi
+LOCK_PATH = LOCAL / "brain" / "rig_mode.lock"
+CONFIG_PATH = LOCAL / "agents" / "config.json"
+CATALOG_PATH = LOCAL / "agents" / "models.catalog.json"
+LIBRARY_PATH = LOCAL / "plans" / "shoulders" / "benchmarking" / "model_task_library.json"
+RUN_RUNTIME = LOCAL / "scripts" / "llama_runtime" / "run_runtime.sh"
 
 # Stack modes run startup.py under these systemd units (installed from ./systemd/).
 STACK_UNITS = {
@@ -91,11 +97,25 @@ def read_state() -> dict:
     return json.loads(STATE_PATH.read_text(encoding="utf-8"))
 
 
+def write_atomic(path: Path, body: str) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(body, encoding="utf-8")
+    tmp.replace(path)
+
+
 def save_state(state: dict) -> dict:
-    tmp = STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(STATE_PATH)
+    body = json.dumps(state, indent=2) + "\n"
+    write_atomic(STATE_PATH, body)
+    if STATE_MIRROR_PATH != STATE_PATH and shared_available():
+        try:
+            write_atomic(STATE_MIRROR_PATH, body)
+        except OSError as exc:
+            say(f"  note: state mirror not written ({exc})")
     return state
+
+
+def shared_available() -> bool:
+    return (SHARED / "agents").is_dir()
 
 
 def write_state(**fields) -> dict:
@@ -130,7 +150,11 @@ class Lock:
 
 
 def write_policy(profile: str, reason: str) -> None:
-    sys.path.insert(0, str(SHARED / "agents"))
+    # Only the orchestrator stack reads the policy, and it reads it from network storage.
+    if not shared_available():
+        say(f"  note: {SHARED} not available; control policy not written")
+        return
+    sys.path.insert(0, str(LOCAL / "agents"))
     from control_policy import write_control_policy
 
     write_control_policy(SHARED, profile, reason=reason, updated_by="rig")
@@ -289,6 +313,8 @@ def cmd_start_stack(args) -> int:
                 return report_busy(st, args.mode)
             say(f"stopping {st['mode']} (forced by {caller()})...")
             stop_everything()
+        if not shared_available():
+            raise RigError(f"{args.mode} needs network storage at {SHARED}, which is not available")
         g = gpu_check()
         if not g["ok"]:
             raise RigError(f"GPU check failed: missing {g['missing']} {g['errors']}; power-cycle the rig")
@@ -325,12 +351,16 @@ def published_profiles() -> dict[str, dict]:
     if not profiles:
         raise RigError(f"no remote_profiles in {LIBRARY_PATH}")
     catalog = {m["id"]: m for m in json.loads(CATALOG_PATH.read_text())["models"]}
+    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    sys.path.insert(0, str(LOCAL / "agents"))
+    from brain_core import resolve_hotset_gguf
+
     for p in profiles.values():
         if p["model"] not in catalog:
             raise RigError(f"profile {p['id']}: model {p['model']} not in models.catalog.json")
         if not p.get("gpus_needed"):
             raise RigError(f"profile {p['id']}: gpus_needed is required")
-        p["gguf_path"] = catalog[p["model"]]["gguf_path"]
+        p["gguf_path"] = str(resolve_hotset_gguf(catalog[p["model"]]["gguf_path"], config))
     return profiles
 
 
@@ -405,6 +435,10 @@ def claim_remote(requested: list[str], force: bool) -> tuple[list[str], int | No
         st = {"mode": "remote", "status": "loading", "since": now_iso(), "from": caller(), "profiles": {}}
 
     loaded = st.setdefault("profiles", {})
+    # One load at a time: concurrent loads share disk and PCIe bandwidth and all finish slower.
+    in_flight = [pid for pid, e in loaded.items() if e["state"] == "loading" and pid not in wanted]
+    if in_flight:
+        raise RigError(f"locked: {', '.join(in_flight)} still loading; retry when ready", EXIT_LOCKED)
     used_gpus = {i for e in loaded.values() for i in e["gpus"]}
     used_ports = {e["port"] for e in loaded.values()}
     free = [x for x in g["visible"] if x["index"] not in used_gpus and x["used_mb"] <= GPU_FREE_MAX_USED_MB]
@@ -471,11 +505,19 @@ def wait_remote(pid: str) -> str | None:
 
 
 def cmd_start_remote(args) -> int:
-    with Lock():
-        wanted, early = claim_remote(args.profiles, args.force)
-    if early is not None:
-        return early
-    errors = [e for pid in wanted if (e := wait_remote(pid))]
+    requested = args.profiles or [pid for pid, p in published_profiles().items() if p.get("default")]
+    wanted: list[str] = []
+    errors: list[str] = []
+    # Load sequentially: claim and launch one profile, wait until it serves, then the next.
+    for i, pid in enumerate(requested):
+        with Lock():
+            claimed, early = claim_remote([pid], args.force and i == 0)
+        if early is not None:
+            return early
+        wanted += claimed
+        if err := wait_remote(pid):
+            errors.append(err)
+            break
     st = read_state()
     for pid, e in st.get("profiles", {}).items():
         if pid in wanted:
@@ -566,9 +608,10 @@ def cmd_boot(_args) -> int:
 
 
 def main() -> int:
-    if not SHARED.joinpath("agents").is_dir():
-        say(f"error: {SHARED}/agents not found; rig.py must run on the GPU rig")
+    if not LOCAL.joinpath("agents").is_dir():
+        say(f"error: {LOCAL}/agents not found; rig.py must run from a rig checkout")
         return EXIT_FAIL
+    STATE_PATH.parent.mkdir(exist_ok=True)
     ap = argparse.ArgumentParser(prog="rig", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("status")

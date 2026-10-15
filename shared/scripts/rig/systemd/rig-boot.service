@@ -9,7 +9,8 @@ Wants=network-online.target remote-fs.target
 Type=oneshot
 User=bryan
 Group=bryan
-ExecStart=/bin/bash -c 'for i in $(seq 1 90); do [ -x /mnt/shared/scripts/rig/rig.py ] && exec /mnt/shared/scripts/rig/rig.py boot; sleep 2; done; echo "rig.py not found" >&2; exit 1'
+# /usr/local/bin/rig links to the rig-local checkout, so boot does not wait for network storage.
+ExecStart=/usr/local/bin/rig boot
 RemainAfterExit=yes
 
 [Install]
