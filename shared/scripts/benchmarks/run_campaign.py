@@ -141,6 +141,7 @@ class BlockState:
     ended_at: Optional[str] = None
     exit_code: Optional[int] = None
     error: Optional[str] = None
+    identity: Optional[Dict[str, Any]] = None  # verified runtime identity evidence
 
     @property
     def placement(self) -> str:
@@ -279,8 +280,8 @@ def preflight_output_roots(suites: Set[str]) -> None:
         )
 
 
-def probe_health(port: int, timeout: int = 5) -> bool:
-    """Check if a llama-server is responding on the given port."""
+def served_model_id(port: int, timeout: int = 5) -> Optional[str]:
+    """GGUF file name the llama-server on this port reports, or None if nothing answers."""
     try:
         import urllib.request
         url = f"http://127.0.0.1:{port}/v1/models"
@@ -288,9 +289,54 @@ def probe_health(port: int, timeout: int = 5) -> bool:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
             models = data.get("data", [])
-            return len(models) > 0
+            if not models:
+                return None
+            return Path(str(models[0].get("id", ""))).name or "?"
     except Exception:
-        return False
+        return None
+
+
+def probe_health(port: int, timeout: int = 5) -> bool:
+    """Check if a llama-server is responding on the given port."""
+    return served_model_id(port, timeout) is not None
+
+
+def container_info(container_name: Optional[str]) -> Optional[Dict[str, str]]:
+    """Running state, id and image of a container, or None if it does not exist."""
+    if not container_name:
+        return None
+    result = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Running}}|{{.Id}}|{{.Config.Image}}", container_name],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        return None
+    running, container_id, image = (result.stdout.strip().split("|") + ["", "", ""])[:3]
+    return {"running": running, "id": container_id[:12], "image": image}
+
+
+def runtime_identity_error(block: "BlockState", slot: GpuSlot, observed: Optional[str]) -> Optional[str]:
+    """Why the served runtime is not the one this block requested, or None when it is.
+
+    Health alone is not readiness: a stale server on the same port answers too
+    (campaign 20260820_modern_validation_l50_retry3). On success the evidence is
+    stored on the block for status.json and the checkpoint.
+    """
+    expected = Path(str(block.config["gguf"])).name
+    if observed is None:
+        return f"no runtime answers on port {slot.port}"
+    if observed != expected:
+        return f"port {slot.port} serves {observed}, expected {expected}"
+    info = container_info(block.runtime_container)
+    if not info or info["running"] != "true":
+        return (f"port {slot.port} serves {observed} but owned runtime "
+                f"{block.runtime_container} is not running")
+    block.identity = {
+        "requested": expected, "observed": observed, "port": slot.port,
+        "container": block.runtime_container, "container_id": info["id"],
+        "image": info["image"], "verified_at": now_iso(),
+    }
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +586,15 @@ def start_runtime(block: BlockState, slot: GpuSlot) -> str:
     docker_stop(container_name)
     time.sleep(1)
 
+    # Only this campaign's own runtime may be reclaimed. Anything still serving the
+    # port belongs to someone else, and its answers would be recorded as ours.
+    stale = served_model_id(slot.port)
+    if stale is not None:
+        raise RuntimeError(
+            f"port {slot.port} already serves {stale} from a runtime this campaign "
+            f"does not own; stop it first (for example `rig stop`)"
+        )
+
     cmd = build_runtime_cmd(block, slot)
     log(f"  Loading runtime: {container_name}")
     log(f"  Command: {' '.join(cmd)}", verbose_only=True)
@@ -700,6 +755,8 @@ def build_status_dict(state: CampaignState) -> Dict[str, Any]:
             entry["exit_code"] = bs.exit_code
         if bs.error:
             entry["error"] = bs.error
+        if bs.identity:
+            entry["runtime_identity"] = bs.identity
         if bs.suite_log_path:
             entry["log_path"] = str(bs.suite_log_path)
 
@@ -758,6 +815,7 @@ def write_checkpoint(state: CampaignState) -> None:
             "ended_at": bs.ended_at,
             "exit_code": bs.exit_code,
             "error": bs.error,
+            "runtime_identity": bs.identity,
         }
 
     data = {
@@ -874,15 +932,17 @@ class Scheduler:
             if dep in self.state.blocks
         ):
             return False
-        if not self.dry_run and not probe_health(slot.port):
-            log(
-                f"Block {block.block_id}: runtime on port {slot.port} is no "
-                "longer healthy; successor will reload it"
-            )
-            stop_runtime(block.runtime_container)
-            block.runtime_container = None
-            self.occupied.pop(slot.name, None)
-            return False
+        if not self.dry_run:
+            # The successor inherits the runtime, so it must pass the same identity check.
+            successor.runtime_container = block.runtime_container
+            problem = runtime_identity_error(successor, slot, served_model_id(slot.port))
+            if problem:
+                log(f"Block {block.block_id}: not reusing runtime ({problem}); successor will reload it")
+                stop_runtime(block.runtime_container)
+                block.runtime_container = None
+                successor.runtime_container = None
+                self.occupied.pop(slot.name, None)
+                return False
 
         successor.assigned_slot = slot
         successor.runtime_container = block.runtime_container
@@ -1064,8 +1124,22 @@ class Scheduler:
         except (ValueError, TypeError):
             elapsed = 0
 
-        if probe_health(slot.port):
-            log(f"Block {bs.block_id}: model ready on port {slot.port} ({elapsed:.0f}s)")
+        observed = served_model_id(slot.port)
+        mismatch = runtime_identity_error(bs, slot, observed) if observed is not None else None
+        if mismatch:
+            log(f"Block {bs.block_id}: IDENTITY MISMATCH, suite not started: {mismatch}")
+            bs.status = FAILED
+            bs.error = f"runtime identity mismatch: {mismatch}"
+            bs.ended_at = now_iso()
+            stop_runtime(bs.runtime_container)
+            bs.runtime_container = None
+            self.load_lock = False
+            self.loading_block = None
+            self.occupied.pop(slot.name, None)
+
+        elif observed is not None:
+            log(f"Block {bs.block_id}: model ready on port {slot.port} ({elapsed:.0f}s), "
+                f"identity verified {observed} in {bs.identity['container_id']}")
             bs.status = RUNNING_SUITE
             bs.suite_started_at = now_iso()
             self.load_lock = False
@@ -1126,7 +1200,19 @@ class Scheduler:
             bs.ended_at = now_iso()
             bs.exit_code = rc
 
-            if rc == 0:
+            # The runtime must still be the verified one when the suite ends; if it was
+            # replaced mid-suite, the recorded rows are not this model's.
+            changed = None
+            if bs.identity and bs.assigned_slot:
+                still = served_model_id(bs.assigned_slot.port)
+                if still != bs.identity["requested"]:
+                    changed = f"port {bs.assigned_slot.port} now serves {still}"
+
+            if changed:
+                bs.status = FAILED
+                bs.error = f"runtime identity changed during suite ({changed}); results invalid"
+                log(f"Block {bid}: FAILED, {bs.error}")
+            elif rc == 0:
                 bs.status = COMPLETED
                 log(f"Block {bid}: COMPLETED (exit 0)")
             else:
