@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-Manage local Ollama model hot-set for benchmark workflows.
+Manage the rig's local model hot-set.
 
-Typical usage on rig host:
+GGUF hot-set (llama-server): copy the archive GGUFs that published remote profiles use into a
+local root listed in config.json `model_search_roots`; resolve_hotset_gguf() then loads them
+from there instead of network storage. The profile list decides what is copied.
+  python3 ~/llm_orchestration/shared/scripts/manage_model_hotset.py sync-gguf --root /data/model-hotset
+  python3 ~/llm_orchestration/shared/scripts/manage_model_hotset.py sync-gguf \
+      --root /home/bryan/model-hotset --profile chat-27b --profile coder-7b
+
+Legacy Ollama hot-set, typical usage on rig host:
   python3 /mnt/shared/scripts/manage_model_hotset.py report
   python3 /mnt/shared/scripts/manage_model_hotset.py dedupe --prune-imports
   python3 /mnt/shared/scripts/manage_model_hotset.py promote-gguf \
@@ -15,12 +22,14 @@ Typical usage on rig host:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -29,6 +38,10 @@ ROOT_BLOBS = Path("/usr/share/ollama/.ollama/models/blobs")
 USER_BLOBS = Path("/home/bryan/.ollama/models/blobs")
 IMPORT_DIR = Path("/var/lib/ollama-import")
 ARCHIVE_MODELS = Path("/mnt/shared/models")
+# The checkout this script lives in (<tree>/scripts/manage_model_hotset.py).
+TREE = Path(__file__).resolve().parents[1]
+CATALOG_PATH = TREE / "agents" / "models.catalog.json"
+LIBRARY_PATH = TREE / "plans" / "shoulders" / "benchmarking" / "model_task_library.json"
 
 
 def run_cmd(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -250,9 +263,64 @@ def cmd_evict(args: argparse.Namespace) -> int:
     return 0
 
 
+def published_gguf_paths(profile_ids: list[str]) -> dict[str, Path]:
+    """Archive GGUF path per published remote profile (all profiles when none are named)."""
+    profiles = {p["id"]: p for p in json.loads(LIBRARY_PATH.read_text(encoding="utf-8")).get("remote_profiles", [])}
+    catalog = {m["id"]: m for m in json.loads(CATALOG_PATH.read_text(encoding="utf-8"))["models"]}
+    unknown = [pid for pid in profile_ids if pid not in profiles]
+    if unknown:
+        raise SystemExit(f"unknown profile(s) {unknown}; published: {sorted(profiles)}")
+    out: dict[str, Path] = {}
+    for pid in profile_ids or list(profiles):
+        model = profiles[pid]["model"]
+        if model not in catalog:
+            raise SystemExit(f"profile {pid}: model {model} not in {CATALOG_PATH}")
+        out[pid] = Path(catalog[model]["gguf_path"])
+    return out
+
+
+def cmd_sync_gguf(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    if not root.is_dir():
+        raise SystemExit(f"hot-set root not found: {root}")
+    failed = 0
+    for pid, src in published_gguf_paths(args.profile).items():
+        try:
+            dst = root / src.relative_to(ARCHIVE_MODELS)
+        except ValueError:
+            print(f"skip {pid}: {src} is not under {ARCHIVE_MODELS}")
+            continue
+        if not src.is_file():
+            if dst.is_file():
+                print(f"present {pid} {dst} (archive unavailable, not size-checked)")
+            else:
+                print(f"missing {pid}: archive file not found {src}")
+                failed += 1
+            continue
+        size = src.stat().st_size
+        if dst.is_file() and dst.stat().st_size == size:
+            print(f"present {pid} {dst}")
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        # Copy beside the target and rename, so a hot-set file only exists once complete.
+        part = dst.with_name(dst.name + ".part")
+        started = time.time()
+        shutil.copyfile(src, part)
+        part.replace(dst)
+        secs = max(time.time() - started, 0.001)
+        print(f"copied {pid} {human_bytes(size)} in {secs:.0f}s ({size / secs / 1e6:.0f} MB/s) -> {dst}")
+    print(run_cmd(["df", "-h", str(root)]).stdout.strip())
+    return 1 if failed else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage Ollama model hot-set on rig")
+    parser = argparse.ArgumentParser(description="Manage the rig's local model hot-set")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_sync = sub.add_parser("sync-gguf", help="Copy published profiles' archive GGUFs into a hot-set root")
+    p_sync.add_argument("--root", required=True, help="Hot-set root listed in config.json model_search_roots")
+    p_sync.add_argument("--profile", action="append", default=[], help="Remote profile id (repeatable; default: all)")
+    p_sync.set_defaults(func=cmd_sync_gguf)
 
     p_report = sub.add_parser("report", help="Show disk/model inventory and duplicate blob estimate")
     p_report.set_defaults(func=cmd_report)

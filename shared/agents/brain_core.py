@@ -181,6 +181,30 @@ def resolve_model_search_roots(config: dict) -> list[Path]:
     return deduped
 
 
+ARCHIVE_MODEL_ROOT = Path("/mnt/shared/models")
+
+
+def resolve_hotset_gguf(gguf_path: str | Path, config: dict) -> Path:
+    """Prefer a local hotset copy of an archive GGUF.
+
+    An archive path /mnt/shared/models/<rel> is looked up as <root>/<rel> in each model
+    search root listed before the archive, in order. Hotset copies are renamed into place
+    only when complete, so presence means usable. Otherwise the archive path is returned.
+    """
+    path = Path(gguf_path)
+    try:
+        rel = path.relative_to(ARCHIVE_MODEL_ROOT)
+    except ValueError:
+        return path
+    for root in resolve_model_search_roots(config):
+        if root == ARCHIVE_MODEL_ROOT:
+            break
+        candidate = root / rel
+        if candidate.is_file():
+            return candidate
+    return path
+
+
 def resolve_runtime_chat_endpoint(config: dict) -> str:
     """Resolve the active llama chat endpoint."""
     runtime_base = resolve_runtime_base_url(config)

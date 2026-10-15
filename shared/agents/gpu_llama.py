@@ -30,7 +30,7 @@ from gpu_constants import (
     SINGLE_META_TIMEOUT_SECONDS,
 )
 from brain_core import resolve_llama_runtime_profile, resolve_model_search_roots
-from brain_core import resolve_llama_runtime_image
+from brain_core import resolve_hotset_gguf, resolve_llama_runtime_image
 
 # The shared tree is the only runtime-helper source of truth. This resolves to
 # /mnt/shared on the rig and the mounted shared directory in a repo checkout.
@@ -403,14 +403,16 @@ class GPULlamaMixin:
     def _resolve_gguf_path(self, model_id: str) -> Optional[str]:
         """Resolve a model ID to a GGUF file path.
 
-        Looks up the model in the catalog for a gguf_path field first,
-        then falls back to convention-based path resolution under /mnt/shared/models/.
+        Looks up the model in the catalog for a gguf_path field first (preferring a
+        hotset copy of it), then falls back to convention-based path resolution.
         """
         # Check catalog for explicit gguf_path
         meta = self.model_meta_by_id.get(model_id, {})
         explicit = meta.get("gguf_path")
-        if explicit and Path(explicit).exists():
-            return str(explicit)
+        if explicit:
+            resolved = resolve_hotset_gguf(explicit, self.config)
+            if resolved.exists():
+                return str(resolved)
 
         # Convention-based resolution: model_id like "qwen2.5:7b" or "qwen2.5-coder:14b"
         # Maps to one of the configured model search roots.
