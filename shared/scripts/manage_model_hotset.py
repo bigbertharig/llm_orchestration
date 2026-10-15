@@ -22,7 +22,6 @@ Legacy Ollama hot-set, typical usage on rig host:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import shutil
@@ -40,8 +39,7 @@ IMPORT_DIR = Path("/var/lib/ollama-import")
 ARCHIVE_MODELS = Path("/mnt/shared/models")
 # The checkout this script lives in (<tree>/scripts/manage_model_hotset.py).
 TREE = Path(__file__).resolve().parents[1]
-CATALOG_PATH = TREE / "agents" / "models.catalog.json"
-LIBRARY_PATH = TREE / "plans" / "shoulders" / "benchmarking" / "model_task_library.json"
+MODEL_LIBRARY_DIR = TREE / "plans" / "shoulders" / "benchmarking" / "scripts" / "active"
 
 
 def run_cmd(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -265,18 +263,17 @@ def cmd_evict(args: argparse.Namespace) -> int:
 
 def published_gguf_paths(profile_ids: list[str]) -> dict[str, Path]:
     """Archive GGUF path per published remote profile (all profiles when none are named)."""
-    profiles = {p["id"]: p for p in json.loads(LIBRARY_PATH.read_text(encoding="utf-8")).get("remote_profiles", [])}
-    catalog = {m["id"]: m for m in json.loads(CATALOG_PATH.read_text(encoding="utf-8"))["models"]}
+    sys.path.insert(0, str(MODEL_LIBRARY_DIR))
+    import model_library
+
+    try:
+        profiles = model_library.remote_profiles()
+    except KeyError as exc:
+        raise SystemExit(f"model library: {exc.args[0]}")
     unknown = [pid for pid in profile_ids if pid not in profiles]
     if unknown:
         raise SystemExit(f"unknown profile(s) {unknown}; published: {sorted(profiles)}")
-    out: dict[str, Path] = {}
-    for pid in profile_ids or list(profiles):
-        model = profiles[pid]["model"]
-        if model not in catalog:
-            raise SystemExit(f"profile {pid}: model {model} not in {CATALOG_PATH}")
-        out[pid] = Path(catalog[model]["gguf_path"])
-    return out
+    return {pid: Path(profiles[pid]["gguf_path"]) for pid in profile_ids or list(profiles)}
 
 
 def cmd_sync_gguf(args: argparse.Namespace) -> int:

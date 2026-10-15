@@ -37,8 +37,8 @@ STATE_PATH = LOCAL / "brain" / "rig_mode.json"
 STATE_MIRROR_PATH = SHARED / "brain" / "rig_mode.json"  # read by watchers on the Pi
 LOCK_PATH = LOCAL / "brain" / "rig_mode.lock"
 CONFIG_PATH = LOCAL / "agents" / "config.json"
-CATALOG_PATH = LOCAL / "agents" / "models.catalog.json"
-LIBRARY_PATH = LOCAL / "plans" / "shoulders" / "benchmarking" / "model_task_library.json"
+# Model library (benchmarking repo): remote profiles in model_roles.json, settings in model_registry.json.
+MODEL_LIBRARY_DIR = LOCAL / "plans" / "shoulders" / "benchmarking" / "scripts" / "active"
 RUN_RUNTIME = LOCAL / "scripts" / "llama_runtime" / "run_runtime.sh"
 
 # Stack modes run startup.py under these systemd units (installed from ./systemd/).
@@ -346,21 +346,22 @@ def report_busy(st: dict, wanted: str) -> int:
 # ---------------------------------------------------------------- remote mode
 
 def published_profiles() -> dict[str, dict]:
-    lib = json.loads(LIBRARY_PATH.read_text(encoding="utf-8"))
-    profiles = {p["id"]: p for p in lib.get("remote_profiles", [])}
-    if not profiles:
-        raise RigError(f"no remote_profiles in {LIBRARY_PATH}")
-    catalog = {m["id"]: m for m in json.loads(CATALOG_PATH.read_text())["models"]}
-    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    sys.path.insert(0, str(MODEL_LIBRARY_DIR))
     sys.path.insert(0, str(LOCAL / "agents"))
+    import model_library
     from brain_core import resolve_hotset_gguf
 
+    try:
+        profiles = model_library.remote_profiles()
+    except (OSError, KeyError, ValueError) as exc:
+        raise RigError(f"cannot resolve remote profiles from the model library: {exc}")
+    if not profiles:
+        raise RigError(f"no remote_profiles in {model_library.ROLES_PATH}")
+    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     for p in profiles.values():
-        if p["model"] not in catalog:
-            raise RigError(f"profile {p['id']}: model {p['model']} not in models.catalog.json")
         if not p.get("gpus_needed"):
             raise RigError(f"profile {p['id']}: gpus_needed is required")
-        p["gguf_path"] = str(resolve_hotset_gguf(catalog[p["model"]]["gguf_path"], config))
+        p["gguf_path"] = str(resolve_hotset_gguf(p["gguf_path"], config))
     return profiles
 
 

@@ -323,14 +323,13 @@ class BrainResourceMixin:
             ranked.sort()
             return ranked[0][2]
 
-        # Fallback: use model_assignments.json if available, otherwise catalog scan.
-        assignments = getattr(self, "model_assignments", {})
-        single_cfg = assignments.get("single_gpu", {}) if isinstance(assignments, dict) else {}
-        assigned_default = str(single_cfg.get("default", "")).strip() if isinstance(single_cfg, dict) else ""
+        # Fallback: the single_1060 role from the model library, otherwise catalog scan.
+        roles = getattr(self, "model_roles", {})
+        assigned_default = str(roles.get("single_1060", "")).strip() if isinstance(roles, dict) else ""
         if assigned_default and assigned_default in getattr(self, "model_meta_by_id", {}):
             return assigned_default
 
-        # model_assignments.json missing or default not in catalog — scan catalog
+        # Model roles unavailable or role model not in catalog: scan catalog
         fallback: List[Tuple[int, str]] = []
         for model_id, meta in getattr(self, "model_meta_by_id", {}).items():
             if str(meta.get("placement", "single_gpu")).strip() != "single_gpu":

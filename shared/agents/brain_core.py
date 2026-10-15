@@ -405,22 +405,22 @@ class BrainCoreMixin:
         self.logger.info(f"Loaded model catalog from {catalog_path}")
         return catalog
 
-    def _load_model_assignments(self, config_dir: Path) -> Dict[str, Any]:
-        """Load model_assignments.json which defines default and alternative models per GPU role."""
-        assignments_path = (config_dir / "model_assignments.json").resolve()
-        if not assignments_path.exists():
+    def _load_model_roles(self, config_dir: Path) -> Dict[str, str]:
+        """Default model per role (brain, single_1060, ...) from the benchmarking model library."""
+        library_dir = (config_dir.parent / "plans" / "shoulders" / "benchmarking" / "scripts" / "active").resolve()
+        try:
+            if str(library_dir) not in sys.path:
+                sys.path.insert(0, str(library_dir))
+            import model_library
+
+            roles = model_library.load_roles()
+            self.logger.info(f"Loaded model roles from {model_library.ROLES_PATH}")
+            return {name: str(spec["model"]) for name, spec in roles["roles"].items()}
+        except Exception as exc:
             self.logger.warning(
-                f"Model assignments file not found: {assignments_path} — "
+                f"Model roles unavailable from {library_dir}: {exc} - "
                 "falling back to catalog-based model selection"
             )
-            return {}
-        try:
-            with open(assignments_path, "r", encoding="utf-8") as f:
-                assignments = json.load(f)
-            self.logger.info(f"Loaded model assignments from {assignments_path}")
-            return assignments
-        except Exception as exc:
-            self.logger.error(f"Failed to load model assignments {assignments_path}: {exc}")
             return {}
 
     def _build_model_tier_map(self, catalog: Dict[str, Any]) -> Dict[str, int]:

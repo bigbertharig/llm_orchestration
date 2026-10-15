@@ -66,10 +66,16 @@ def find_shared_root(explicit: str = "") -> Path:
 
 
 def load_access_model_ids(path: Path) -> list[str]:
+    """Interactive models: the remote profiles' models in model_roles.json, or a legacy id list."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"cannot read interactive model config: {path}") from exc
+    if isinstance(payload.get("remote_profiles"), list):
+        model_ids = list(dict.fromkeys(str(p.get("model", "")).strip() for p in payload["remote_profiles"]))
+        if not model_ids or any(not model_id for model_id in model_ids):
+            raise RuntimeError(f"model roles have no usable remote profiles: {path}")
+        return model_ids
     if payload.get("schema_version") != 1:
         raise RuntimeError(f"unsupported interactive model config schema: {path}")
     configured = payload.get("models")
@@ -568,7 +574,7 @@ def main() -> int:
         access_config_path=(
             Path(args.access_config).resolve()
             if args.access_config
-            else shared_root / "agents" / "model_access.json"
+            else shared_root / "plans" / "shoulders" / "benchmarking" / "model_roles.json"
         ),
         lease_store=GPULeaseStore(shared_root),
         runtime_loader=loader,
