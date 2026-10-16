@@ -5,10 +5,12 @@
 #   upgrade_runtime.sh build   bNNNNN   build llama-runtime:bNNNNN-candidate
 #   upgrade_runtime.sh smoke   bNNNNN   load every model the roles/remote profiles use on the candidate
 #   upgrade_runtime.sh promote bNNNNN   tag it llama-runtime:bNNNNN, pin the Dockerfile, set the
-#                                       registry runtime_image; then commit both repos
+#                                       registry runtime_image, keep only the new image and the
+#                                       previous one (rollback); then commit both repos
 #
-# Run on the rig while it is idle (`rig stop`). Keep the previous stable image until the new one
-# has run a campaign; roll back by setting runtime_image back in model_registry.json.
+# Run on the rig while it is idle (`rig stop`). Smoke covers the models in use (roles and remote
+# profiles), not every tested model; fix settings a new build changes in model_registry.json.
+# Roll back by setting runtime_image to the previous image in model_registry.json.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +46,7 @@ case "${cmd}" in
     need_version
     docker image inspect "llama-runtime:${version}-candidate" >/dev/null
     ref="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "llama-runtime:${version}-candidate")"
+    previous="$("${PY}" "${BENCH}/scripts/active/model_library.py" runtime-image)"
     docker tag "llama-runtime:${version}-candidate" "llama-runtime:${version}"
     sed -i -E "s|^ARG LLAMA_CPP_REF=.*|ARG LLAMA_CPP_REF=${ref}|; s|^ARG LLAMA_CPP_VERSION=.*|ARG LLAMA_CPP_VERSION=${version}|" "${HERE}/Dockerfile"
     "${PY}" - "${BENCH}/model_registry.json" "llama-runtime:${version}" <<'EOF'
@@ -56,7 +59,14 @@ reg["runtime_image"] = image
 open(path, "w", encoding="utf-8", newline="\n").write(json.dumps(reg, indent=2, ensure_ascii=True) + "\n")
 EOF
     "${PY}" "${BENCH}/scripts/active/model_library.py" check
-    echo "promoted llama-runtime:${version}. Commit: benchmarking model_registry.json, llm_orchestration Dockerfile"
+    # Keep exactly two images: the new one and the previous one as rollback.
+    for tag in $(docker images --format '{{.Repository}}:{{.Tag}}' llama-runtime); do
+      if [ "${tag}" != "llama-runtime:${version}" ] && [ "${tag}" != "${previous}" ]; then
+        docker rmi "${tag}" >/dev/null && echo "removed ${tag}"
+      fi
+    done
+    echo "promoted llama-runtime:${version} (rollback: ${previous})."
+    echo "Commit: benchmarking model_registry.json, llm_orchestration Dockerfile"
     ;;
   *)
     sed -n '2,12p' "$0"

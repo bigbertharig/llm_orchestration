@@ -34,5 +34,9 @@ Then commit `model_registry.json` (benchmarking) and `Dockerfile` (llm_orchestra
 through the Pi, and pull everywhere (desktop, rig clone, drive). A benchmark campaign can
 certify a candidate before promotion with `run_campaign.py ... --runtime-image <candidate>`.
 
-Keep the previous stable image until the new one has run a campaign. Rollback: set
-`runtime_image` back in `model_registry.json`.
+`promote` keeps exactly two images: the new one and the previous one as rollback. Rollback: set
+`runtime_image` back to the previous image in `model_registry.json`.
+
+Smoke covers the models in use (every model a role or remote profile names), not every tested
+model. When a new build changes a model's behaviour, fix that model's settings in the registry
+(example: b11669 needed `--reasoning off` instead of `--reasoning-budget 0` for Gemma 4).
