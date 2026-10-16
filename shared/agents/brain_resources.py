@@ -2193,7 +2193,7 @@ class BrainResourceMixin:
         now = datetime.now()
         current_phase = getattr(self, 'auto_default_phase', None)
         auto_default_gpu = getattr(self, 'auto_default_gpu', 'gpu-2')
-        auto_default_model = getattr(self, 'auto_default_model', 'qwen2.5:7b')
+        auto_default_model = getattr(self, 'auto_default_model', '')
 
         # Check if system is globally idle
         is_idle, not_idle_reasons = self._is_system_globally_idle(

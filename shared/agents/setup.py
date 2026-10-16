@@ -8,7 +8,9 @@ writes config.json. Run once per hardware change.
 Usage:
   python setup.py                          # Interactive
   python setup.py --yes                    # Accept defaults
-  python setup.py --brain-model qwen2.5:14b --worker-model qwen2.5:7b --yes
+
+Models are not chosen here: the brain and worker models come from the benchmarking repo's
+model_roles.json (applied at load time by brain_core.apply_model_library).
 """
 
 import argparse
@@ -83,16 +85,15 @@ def print_suggestion(assignment):
     brain = assignment["brain"]
     if brain["gpus"]:
         gpu_str = ", ".join(str(g) for g in brain["gpus"])
-        print(f"  Brain: GPU {gpu_str} -> {brain['model'] or '(no model fits)'}")
+        print(f"  Brain: GPU {gpu_str} (model from model_roles.json brain role)")
     else:
-        print(f"  Brain: CPU -> {brain['model'] or '(no model available)'}")
+        print("  Brain: CPU (model from model_roles.json brain role)")
 
     workers = assignment["gpus"]
     if workers:
         for w in workers:
             print(
                 f"  Worker: GPU {w['id']} ({w['name']}, {w['vram_mb']} MB) "
-                f"-> {w['model'] or '(no model fits)'} "
                 f"(port {w['port']})"
             )
     else:
@@ -117,17 +118,12 @@ def prompt_confirm(assignment, runtime):
 
 
 def prompt_edit(assignment, runtime):
-    """Let user edit the suggested configuration."""
-    available_models = runtime.get("available_models", [])
-    model_names = [m["name"] for m in available_models]
-
+    """Let user edit the suggested configuration (hardware only; models come from model_roles.json)."""
     while True:
         print()
         print("  What would you like to change?")
-        print("    1. Brain model")
         print("    2. Brain GPU(s)")
         if assignment["gpus"]:
-            print("    3. Worker model (applies to all)")
             print("    4. Worker mode (hot/cold)")
             print("    5. Initial hot workers on startup")
         print("    d. Done editing")
@@ -135,28 +131,13 @@ def prompt_edit(assignment, runtime):
 
         choice = input("  > ").strip().lower()
 
-        if choice == "1":
-            if model_names:
-                print(f"  Available: {', '.join(model_names)}")
-            model = input("  Brain model: ").strip()
-            if model:
-                assignment["brain"]["model"] = model
-
-        elif choice == "2":
+        if choice == "2":
             gpu_str = input("  Brain GPU indices (comma-separated): ").strip()
             try:
                 indices = [int(x.strip()) for x in gpu_str.split(",")]
                 assignment["brain"]["gpus"] = indices
             except ValueError:
                 print("  Invalid GPU indices")
-
-        elif choice == "3" and assignment["gpus"]:
-            if model_names:
-                print(f"  Available: {', '.join(model_names)}")
-            model = input("  Worker model: ").strip()
-            if model:
-                for w in assignment["gpus"]:
-                    w["model"] = model
 
         elif choice == "4" and assignment["gpus"]:
             mode = input("  Worker mode (hot/cold): ").strip().lower()
@@ -308,8 +289,6 @@ def main():
         default="http://localhost:11434",
         help="Runtime API host",
     )
-    parser.add_argument("--brain-model", help="Override brain model choice")
-    parser.add_argument("--worker-model", help="Override worker model choice")
     parser.add_argument(
         "--worker-mode",
         choices=["hot", "cold"],
@@ -344,11 +323,6 @@ def main():
     assignment = suggest_assignment(gpus, runtime, preferences)
 
     # Apply CLI overrides
-    if args.brain_model:
-        assignment["brain"]["model"] = args.brain_model
-    if args.worker_model:
-        for w in assignment["gpus"]:
-            w["model"] = args.worker_model
     if args.worker_mode:
         assignment["worker_mode"] = args.worker_mode
     if args.initial_hot_workers is not None:

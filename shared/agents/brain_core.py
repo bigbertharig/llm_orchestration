@@ -111,8 +111,8 @@ def resolve_auto_default_target(config: dict) -> tuple[str, str]:
                 break
         if not selected_model and gpu_entries:
             selected_model = str(gpu_entries[0]["model"] or "").strip()
-        if not selected_model:
-            selected_model = "qwen2.5:7b"
+        # No literal fallback: an empty model means "no default". Real configs always carry the
+        # single_1060 role (apply_model_library fails loudly at load time if the library is missing).
 
     return selected_gpu, selected_model
 
