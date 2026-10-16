@@ -699,7 +699,7 @@ Which worker tier and model for each task type. Based on benchmark data from [MO
 2. Check [BENCHMARK_SCORES.md](/media/bryan/shared/plans/shoulders/benchmarking/BENCHMARK_SCORES.md) for which models score highest on the relevant benchmark
 3. Check [MODEL_LIBRARY.md](/media/bryan/shared/plans/shoulders/benchmarking/MODEL_LIBRARY.md) "What Scores Mean for Real Tasks" to map benchmark → capability
 4. Pick the cheapest tier that can run the model (worker GPU > brain GPU > CPU LLM)
-5. Update [model_task_library.json](/home/bryan/llm_orchestration/shared/plans/shoulders/benchmarking/model_task_library.json) with the routing rule
+5. Update the job routing (`jobs`) or the role in [model_roles.json](/home/bryan/llm_orchestration/shared/plans/shoulders/benchmarking/model_roles.json), then run `scripts/active/model_library.py check`
 6. Test with a representative workload before committing to production routing
 
 ---
@@ -718,4 +718,4 @@ Which worker tier and model for each task type. Based on benchmark data from [MO
 | [MODEL_LIBRARY.md](/media/bryan/shared/plans/shoulders/benchmarking/MODEL_LIBRARY.md) | model selection, benchmark scores, best choices per task |
 | [MODEL_RUNTIME_GUIDE.md](/media/bryan/shared/plans/shoulders/benchmarking/MODEL_RUNTIME_GUIDE.md) | per-model runtime flags, memory, compatibility |
 | [BENCHMARK_SCORES.md](/media/bryan/shared/plans/shoulders/benchmarking/BENCHMARK_SCORES.md) | raw benchmark score tables with timing |
-| [model_task_library.json](/home/bryan/llm_orchestration/shared/plans/shoulders/benchmarking/model_task_library.json) | machine-readable task routing rules |
+| [model_roles.json](/home/bryan/llm_orchestration/shared/plans/shoulders/benchmarking/model_roles.json) | model + settings per lane and job (routing), remote profiles |

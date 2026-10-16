@@ -138,10 +138,11 @@ Expected shared mount on workers:
 
 - `/media/bryan/shared`
 
-Current required fstab line (normalized across workers 10-17):
+Current required fstab line (normalized across workers 10-17). Since 2026-10-15 the share is served by
+the Pi (`10.0.0.2`), not the rig; workers still on the old `10.0.0.3:/mnt/shared` line need this change:
 
 ```fstab
-10.0.0.3:/mnt/shared /media/bryan/shared nfs nofail,_netdev,noauto,x-systemd.automount,x-systemd.mount-timeout=10s,nolock 0 0
+10.0.0.2:/media/bryan/shared /media/bryan/shared nfs nofail,_netdev,noauto,x-systemd.automount,x-systemd.mount-timeout=10s,nolock 0 0
 ```
 
 Expected runtime paths:

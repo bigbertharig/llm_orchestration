@@ -136,7 +136,8 @@ After a reinstall or major repair, verify at minimum:
 4. the operator Python environment exists
 5. orchestrator startup scripts run
 6. shared-model archive is reachable
-7. timestamps and time sync are sane
+7. timestamps and time sync are sane (the rig syncs only from the Pi: `/etc/chrony/sources.d/pi.sources`
+   = `server 10.0.0.2 iburst`; the Pi runs chrony and serves `10.0.0.0/24`)
 
 Useful checks:
 

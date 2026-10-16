@@ -45,15 +45,21 @@ Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 
 ## Shared Storage Topology (Current)
 
-- Shared drive/NFS source is the GPU rig at `10.0.0.3` (not `10.0.0.2`).
+- The shared drive (4TB WD, later a NAS) is attached to the Pi at `10.0.0.2` and exported over NFS
+  (`/media/bryan/shared`, `root_squash,anonuid=1000,anongid=1000` to `10.0.0.0/24`). The Pi is the network
+  leader: storage and time (chrony serves the LAN; the rig syncs only from the Pi).
+- The rig mounts it at `/mnt/shared` (NFS automount, soft, 10 min idle timeout). The rig itself is
+  self-contained for idle/remote mode: code, config, model library and the model hotset are rig-local
+  (`~/llm_orchestration`, `/home/bryan/model-hotset` SATA, `/data/model-hotset` NVMe); the share holds the
+  model archive and the orchestration/bench stack files.
 - Rig-local path convention: `/mnt/shared/...`
-- Laptop/operator path convention: `/media/bryan/shared/...`
+- Pi/operator path convention: `/media/bryan/shared/...`
 - CPU worker path convention: usually `/media/bryan/shared/...` (some hosts may expose `/mnt/shared/...`)
 - The same files are reached through different mount prefixes depending on where the command runs.
 
 Path rule:
 - if a command executes on the rig itself, prefer `/mnt/shared/...`
-- if a command executes on the laptop at `10.0.0.2`, prefer `/media/bryan/shared/...`
+- if a command executes on the Pi at `10.0.0.2`, prefer `/media/bryan/shared/...`
 - if a wrapper proxies work to the rig, pass shared paths that can be normalized to rig-visible paths
 
 Operational rule:
