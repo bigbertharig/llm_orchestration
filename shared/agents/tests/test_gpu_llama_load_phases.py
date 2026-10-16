@@ -150,6 +150,64 @@ class LlamaLoadPhaseTests(unittest.TestCase):
         self.assertEqual(stub.runtime_transition_phase, "load_complete")
         self.assertEqual(stub.loaded_model, "qwen2.5-coder:7b")
 
+    def _run_load_with_gets(self, stub, responses):
+        """Run a single load where each requests.get returns or raises the next item."""
+        calls = []
+        original_run = __import__("subprocess").run
+        original_get = __import__("requests").get
+        original_sleep = __import__("time").sleep
+        try:
+            def fake_run(cmd, capture_output, text, timeout):
+                return types.SimpleNamespace(returncode=0, stdout="container-id\n", stderr="")
+
+            def fake_get(url, timeout):
+                calls.append(url)
+                item = responses.pop(0)
+                if isinstance(item, Exception):
+                    raise item
+                return item
+
+            __import__("subprocess").run = fake_run
+            __import__("requests").get = fake_get
+            __import__("time").sleep = lambda _seconds: None
+            stub._llama_load_model(model_id="qwen2.5-coder:7b", task_id="task-1")
+        finally:
+            __import__("subprocess").run = original_run
+            __import__("requests").get = original_get
+            __import__("time").sleep = original_sleep
+        return calls
+
+    def test_connection_errors_are_retried_until_ready(self):
+        import requests
+
+        stub = LoadPhaseStub()
+        calls = self._run_load_with_gets(stub, [
+            requests.ConnectionError("refused"),
+            types.SimpleNamespace(status_code=200),
+        ])
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(stub.runtime_state, RUNTIME_STATE_READY_SINGLE)
+        self.assertEqual(stub.loaded_model, "qwen2.5-coder:7b")
+
+    def test_partial_offload_fails_load_immediately(self):
+        stub = LoadPhaseStub()
+
+        def partial_offload(_container_name, target_model):
+            raise RuntimeError(f"Model {target_model} not fully GPU resident: offloaded 30/49 layers")
+
+        stub._assert_full_gpu_offload = partial_offload
+        responses = [types.SimpleNamespace(status_code=200) for _ in range(5)]
+        calls = self._run_load_with_gets(stub, responses)
+
+        # Before the fix the offload error was swallowed and the loop kept polling.
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(stub.model_loaded)
+        state, phase, _task, error_code, error_detail = stub.phase_events[-1]
+        self.assertEqual(phase, "load_failed")
+        self.assertEqual(error_code, "load_exception")
+        self.assertIn("not fully GPU resident", error_detail)
+
 
 if __name__ == "__main__":
     unittest.main()

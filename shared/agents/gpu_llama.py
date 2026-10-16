@@ -583,24 +583,31 @@ class GPULlamaMixin:
             url = f"http://127.0.0.1:{self.port}/v1/models"
             readiness_deadline = time.time() + readiness_budget
             last_wait_log_at = time.time()
+            last_probe_error = "no response yet"
 
             while time.time() < readiness_deadline:
                 _set_single_load_phase("waiting_runtime_ready")
                 self._touch_meta_task(phase="load_llm_waiting_ready")
+                # Only connection-level failures mean "not up yet"; anything else
+                # (including the offload check below) must fail the load.
                 try:
                     r = requests.get(url, timeout=3)
-                    if r.status_code == 200:
-                        _set_single_load_phase("validating_runtime_ready")
-                        self._assert_full_gpu_offload(container_name, target_model)
-                        return  # Ready!
-                except Exception:
-                    pass
+                except requests.RequestException as e:
+                    r = None
+                    last_probe_error = f"{type(e).__name__}: {e}"
+                if r is not None and r.status_code == 200:
+                    _set_single_load_phase("validating_runtime_ready")
+                    self._assert_full_gpu_offload(container_name, target_model)
+                    return  # Ready!
+                if r is not None:
+                    last_probe_error = f"models_status={r.status_code}"
 
                 now_wait = time.time()
                 if (now_wait - last_wait_log_at) >= 20:
                     self.logger.info(
                         f"LLAMA_LOAD_WAIT worker={self.name} model={target_model} "
-                        f"elapsed_s={int(now_wait - self._llama_start_time)}"
+                        f"elapsed_s={int(now_wait - self._llama_start_time)} "
+                        f"last_probe={last_probe_error}"
                     )
                     last_wait_log_at = now_wait
                 time.sleep(LLAMA_READINESS_POLL_INTERVAL)
@@ -609,7 +616,8 @@ class GPULlamaMixin:
             logs = self._get_container_logs(container_name, tail=30)
             raise RuntimeError(
                 f"llama-server readiness probe timed out within "
-                f"{SINGLE_META_TIMEOUT_SECONDS}s load budget. "
+                f"{readiness_budget}s readiness budget "
+                f"(last probe: {last_probe_error}). "
                 f"Container logs:\n{logs}"
             )
 
