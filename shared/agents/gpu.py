@@ -153,7 +153,7 @@ class GPUAgent(
         self.api_url = f"http://localhost:{self.port}/v1/chat/completions" if self.port else None
         self.runtime_backend = str(self.config.get("runtime_backend", "llama")).strip()
         self.worker_keep_alive = str(self.config.get("worker_keep_alive", "-1"))
-        self.worker_num_ctx = int(self.config.get("worker_context_tokens", 8192))
+        self.worker_num_ctx = int(self.config["worker_context_tokens"])  # default model profile ctx_size
 
         # Permissions
         permissions_path = Path(self.config["permissions_path"])

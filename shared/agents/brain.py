@@ -129,7 +129,7 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
         self.model = self.brain_config["model"]
         self.gpus = self.brain_config["gpus"]
         self.brain_keep_alive = str(self.config.get("brain_keep_alive", "-1"))
-        self.brain_num_ctx = int(self.config.get("brain_context_tokens", 8192))
+        self.brain_num_ctx = int(self.config["brain_context_tokens"])  # brain profile ctx_size (model library)
 
         # Set API URL based on runtime backend
         self.api_url = resolve_runtime_chat_endpoint(self.config)

@@ -75,6 +75,11 @@ def apply_model_library(config: dict) -> dict:
             table[name] = dict(flat)
     config["llama_single_profiles"] = single
     config["llama_split_profiles"] = split
+
+    # Context and generation limits come from the same profiles the models are launched with.
+    config["brain_context_tokens"] = int(resolve_llama_runtime_profile(config, model_id=brain_model)["ctx_size"])
+    config["worker_context_tokens"] = int(resolve_llama_runtime_profile(config, model_id=worker_model)["ctx_size"])
+    config["worker_max_tokens"] = int(defaults["max_tokens"])
     return config
 
 

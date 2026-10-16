@@ -1867,6 +1867,7 @@ class GPUSplitMixin:
                     model_id=model_id,
                     group=group,
                 )
+                self.worker_num_ctx = int(profile["ctx_size"])  # context of the model being loaded
                 cmd = [
                     str(_LLAMA_SCRIPTS_DIR / "run_runtime.sh"),
                     "--name", container_name,
@@ -1874,7 +1875,7 @@ class GPUSplitMixin:
                     "--port", str(port),
                     "--gpus", f"device={','.join(member_gpu_ids)}",
                     "--image", resolve_llama_runtime_image(self.config),
-                    "--ctx-size", str(profile.get("ctx_size", self.worker_num_ctx)),
+                    "--ctx-size", str(profile["ctx_size"]),
                     "--n-gpu-layers", str(profile.get("n_gpu_layers", -1)),
                     "--batch-size", str(profile.get("batch_size", 512)),
                     "--parallel", str(profile.get("parallel", 1)),

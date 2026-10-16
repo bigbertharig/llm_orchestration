@@ -218,8 +218,6 @@ def build_config(assignment, runtime, system):
         "runtime_host": runtime["host"],
         "brain_keep_alive": "30m",
         "worker_keep_alive": "30m",
-        "brain_context_tokens": 8192,
-        "worker_context_tokens": 8192,
         "auto_default_enabled": bool(warm_worker_names),
         "auto_default_idle_seconds": 90 if warm_worker_names else 999999,
         "auto_default_gpu": warm_gpu_name or "gpu-2",

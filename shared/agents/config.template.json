@@ -18,8 +18,6 @@
   "runtime_backend": "llama",
   "brain_keep_alive": "30m",
   "worker_keep_alive": "30m",
-  "brain_context_tokens": 8192,
-  "worker_context_tokens": 8192,
   "auto_default_enabled": false,
   "auto_default_idle_seconds": 999999,
   "auto_default_gpu": "gpu-2",

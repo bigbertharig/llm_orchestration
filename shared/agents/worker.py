@@ -44,7 +44,7 @@ except AttributeError:
 def execute_task(task: Dict[str, Any], permissions_file: str,
                  gpu_name: str, api_base: str = None,
                  model: str = None, task_timeout: int | None = None,
-                 worker_num_ctx: int = 8192) -> Dict[str, Any]:
+                 max_tokens: int = 8192) -> Dict[str, Any]:
     """
     Execute a single task and return the result.
 
@@ -137,7 +137,7 @@ def execute_task(task: Dict[str, Any], permissions_file: str,
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": (f"Context:\n{context}\n\n" if context else "") + f"Task:\n{prompt}"},
                 ],
-                "max_tokens": worker_num_ctx,
+                "max_tokens": max_tokens,
             },
             timeout=request_timeout,
         )
@@ -257,7 +257,8 @@ def main():
 
     configured_timeout = config.get("timeouts", {}).get("worker_task_seconds", 0)
     task_timeout = None if not configured_timeout or configured_timeout <= 0 else configured_timeout
-    worker_num_ctx = int(config.get("worker_context_tokens", 8192))
+    # Generation cap per request, from the model library (orchestration_defaults.max_tokens).
+    max_tokens = int(config["worker_max_tokens"])
 
     # Get model name from GPU config
     model = None
@@ -293,7 +294,7 @@ def main():
         api_base=runtime_api_base,
         model=model,
         task_timeout=task_timeout,
-        worker_num_ctx=worker_num_ctx,
+        max_tokens=max_tokens,
     )
 
     logger.info(f"Worker done: {'OK' if result.get('success') else 'FAIL'}")

@@ -52,6 +52,16 @@ class ApplyModelLibraryTests(unittest.TestCase):
                         if "orchestration" in e["profiles"] and e.get("schedule", {}).get("placement") == "split_gpu"}
         self.assertTrue(split_models <= set(config["llama_split_profiles"]))
 
+    def test_context_and_generation_limits_come_from_profiles(self):
+        config = brain_core.apply_model_library(copy.deepcopy(self.template))
+        brain = self.roles["brain"]["model"]
+        worker = self.roles["single_1060"]["model"]
+        self.assertEqual(config["brain_context_tokens"],
+                         brain_core.resolve_llama_runtime_profile(config, model_id=brain)["ctx_size"])
+        self.assertEqual(config["worker_context_tokens"],
+                         brain_core.resolve_llama_runtime_profile(config, model_id=worker)["ctx_size"])
+        self.assertEqual(config["worker_max_tokens"], self.registry["orchestration_defaults"]["max_tokens"])
+
     def test_warm_start_tasks_get_the_worker_model(self):
         config = copy.deepcopy(self.template)
         config["startup_meta_tasks"] = [{"name": "warm", "command": "load_llm", "candidate_workers": ["gpu-2"]}]

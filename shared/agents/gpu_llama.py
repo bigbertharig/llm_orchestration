@@ -533,6 +533,7 @@ class GPULlamaMixin:
             # Start new container
             _set_single_load_phase("starting_container")
             run_script = str(_SCRIPTS_DIR / "run_runtime.sh")
+            self.worker_num_ctx = int(profile["ctx_size"])  # context of the model being loaded
             cmd = [
                 run_script,
                 "--name", container_name,
@@ -540,7 +541,7 @@ class GPULlamaMixin:
                 "--port", str(self.port),
                 "--gpus", f"device={self.gpu_id}",
                 "--image", resolve_llama_runtime_image(self.config),
-                "--ctx-size", str(profile.get("ctx_size", self.worker_num_ctx)),
+                "--ctx-size", str(profile["ctx_size"]),
                 "--n-gpu-layers", str(profile.get("n_gpu_layers", -1)),
                 "--batch-size", str(profile.get("batch_size", 512)),
                 "--parallel", str(profile.get("parallel", 1)),

@@ -21,7 +21,9 @@ class LoadPhaseStub(GPULlamaMixin):
         self.model = "qwen2.5-coder:7b"
         self.port = 11436
         self.gpu_id = 2
-        self.config = {"llama_runtime_image": "llama-runtime:sm61-sm86"}
+        # As apply_model_library leaves it: launch defaults always carry a ctx_size.
+        self.config = {"llama_runtime_image": "llama-runtime:sm61-sm86",
+                       "llama_single_defaults": {"ctx_size": 8192}}
         self.gpu_config = {"name": "gpu-2"}
         self.worker_num_ctx = 8192
         self.model_tier_by_id = {"qwen2.5-coder:7b": 1}
