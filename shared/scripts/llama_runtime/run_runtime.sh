@@ -28,6 +28,18 @@ Optional:
   --extra-arg ARG             Repeatable extra llama-server arg
   --dry-run                   Print command only
 
+Sequential loading (rig rule, not optional):
+  Only one model loads at a time on this machine. The script takes a machine-wide
+  lock, waits until every other runtime it started is serving, starts the container,
+  and returns only when this one answers /health (or after removing it on failure).
+  Callers must not put a short timeout on this script: killing it mid-load frees the
+  lock while the model is still loading. Stdout is the container id, as before.
+
+  LLAMA_LOAD_LOCK             Lock file. Default: /run/lock/llama-model-load.lock
+  LLAMA_LOAD_LOCK_WAIT_S      Max wait for the lock. Default: 3600
+  LLAMA_LOAD_READY_TIMEOUT_S  Max wait for this model, and for others to finish loading. Default: 900
+  LLAMA_LOAD_SETTLE_S         Hold the lock this long after ready. Default: 5
+
 Example:
   run_runtime.sh \
     --name llama-worker-gpu1 \
@@ -57,6 +69,14 @@ DRY_RUN=0
 EXTRA_ARGS=()
 GPU_DOCKER_ARGS=()
 LLAMA_VISIBLE_DEVICES=()
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+LOAD_LOCK="${LLAMA_LOAD_LOCK:-/run/lock/llama-model-load.lock}"
+LOAD_LOCK_WAIT_S="${LLAMA_LOAD_LOCK_WAIT_S:-3600}"
+LOAD_READY_TIMEOUT_S="${LLAMA_LOAD_READY_TIMEOUT_S:-900}"
+LOAD_SETTLE_S="${LLAMA_LOAD_SETTLE_S:-5}"
+# Every container this script starts carries these labels, so a later load can find
+# runtimes that are still loading (for example after a launcher was killed).
+RUNTIME_LABEL="org.llm-orchestration.llama-runtime"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -155,8 +175,10 @@ if [ -n "${MEMORY_SWAP}" ]; then
 fi
 
 CMD=(
-  docker run --detach
+  "${DOCKER_BIN}" run --detach
   --name "${NAME}"
+  --label "${RUNTIME_LABEL}=1"
+  --label "${RUNTIME_LABEL}.health=http://${HOST}:${PORT}/health"
   "${GPU_DOCKER_ARGS[@]}"
   "${DOCKER_MEMORY_ARGS[@]}"
   --network host
@@ -195,4 +217,68 @@ if [ "${DRY_RUN}" -eq 1 ]; then
   exit 0
 fi
 
-"${CMD[@]}"
+log() { echo "run_runtime[${NAME}]: $*" >&2; }
+
+http_ok() {
+  curl -fsS -o /dev/null --max-time 3 "$1" 2>/dev/null
+}
+
+# Wait until every other runtime this script started is serving. Covers loads whose
+# launcher died before releasing the lock, so they can never overlap a new load.
+wait_for_other_loads() {
+  local deadline=$(( $(date +%s) + LOAD_READY_TIMEOUT_S ))
+  local pending id url
+  while :; do
+    pending=()
+    while read -r id url; do
+      [ -n "${id}" ] || continue
+      if ! http_ok "${url}"; then
+        pending+=("${id}")
+      fi
+    done < <("${DOCKER_BIN}" ps --filter "label=${RUNTIME_LABEL}=1" \
+               --format "{{.ID}} {{.Label \"${RUNTIME_LABEL}.health\"}}")
+    [ "${#pending[@]}" -eq 0 ] && return 0
+    if [ "$(date +%s)" -ge "${deadline}" ]; then
+      log "other runtime(s) still loading after ${LOAD_READY_TIMEOUT_S}s: ${pending[*]}; refusing to load"
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+exec 9>>"${LOAD_LOCK}"
+chmod 666 "${LOAD_LOCK}" 2>/dev/null || true
+log "waiting for the model-load lock (${LOAD_LOCK})"
+if ! flock -w "${LOAD_LOCK_WAIT_S}" 9; then
+  log "model-load lock not acquired within ${LOAD_LOCK_WAIT_S}s"
+  exit 75
+fi
+wait_for_other_loads || exit 75
+
+log "lock held; starting container"
+CONTAINER_ID="$("${CMD[@]}")"
+
+deadline=$(( $(date +%s) + LOAD_READY_TIMEOUT_S ))
+while :; do
+  if http_ok "http://${HOST}:${PORT}/health"; then
+    break
+  fi
+  state="$("${DOCKER_BIN}" inspect -f '{{.State.Running}}' "${NAME}" 2>/dev/null || echo missing)"
+  if [ "${state}" != "true" ]; then
+    log "container stopped during load (running=${state}); last log lines:"
+    "${DOCKER_BIN}" logs --tail 20 "${NAME}" >&2 2>&1 || true
+    "${DOCKER_BIN}" rm -f "${NAME}" >/dev/null 2>&1 || true
+    exit 70
+  fi
+  if [ "$(date +%s)" -ge "${deadline}" ]; then
+    log "not ready after ${LOAD_READY_TIMEOUT_S}s; removing it so no load overlaps it"
+    "${DOCKER_BIN}" logs --tail 20 "${NAME}" >&2 2>&1 || true
+    "${DOCKER_BIN}" rm -f "${NAME}" >/dev/null 2>&1 || true
+    exit 70
+  fi
+  sleep 2
+done
+
+sleep "${LOAD_SETTLE_S}"
+log "ready; releasing the model-load lock"
+echo "${CONTAINER_ID}"

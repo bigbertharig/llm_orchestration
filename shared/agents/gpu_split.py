@@ -1888,11 +1888,13 @@ class GPUSplitMixin:
                     cmd.extend(["--extra-arg", str(extra_arg)])
 
                 self.logger.info(f"SPLIT_LLAMA_LOAD_CMD: {' '.join(cmd)}")
+                # No timeout: run_runtime.sh holds the rig-wide model-load lock until
+                # the model is serving and bounds its own waits; killing it mid-load
+                # would free the lock while this model is still loading.
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=30,
                 )
                 if result.returncode != 0:
                     self.last_split_runtime_error = (

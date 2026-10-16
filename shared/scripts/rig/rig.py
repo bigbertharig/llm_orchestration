@@ -162,7 +162,7 @@ def write_policy(profile: str, reason: str) -> None:
 
 # ---------------------------------------------------------------- probes
 
-def run(cmd: list[str], check: bool = True, timeout: int = 60) -> subprocess.CompletedProcess:
+def run(cmd: list[str], check: bool = True, timeout: int | None = 60) -> subprocess.CompletedProcess:
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if check and proc.returncode != 0:
         raise RigError(f"command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr.strip()}")
@@ -398,7 +398,9 @@ def launch_profile(p: dict, gpus: list[int], port: int) -> str:
         cmd += ["--image", p["image"]]
     for a in p.get("extra_args", []):
         cmd += ["--extra-arg", a]
-    run(cmd, timeout=60)
+    # No timeout: run_runtime.sh holds the rig-wide model-load lock until the model is
+    # serving and bounds its own waits; killing it mid-load would free the lock.
+    run(cmd, timeout=None)
     return name
 
 

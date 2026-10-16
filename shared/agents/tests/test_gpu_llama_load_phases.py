@@ -117,7 +117,7 @@ class LlamaLoadPhaseTests(unittest.TestCase):
         original_get = __import__("requests").get
         original_sleep = __import__("time").sleep
         try:
-            def fake_run(cmd, capture_output, text, timeout):
+            def fake_run(cmd, capture_output, text, timeout=None):
                 return types.SimpleNamespace(returncode=0, stdout="container-id\n", stderr="")
 
             responses = [
@@ -157,7 +157,7 @@ class LlamaLoadPhaseTests(unittest.TestCase):
         original_get = __import__("requests").get
         original_sleep = __import__("time").sleep
         try:
-            def fake_run(cmd, capture_output, text, timeout):
+            def fake_run(cmd, capture_output, text, timeout=None):
                 return types.SimpleNamespace(returncode=0, stdout="container-id\n", stderr="")
 
             def fake_get(url, timeout):

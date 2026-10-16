@@ -1068,7 +1068,9 @@ class BrainCoreMixin:
         self.logger.info(f"BRAIN_LLAMA_CMD: {' '.join(cmd)}")
         start_time = time.time()
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        # No timeout: run_runtime.sh holds the rig-wide model-load lock until the model
+        # is serving and bounds its own waits; killing it mid-load would free the lock.
+        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             stderr_tail = (result.stderr or "")[-500:]
             raise RuntimeError(f"Brain llama container failed to start (rc={result.returncode}): {stderr_tail}")
