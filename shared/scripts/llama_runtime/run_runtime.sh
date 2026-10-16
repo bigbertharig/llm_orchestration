@@ -15,7 +15,7 @@ Required:
                               all
 
 Optional:
-  --image IMAGE               Default: llama-runtime:b10333
+  --image IMAGE               Default: the model library runtime_image
   --host HOST                 Default: 127.0.0.1
   --ctx-size N                Default: 2048
   --n-gpu-layers N            Default: 999
@@ -37,7 +37,8 @@ Example:
 EOF
 }
 
-IMAGE_TAG="${IMAGE_TAG:-llama-runtime:b10333}"
+# Default image: the model library's runtime_image (one image for every model).
+IMAGE_TAG="${IMAGE_TAG:-}"
 HOST="${HOST:-127.0.0.1}"
 CTX_SIZE="${CTX_SIZE:-2048}"
 N_GPU_LAYERS="${N_GPU_LAYERS:-999}"
@@ -79,6 +80,15 @@ while [ $# -gt 0 ]; do
     *) echo "Unknown arg: $1" >&2; usage >&2; exit 64 ;;
   esac
 done
+
+if [ -z "${IMAGE_TAG}" ]; then
+  LIBRARY="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/plans/shoulders/benchmarking/scripts/active/model_library.py"
+  IMAGE_TAG="$(python3 "${LIBRARY}" runtime-image 2>/dev/null || true)"
+  if [ -z "${IMAGE_TAG}" ]; then
+    echo "No --image given and the model library runtime_image could not be read (${LIBRARY})" >&2
+    exit 66
+  fi
+fi
 
 if [ -z "${NAME}" ] || [ -z "${MODEL}" ] || [ -z "${PORT}" ] || [ -z "${GPUS}" ]; then
   echo "Missing required args" >&2

@@ -151,10 +151,9 @@ class RuntimeDefaultTargetTests(unittest.TestCase):
 
         self.assertEqual(image, "llama-runtime:sm61-sm86-gemma4")
 
-    def test_runtime_image_defaults_when_missing(self):
-        image = resolve_llama_runtime_image({})
-
-        self.assertEqual(image, "llama-runtime:b10333")
+    def test_runtime_image_is_required(self):
+        with self.assertRaises(ValueError):
+            resolve_llama_runtime_image({})
 
     def test_runtime_chat_endpoint_uses_llama_route(self):
         endpoint = resolve_runtime_chat_endpoint(

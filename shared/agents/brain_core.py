@@ -76,6 +76,9 @@ def apply_model_library(config: dict) -> dict:
     config["llama_single_profiles"] = single
     config["llama_split_profiles"] = split
 
+    # One llama-server image for every model (registry runtime_image).
+    config["llama_runtime_image"] = library.runtime_image(registry)
+
     # Context and generation limits come from the same profiles the models are launched with.
     config["brain_context_tokens"] = int(resolve_llama_runtime_profile(config, model_id=brain_model)["ctx_size"])
     config["worker_context_tokens"] = int(resolve_llama_runtime_profile(config, model_id=worker_model)["ctx_size"])
@@ -209,11 +212,11 @@ def resolve_runtime_base_url(config: dict) -> str:
 
 
 def resolve_llama_runtime_image(config: dict) -> str:
-    """Resolve the llama runtime container image tag from config."""
+    """The llama-server image, set from the model library's runtime_image by apply_model_library."""
     image = str(config.get("llama_runtime_image") or "").strip()
-    if image:
-        return image
-    return "llama-runtime:b10333"
+    if not image:
+        raise ValueError("no llama_runtime_image; load config through apply_model_library()")
+    return image
 
 
 def resolve_model_search_roots(config: dict) -> list[Path]:

@@ -387,6 +387,19 @@ def _lookup_tuning(model_id: str) -> Optional[Dict]:
     return resolved[1] if resolved else None
 
 
+RUNTIME_IMAGE_OVERRIDE: Optional[str] = None
+
+
+def library_runtime_image() -> str:
+    """The one llama-server image from the benchmarking model library (model_registry.json)."""
+    library_dir = BENCHMARKING_SCRIPTS / "scripts" / "active"
+    if str(library_dir) not in sys.path:
+        sys.path.insert(0, str(library_dir))
+    import model_library
+
+    return model_library.runtime_image(model_library.load_registry(BENCHMARKING_SCRIPTS / "model_registry.json"))
+
+
 def resolve_block_config(block: Dict, defaults: Dict) -> Dict:
     """Merge block config with campaign defaults and tuning profile lookups."""
     model_id = block["model"]
@@ -401,9 +414,13 @@ def resolve_block_config(block: Dict, defaults: Dict) -> Dict:
     if "batch_size" not in block:
         block["batch_size"] = tuning_runtime.get("batch_size", 128)
 
-    # runtime_image: block > defaults > fallback
-    if "runtime_image" not in block:
-        block["runtime_image"] = defaults.get("runtime_image", "llama-runtime:sm61-sm86")
+    # runtime_image: every model runs on the model library's one image (or the --runtime-image
+    # override, used to certify an upgrade candidate). Old manifests pinned per-block images.
+    image = RUNTIME_IMAGE_OVERRIDE or library_runtime_image()
+    pinned = block.get("runtime_image") or defaults.get("runtime_image")
+    if pinned and pinned != image:
+        log(f"  {block['id']}: manifest runtime_image {pinned} ignored; using {image}")
+    block["runtime_image"] = image
 
     # load_timeout_s: block > defaults > 300
     if "load_timeout_s" not in block:
@@ -1462,6 +1479,11 @@ def main() -> None:
         help="Override limit for a specific block (repeatable, e.g. --limit e4b_reasoning=50 --limit e2b_reasoning=50)",
     )
     parser.add_argument(
+        "--runtime-image",
+        default=None,
+        help="Run every block on this llama-runtime image instead of the model library's (upgrade certification)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Print detailed commands and debug info",
@@ -1470,6 +1492,8 @@ def main() -> None:
     if args.max_active_models is not None and args.max_active_models < 1:
         parser.error("--max-active-models must be at least 1")
     _VERBOSE = args.verbose
+    global RUNTIME_IMAGE_OVERRIDE
+    RUNTIME_IMAGE_OVERRIDE = args.runtime_image
 
     manifest_path = args.manifest.resolve()
     if not manifest_path.exists():

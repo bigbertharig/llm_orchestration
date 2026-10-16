@@ -210,7 +210,6 @@ def build_config(assignment, runtime, system):
         "shared_path": "../",
         "permissions_path": "permissions/",
         "model_catalog_path": "models.catalog.json",
-        "llama_runtime_image": "llama-runtime:b10333",
         "runtime_backend": "llama",
         "model_search_roots": [
             "/mnt/shared/models",

@@ -62,6 +62,10 @@ class ApplyModelLibraryTests(unittest.TestCase):
                          brain_core.resolve_llama_runtime_profile(config, model_id=worker)["ctx_size"])
         self.assertEqual(config["worker_max_tokens"], self.registry["orchestration_defaults"]["max_tokens"])
 
+    def test_runtime_image_comes_from_the_registry(self):
+        config = brain_core.apply_model_library(copy.deepcopy(self.template))
+        self.assertEqual(brain_core.resolve_llama_runtime_image(config), self.registry["runtime_image"])
+
     def test_warm_start_tasks_get_the_worker_model(self):
         config = copy.deepcopy(self.template)
         config["startup_meta_tasks"] = [{"name": "warm", "command": "load_llm", "candidate_workers": ["gpu-2"]}]

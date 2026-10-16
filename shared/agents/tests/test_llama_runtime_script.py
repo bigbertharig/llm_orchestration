@@ -45,9 +45,14 @@ class LlamaRuntimeScriptTests(unittest.TestCase):
         out = self._dry_run("device=2")
         self.assertIn("--gpus device=2", out)
 
-    def test_dry_run_uses_promoted_default_image(self):
+    def test_dry_run_uses_the_model_library_image(self):
+        library = SCRIPT.parents[2] / "plans" / "shoulders" / "benchmarking" / "scripts" / "active" / "model_library.py"
+        if not library.is_file():
+            self.skipTest("benchmarking model library not checked out")
+        expected = subprocess.run(["python3", str(library), "runtime-image"],
+                                  capture_output=True, text=True, check=True).stdout.strip()
         out = self._dry_run("device=2")
-        self.assertIn("llama-runtime:b10333", out)
+        self.assertIn(expected, out)
 
 
 if __name__ == "__main__":

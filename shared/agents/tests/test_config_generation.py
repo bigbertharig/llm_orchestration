@@ -34,7 +34,7 @@ class ConfigGenerationTests(unittest.TestCase):
             {"hostname": "test-rig"},
         )
 
-        self.assertEqual(config["llama_runtime_image"], "llama-runtime:b10333")
+        self.assertNotIn("llama_runtime_image", config)  # comes from the model library
         self.assertEqual(config["model_catalog_path"], "models.catalog.json")
         self.assertFalse(config["auto_default_enabled"])
         self.assertEqual(config["initial_hot_workers"], 0)
