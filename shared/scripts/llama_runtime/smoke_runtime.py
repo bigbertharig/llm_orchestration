@@ -3,8 +3,9 @@
 
 The model list comes from the benchmarking model library: every model named by a role or a
 remote profile. Each loads alone on its normal lane (3090, one 1060, or a 1060 pair) with its
-orchestration profile (default profile if it has none), answers a chat and a completion
-request, and is stopped before the next. Results go to the share under logs/runtime_upgrades/.
+orchestration profile (default profile if it has none), must give a clean answer to the litmus
+question (no leaked reasoning) and answer a completion request, and is stopped before the next.
+Results go to the share under logs/runtime_upgrades/.
 
     smoke_runtime.py llama-runtime:b11669-candidate
 """
@@ -30,6 +31,7 @@ from brain_core import resolve_hotset_gguf  # noqa: E402
 PORT = 11450  # outside every mode's port range
 NAME = "llama-runtime-smoke"
 LOAD_TIMEOUT_S = 600
+LITMUS = "What is 15 * 37? Reply with ONLY the number."
 RESULTS_DIR = Path("/mnt/shared/logs/runtime_upgrades")
 
 
@@ -100,10 +102,15 @@ def smoke(image: str, model_id: str, registry: dict, config: dict) -> dict:
     try:
         if not ready():
             raise RuntimeError("not ready")
-        chat = post("/v1/chat/completions", {"messages": [{"role": "user", "content": "Reply with exactly: OK"}],
-                                             "max_tokens": 16})
+        # Litmus from NEW_MODEL_INTEGRATION: a clean short answer. Catches builds where a model's
+        # thinking leaks into content (b11669 changed --reasoning-budget 0 for Gemma 4).
+        chat = post("/v1/chat/completions", {"messages": [{"role": "user", "content": LITMUS}],
+                                             "max_tokens": 64, "temperature": 0})
         post("/v1/completions", {"prompt": "Say OK", "max_tokens": 4})
-        result["reply"] = chat["choices"][0]["message"].get("content", "").strip()[:40]
+        content = str(chat["choices"][0]["message"].get("content") or "").strip()
+        result["reply"] = content[:40]
+        if "555" not in content or len(content) > 12 or "<think" in content:
+            raise RuntimeError(f"litmus answer not clean: {content[:80]!r}")
         result["ok"] = True
     except Exception as exc:
         logs = subprocess.run(["docker", "logs", "--tail", "12", NAME], capture_output=True, text=True)
