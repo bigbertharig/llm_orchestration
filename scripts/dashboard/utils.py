@@ -1,6 +1,7 @@
 """Utility functions and constants for the dashboard package."""
 
 import json
+import sys
 import re
 from datetime import datetime
 from pathlib import Path
@@ -44,7 +45,24 @@ def save_json(path: Path, data: dict[str, Any]) -> bool:
 def load_config(config_path: Path) -> dict[str, Any]:
     """Load configuration JSON file."""
     with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return with_model_library(json.load(f), config_path)
+
+
+def with_model_library(config: dict, config_path) -> dict:
+    """Fill model choices from the benchmarking model library (see brain_core.apply_model_library).
+
+    Display-only tool: if the library cannot be read, show what config.json says.
+    """
+    agents_dir = str(Path(config_path).resolve().parent)
+    if agents_dir not in sys.path:
+        sys.path.insert(0, agents_dir)
+    try:
+        from brain_core import apply_model_library
+
+        return apply_model_library(config)
+    except Exception as exc:
+        print(f"Warning: model library unavailable ({exc})", file=sys.stderr)
+        return config
 
 
 def resolve_shared_path(config_path: Path, config: dict[str, Any]) -> Path:

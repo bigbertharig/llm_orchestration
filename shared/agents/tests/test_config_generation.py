@@ -42,6 +42,19 @@ class ConfigGenerationTests(unittest.TestCase):
         self.assertEqual(config["startup_meta_tasks"], [])
         self.assertEqual(config["max_hot_workers"], 3)
 
+    def test_generated_config_holds_no_model_choices(self):
+        config = build_config(
+            _assignment(2),
+            {"host": "http://localhost:11434"},
+            {"hostname": "test-rig"},
+        )
+        for key in ("auto_default_model", "llama_single_profiles", "llama_split_profiles",
+                    "llama_single_defaults", "llama_split_defaults"):
+            self.assertNotIn(key, config)
+        self.assertNotIn("model", config["brain"])
+        self.assertTrue(all("model" not in gpu for gpu in config["gpus"]))
+        self.assertTrue(all("target_model" not in task for task in config["startup_meta_tasks"]))
+
     def test_warm_generation_prefers_gpu_2_and_matches_requested_count(self):
         config = build_config(
             _assignment(2),

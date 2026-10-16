@@ -1189,8 +1189,10 @@ def main():
         sys.exit(1)
 
     print(f"Loading {config_path}...")
+    from brain_core import apply_model_library
+
     with open(config_path) as f:
-        config = json.load(f)
+        config = apply_model_library(json.load(f))
 
     # Resolve relative paths
     agents_dir = Path(__file__).parent

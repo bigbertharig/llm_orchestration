@@ -36,8 +36,10 @@ class GPUCoreMixin:
             else:
                 print(f"  See config.template.json for the required schema.")
             sys.exit(1)
+        from brain_core import apply_model_library
+
         with open(config_path) as f:
-            return json.load(f)
+            return apply_model_library(json.load(f))
 
     def _load_model_catalog(self, config_dir: Path) -> Dict[str, Any]:
         raw_path = str(self.config.get("model_catalog_path", "models.catalog.json")).strip()

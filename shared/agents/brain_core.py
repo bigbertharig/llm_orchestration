@@ -20,6 +20,62 @@ import requests
 from brain_constants import DEFAULT_LLM_MIN_TIER
 
 
+MODEL_LIBRARY_DIR = Path(__file__).resolve().parent.parent / "plans" / "shoulders" / "benchmarking" / "scripts" / "active"
+
+
+def load_model_library():
+    """The benchmarking repo's model library module (model_roles.json + model_registry.json)."""
+    if str(MODEL_LIBRARY_DIR) not in sys.path:
+        sys.path.insert(0, str(MODEL_LIBRARY_DIR))
+    import model_library
+
+    return model_library
+
+
+def apply_model_library(config: dict) -> dict:
+    """Fill model choices and per-model llama settings from the benchmarking model library.
+
+    config.json holds machine facts only. Which model runs where comes from model_roles.json
+    (brain role -> brain.model; single_1060 role -> each worker's model and the idle default),
+    and llama launch settings come from the registry's orchestration defaults and each model's
+    'orchestration' profile. Values already in config are overwritten so the library is the
+    only source. Raises if the library cannot be read: the orchestrator must not guess models.
+    """
+    library = load_model_library()
+    roles = library.load_roles()["roles"]
+    registry = library.load_registry()
+    brain_model = str(roles["brain"]["model"])
+    worker_model = str(roles["single_1060"]["model"])
+
+    if isinstance(config.get("brain"), dict):
+        config["brain"]["model"] = brain_model
+    for gpu in config.get("gpus", []) or []:
+        if isinstance(gpu, dict):
+            gpu["model"] = worker_model
+    config["auto_default_model"] = worker_model
+    for task in config.get("startup_meta_tasks", []) or []:
+        if isinstance(task, dict) and task.get("command") == "load_llm" and not task.get("target_model"):
+            task["target_model"] = worker_model
+
+    defaults = registry.get("orchestration_defaults", {})
+    config["llama_single_defaults"] = dict(defaults.get("single", {}))
+    config["llama_split_defaults"] = dict(defaults.get("split", {}))
+    single: dict[str, Any] = {}
+    split: dict[str, Any] = {}
+    for model_id, entry in registry["models"].items():
+        profile = entry.get("profiles", {}).get("orchestration")
+        if not isinstance(profile, dict):
+            continue
+        flat = {**profile.get("runtime", {}),
+                **{k: v for k, v in profile.items() if k not in ("runtime", "notes")}}
+        table = split if entry.get("schedule", {}).get("placement") == "split_gpu" else single
+        for name in [model_id, *entry.get("aliases", [])]:
+            table[name] = dict(flat)
+    config["llama_single_profiles"] = single
+    config["llama_split_profiles"] = split
+    return config
+
+
 def resolve_auto_default_target(config: dict) -> tuple[str, str]:
     """Resolve the default idle target from config instead of stale literals."""
     raw_gpus = config.get("gpus", []) or []
@@ -366,7 +422,7 @@ class BrainCoreMixin:
             print(f"  Run 'python setup.py' to scan hardware and generate config.json.")
             sys.exit(1)
         with open(config_path) as f:
-            return json.load(f)
+            return apply_model_library(json.load(f))
 
     def _load_model_catalog(self, config_dir: Path) -> Dict[str, Any]:
         """Load model capability catalog used for llm tier scheduling."""

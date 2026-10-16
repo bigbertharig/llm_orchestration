@@ -22,7 +22,7 @@ CONFIG_PATH = SHARED_DIR / "agents" / "config.json"
 MODELS_CATALOG_PATH = SHARED_DIR / "agents" / "models.catalog.json"
 
 sys.path.insert(0, str(SHARED_DIR / "agents"))
-from brain_core import resolve_auto_default_target, resolve_llama_runtime_profile
+from brain_core import apply_model_library, resolve_auto_default_target, resolve_llama_runtime_profile
 from gpu_constants import SINGLE_META_TIMEOUT_SECONDS
 
 
@@ -389,7 +389,7 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary")
     args = parser.parse_args()
 
-    config = _load_json(CONFIG_PATH)
+    config = apply_model_library(_load_json(CONFIG_PATH))
     wait_timeout_s = _resolve_wait_timeout_seconds(config, args.wait)
     model_filename_map = _load_model_filename_map(MODELS_CATALOG_PATH)
     gpu_ids: list[int] = []

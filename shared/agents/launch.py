@@ -156,8 +156,10 @@ def main():
 
     check_existing_launch()
 
+    from brain_core import apply_model_library
+
     with open(args.config) as f:
-        config = json.load(f)
+        config = apply_model_library(json.load(f))
 
     # Resolve relative paths in config
     agents_dir = Path(__file__).parent

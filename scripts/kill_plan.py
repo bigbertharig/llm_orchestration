@@ -245,11 +245,28 @@ def unload_worker_models(ports: list = None, runtime_backend: str = "llama"):
             pass  # Port not responding, skip
 
 
+def with_model_library(config: dict, config_path) -> dict:
+    """Fill model choices from the benchmarking model library (see brain_core.apply_model_library).
+
+    Display-only tool: if the library cannot be read, show what config.json says.
+    """
+    agents_dir = str(Path(config_path).resolve().parent)
+    if agents_dir not in sys.path:
+        sys.path.insert(0, agents_dir)
+    try:
+        from brain_core import apply_model_library
+
+        return apply_model_library(config)
+    except Exception as exc:
+        print(f"Warning: model library unavailable ({exc})", file=sys.stderr)
+        return config
+
+
 def load_config() -> dict:
     """Load orchestration config, returning empty dict on failure."""
     try:
         with open(CONFIG_FILE) as f:
-            return json.load(f)
+            return with_model_library(json.load(f), CONFIG_FILE)
     except Exception as e:
         print(f"  Warning: Could not read config file {CONFIG_FILE}: {e}")
         return {}

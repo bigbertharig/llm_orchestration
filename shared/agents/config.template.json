@@ -7,7 +7,6 @@
     "hostname": "gpu-rig",
     "gpu_count": 6
   },
-
   "shared_path": "../",
   "permissions_path": "permissions/",
   "model_catalog_path": "models.catalog.json",
@@ -24,102 +23,17 @@
   "auto_default_enabled": false,
   "auto_default_idle_seconds": 999999,
   "auto_default_gpu": "gpu-2",
-  "auto_default_model": "qwen2.5-coder:7b",
   "startup_warm_workers": [],
   "startup_meta_tasks": [],
-  "llama_single_defaults": {
-    "ctx_size": 16384,
-    "batch_size": 64,
-    "parallel": 1,
-    "n_gpu_layers": 999
-  },
-  "llama_split_defaults": {
-    "ctx_size": 16384,
-    "batch_size": 128,
-    "parallel": 1,
-    "n_gpu_layers": 999
-  },
-  "llama_single_profiles": {
-    "mistral:7b-instruct": {
-      "ctx_size": 12288,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999
-    },
-    "qwen2.5-coder:7b": {
-      "ctx_size": 16384,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999
-    },
-    "qwen3.5:4b": {
-      "ctx_size": 16384,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999
-    },
-    "qwen3.5:9b-q3km": {
-      "ctx_size": 16384,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999
-    },
-    "deepseek-r1:7b": {
-      "ctx_size": 16384,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999
-    },
-    "qwen2.5:7b": {
-      "ctx_size": 16384,
-      "batch_size": 64,
-      "parallel": 1,
-      "n_gpu_layers": 999,
-      "extra_args": [
-        "--no-warmup"
-      ]
-    }
-  },
-  "llama_split_profiles": {
-    "qwen2.5-coder:14b": {
-      "ctx_size": 16384,
-      "batch_size": 128,
-      "parallel": 1,
-      "n_gpu_layers": 999,
-      "tensor_split": "1,1",
-      "extra_args": [
-        "--no-warmup"
-      ],
-      "meta_timeout_seconds": 600
-    }
-  },
-  "review_lap_models": {
-    "extractor": {
-      "preferred": "qwen2.5:7b",
-      "fallback": "qwen2.5-coder:14b"
-    },
-    "verifier": {
-      "preferred": "qwen2.5-coder:14b",
-      "fallback": "qwen2.5:7b"
-    },
-    "adjudicator": {
-      "preferred": "qwen2.5-coder:14b",
-      "fallback": "qwen2.5:7b"
-    }
-  },
-
   "brain": {
     "name": "brain",
-    "model": "qwen2.5:32b",
     "gpus": [0]
   },
-
   "gpus": [
     {
       "name": "gpu-1",
       "id": 1,
       "vram_mb": 6144,
-      "model": "qwen2.5:7b",
       "port": 11435,
       "permissions": "worker.json"
     },
@@ -127,7 +41,6 @@
       "name": "gpu-2",
       "id": 2,
       "vram_mb": 6144,
-      "model": "qwen2.5:7b",
       "port": 11436,
       "permissions": "worker.json"
     },
@@ -135,7 +48,6 @@
       "name": "gpu-3",
       "id": 3,
       "vram_mb": 6144,
-      "model": "qwen2.5:7b",
       "port": 11437,
       "permissions": "worker.json"
     },
@@ -143,7 +55,6 @@
       "name": "gpu-4",
       "id": 4,
       "vram_mb": 6144,
-      "model": "qwen2.5:7b",
       "port": 11438,
       "permissions": "worker.json"
     },
@@ -151,22 +62,18 @@
       "name": "gpu-5",
       "id": 5,
       "vram_mb": 6144,
-      "model": "qwen2.5:7b",
       "port": 11439,
       "permissions": "worker.json"
     }
   ],
-
   "worker_mode": "cold",
   "initial_hot_workers": 0,
   "max_hot_workers": 5,
-
   "timeouts": {
     "poll_interval_seconds": 5,
     "brain_think_seconds": 120,
     "worker_task_seconds": 0
   },
-
   "resource_limits": {
     "max_temp_c": 80,
     "gpu_temp_warning_c": 75,
@@ -176,18 +83,15 @@
     "max_vram_percent": 95,
     "max_power_w": 140
   },
-
   "retry_policy": {
     "max_attempts": 3
   },
-
   "thermal_pause": {
     "initial_seconds": 30,
     "max_seconds": 300,
     "backoff_factor": 1.8,
     "resume_margin_c": 4
   },
-
   "thermal_recovery": {
     "_comment": "Brain-level thermal recovery policy for sustained overheat incidents",
     "cpu_overheat_trigger_seconds": 300,
@@ -197,7 +101,6 @@
     "enable_full_reset_escalation": true,
     "same_gpu_reset_backoff_seconds": 120
   },
-
   "cpu_agent": {
     "resource_limits": {
       "cpu_temp_warning_c": 85,

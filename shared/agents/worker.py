@@ -246,8 +246,10 @@ def main():
 
     # Load config for timeout and model info
     try:
+        from brain_core import apply_model_library
+
         with open(args.config) as f:
-            config = json.load(f)
+            config = apply_model_library(json.load(f))
     except Exception as e:
         result = {"success": False, "error": f"Config load error: {e}", "worker": args.gpu_name}
         print(json.dumps(result))

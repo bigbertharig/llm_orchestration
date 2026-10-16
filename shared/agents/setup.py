@@ -242,53 +242,21 @@ def build_config(assignment, runtime, system):
         "auto_default_enabled": bool(warm_worker_names),
         "auto_default_idle_seconds": 90 if warm_worker_names else 999999,
         "auto_default_gpu": warm_gpu_name or "gpu-2",
-        "auto_default_model": "qwen2.5-coder:7b",
+        # Model choices and llama settings are not machine facts: brain_core.apply_model_library
+        # fills brain.model, each gpu's model, auto_default_model, startup target_model and the
+        # llama_* profiles from the benchmarking model library at load time.
         "startup_warm_workers": warm_worker_names,
         "startup_meta_tasks": [
             {
                 "name": f"startup_single_{worker_name}",
                 "command": "load_llm",
-                "target_model": "qwen2.5-coder:7b",
                 "load_mode": "single",
                 "candidate_workers": [worker_name],
             }
             for worker_name in warm_worker_names
         ],
-        "llama_single_defaults": {
-            "ctx_size": 16384,
-            "batch_size": 64,
-            "parallel": 1,
-            "n_gpu_layers": 999,
-        },
-        "llama_split_defaults": {
-            "ctx_size": 16384,
-            "batch_size": 128,
-            "parallel": 1,
-            "n_gpu_layers": 999,
-        },
-        "llama_single_profiles": {
-            "qwen2.5:7b": {
-                "ctx_size": 16384,
-                "batch_size": 64,
-                "parallel": 1,
-                "n_gpu_layers": 999,
-                "extra_args": ["--no-warmup"],
-            },
-        },
-        "llama_split_profiles": {
-            "qwen2.5-coder:14b": {
-                "ctx_size": 16384,
-                "batch_size": 128,
-                "parallel": 1,
-                "n_gpu_layers": 999,
-                "tensor_split": "1,1",
-                "extra_args": ["--no-warmup"],
-                "meta_timeout_seconds": 600,
-            },
-        },
         "brain": {
             "name": "brain",
-            "model": assignment["brain"]["model"],
             "gpus": assignment["brain"]["gpus"],
         },
         "gpus": [],
@@ -318,7 +286,6 @@ def build_config(assignment, runtime, system):
                 "name": w["name"],
                 "id": w["id"],
                 "vram_mb": w["vram_mb"],
-                "model": w["model"],
                 "port": w["port"],
                 "permissions": "worker.json",
             }
