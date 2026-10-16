@@ -68,6 +68,8 @@ def apply_model_library(config: dict) -> dict:
             continue
         flat = {**profile.get("runtime", {}),
                 **{k: v for k, v in profile.items() if k not in ("runtime", "notes")}}
+        if not flat.get("extra_args"):
+            flat.pop("extra_args", None)
         table = split if entry.get("schedule", {}).get("placement") == "split_gpu" else single
         for name in [model_id, *entry.get("aliases", [])]:
             table[name] = dict(flat)
