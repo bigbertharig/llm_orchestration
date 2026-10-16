@@ -123,9 +123,55 @@ def main() -> int:
     parser.add_argument("--interval", type=float, default=2.0)
     parser.add_argument("--abort-cpu-c", type=float, default=0.0)
     parser.add_argument("--abort-pid", type=int)
+    parser.add_argument(
+        "--fast-gpu-ms",
+        type=int,
+        default=0,
+        help="Also log per-GPU power every N ms (nvidia-smi loop) to <output>.gpu_fast.csv. "
+        "Catches short spikes the main sample interval misses.",
+    )
     args = parser.parse_args()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    fast_gpu = start_fast_gpu_log(args.output, args.fast_gpu_ms) if args.fast_gpu_ms > 0 else None
+
+    def stop_on_term(_signum, _frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop_on_term)
+    try:
+        return run_monitor(args)
+    finally:
+        if fast_gpu is not None:
+            # stdbuf leaves nvidia-smi as a separate process; signal the whole group.
+            try:
+                os.killpg(fast_gpu.pid, signal.SIGTERM)
+                fast_gpu.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(fast_gpu.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def start_fast_gpu_log(output: Path, interval_ms: int) -> subprocess.Popen:
+    """Run nvidia-smi's own sampling loop into <output>.gpu_fast.csv, one line per GPU."""
+    fast_path = output.with_suffix(".gpu_fast.csv")
+    fields = (
+        "timestamp,index,power.draw,power.draw.instant,clocks.sm,"
+        "utilization.gpu,temperature.gpu,clocks_event_reasons.active"
+    )
+    stream = fast_path.open("w", buffering=1)
+    stream.write(fields + "\n")
+    return subprocess.Popen(
+        ["stdbuf", "-oL", "nvidia-smi", f"--query-gpu={fields}",
+         "--format=csv,noheader,nounits", f"--loop-ms={interval_ms}"],
+        stdout=stream,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def run_monitor(args: argparse.Namespace) -> int:
     events_path = args.output.with_suffix(".events.log")
     boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     started = time.time()
