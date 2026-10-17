@@ -40,6 +40,9 @@ MODELS_CATALOG_PATH = SHARED_ROOT / "agents" / "models.catalog.json"
 HISTORY_ROOT = SHARED_ROOT / "logs" / "benchmarks" / "campaigns" / "history"
 BENCHMARKING_SCRIPTS = SHARED_ROOT / "plans" / "shoulders" / "benchmarking"
 BENCHMARK_CACHE_ROOT = SHARED_ROOT / "cache" / "benchmarks"
+# The checkout this runner lives in (<tree>/scripts/benchmarks/run_campaign.py); its
+# agents/config.json holds this machine's facts, including the model hot-set roots.
+TREE = Path(__file__).resolve().parents[1]
 
 SUITE_CONTRACT_LABEL = "daedalmap.benchmark.contract"
 SUITE_CONTRACT_VERSION = "campaign-v1"
@@ -550,6 +553,24 @@ def validate_resolved_blocks(blocks: Dict[str, BlockState]) -> None:
 # Runtime Layer (wraps run_runtime.sh)
 # ---------------------------------------------------------------------------
 
+def local_gguf(gguf: str) -> str:
+    """Prefer this machine's hot-set copy of an archive GGUF over the network archive.
+
+    Same rule as rig mode and the runtime smoke test (brain_core.resolve_hotset_gguf).
+    Without a machine config the archive path is used unchanged.
+    """
+    config_path = TREE / "agents" / "config.json"
+    if not config_path.is_file():
+        return gguf
+    agents_dir = str(TREE / "agents")
+    if agents_dir not in sys.path:
+        sys.path.insert(0, agents_dir)
+    from brain_core import resolve_hotset_gguf
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    return str(resolve_hotset_gguf(gguf, config))
+
+
 def build_runtime_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
     """Build the shell command to start a llama-server container."""
     cfg = block.config
@@ -560,7 +581,7 @@ def build_runtime_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
     cmd = [
         "bash", str(RUNTIME_SCRIPT),
         "--name", container_name,
-        "--model", cfg["gguf"],
+        "--model", local_gguf(cfg["gguf"]),
         "--port", str(slot.port),
         "--gpus", f"device={gpu_spec}",
         "--image", cfg["runtime_image"],

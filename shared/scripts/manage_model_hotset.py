@@ -2,9 +2,11 @@
 """
 Manage the rig's local model hot-set.
 
-GGUF hot-set (llama-server): copy the archive GGUFs that published remote profiles use into a
-local root listed in config.json `model_search_roots`; resolve_hotset_gguf() then loads them
-from there instead of network storage. The profile list decides what is copied.
+GGUF hot-set (llama-server): copy archive GGUFs into a local root listed in config.json
+`model_search_roots`; resolve_hotset_gguf() then loads them from there instead of network
+storage. Published remote profiles are copied by default; --model adds registry models (for
+example candidates under test) by id:
+  python3 ~/llm_orchestration/shared/scripts/manage_model_hotset.py sync-gguf --root /data/model-hotset --model qwen3.8:27b
   python3 ~/llm_orchestration/shared/scripts/manage_model_hotset.py sync-gguf --root /data/model-hotset
   python3 ~/llm_orchestration/shared/scripts/manage_model_hotset.py sync-gguf \
       --root /home/bryan/model-hotset --profile chat-27b --profile coder-7b
@@ -261,19 +263,32 @@ def cmd_evict(args: argparse.Namespace) -> int:
     return 0
 
 
-def published_gguf_paths(profile_ids: list[str]) -> dict[str, Path]:
-    """Archive GGUF path per published remote profile (all profiles when none are named)."""
+def published_gguf_paths(profile_ids: list[str], model_ids: list[str] | None = None) -> dict[str, Path]:
+    """Archive GGUF path per published remote profile and per named registry model.
+
+    With nothing named, every published profile is selected; naming only models selects
+    only those models.
+    """
     sys.path.insert(0, str(MODEL_LIBRARY_DIR))
     import model_library
 
-    try:
-        profiles = model_library.remote_profiles()
-    except KeyError as exc:
-        raise SystemExit(f"model library: {exc.args[0]}")
-    unknown = [pid for pid in profile_ids if pid not in profiles]
-    if unknown:
-        raise SystemExit(f"unknown profile(s) {unknown}; published: {sorted(profiles)}")
-    return {pid: Path(profiles[pid]["gguf_path"]) for pid in profile_ids or list(profiles)}
+    model_ids = model_ids or []
+    selected: dict[str, Path] = {}
+    if profile_ids or not model_ids:
+        try:
+            profiles = model_library.remote_profiles()
+        except KeyError as exc:
+            raise SystemExit(f"model library: {exc.args[0]}")
+        unknown = [pid for pid in profile_ids if pid not in profiles]
+        if unknown:
+            raise SystemExit(f"unknown profile(s) {unknown}; published: {sorted(profiles)}")
+        selected.update({pid: Path(profiles[pid]["gguf_path"]) for pid in profile_ids or list(profiles)})
+    for model_id in model_ids:
+        try:
+            selected[model_id] = Path(model_library.resolve(model_id)["gguf_path"])
+        except KeyError as exc:
+            raise SystemExit(f"model library: unknown model {exc.args[0]}")
+    return selected
 
 
 def cmd_sync_gguf(args: argparse.Namespace) -> int:
@@ -281,7 +296,7 @@ def cmd_sync_gguf(args: argparse.Namespace) -> int:
     if not root.is_dir():
         raise SystemExit(f"hot-set root not found: {root}")
     failed = 0
-    for pid, src in published_gguf_paths(args.profile).items():
+    for pid, src in published_gguf_paths(args.profile, args.model).items():
         try:
             dst = root / src.relative_to(ARCHIVE_MODELS)
         except ValueError:
@@ -317,6 +332,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync = sub.add_parser("sync-gguf", help="Copy published profiles' archive GGUFs into a hot-set root")
     p_sync.add_argument("--root", required=True, help="Hot-set root listed in config.json model_search_roots")
     p_sync.add_argument("--profile", action="append", default=[], help="Remote profile id (repeatable; default: all)")
+    p_sync.add_argument("--model", action="append", default=[],
+                        help="Registry model id, for example a candidate under test (repeatable)")
     p_sync.set_defaults(func=cmd_sync_gguf)
 
     p_report = sub.add_parser("report", help="Show disk/model inventory and duplicate blob estimate")
