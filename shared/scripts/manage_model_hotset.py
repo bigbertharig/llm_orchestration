@@ -270,15 +270,17 @@ def published_gguf_paths(profile_ids: list[str], model_ids: list[str] | None = N
     only those models.
     """
     sys.path.insert(0, str(MODEL_LIBRARY_DIR))
+    sys.path.insert(0, str(TREE / "scripts" / "rig"))
     import model_library
+    import remote_profiles
 
     model_ids = model_ids or []
     selected: dict[str, Path] = {}
     if profile_ids or not model_ids:
         try:
-            profiles = model_library.remote_profiles()
-        except KeyError as exc:
-            raise SystemExit(f"model library: {exc.args[0]}")
+            profiles = remote_profiles.load()
+        except (OSError, KeyError, ValueError) as exc:
+            raise SystemExit(f"remote profiles ({remote_profiles.PATH}): {exc}")
         unknown = [pid for pid in profile_ids if pid not in profiles]
         if unknown:
             raise SystemExit(f"unknown profile(s) {unknown}; published: {sorted(profiles)}")

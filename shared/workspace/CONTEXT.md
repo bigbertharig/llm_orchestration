@@ -39,7 +39,7 @@ Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 - `shared/scripts/batch_runtime_diag.py` inspect runtime state for a batch
 - Meta tasks (`load_llm`, `unload_llm`): brain inserts via `brain_resources.py:_insert_resource_task()`, workers execute via `gpu_llama.py:load_model()`
 - Model library (owned by the benchmarking repo, `shared/plans/shoulders/benchmarking/`):
-  `model_roles.json` (model per lane/job, remote profiles) and `model_registry.json` (all models and
+  `model_roles.json` (model per lane/job) and `model_registry.json` (all models and
   profiles), resolved by `scripts/active/model_library.py`. `shared/agents/models.catalog.json` links to the
   generated catalog (model IDs, GGUF paths, placement, tiers).
 
@@ -131,8 +131,9 @@ ssh 10.0.0.3 rig stop                  # back to idle
   OpenAI API and loads profiles on first request. Deploy: `~/llm-gateway/deploy/deploy_rig.sh` from the Pi.
 - Stack modes run under systemd (`llm-orchestration.service` / `llm-bench.service`).
   Never start `startup.py` by hand.
-- Remote profiles live in `plans/shoulders/benchmarking/model_roles.json` (`remote_profiles`); their
-  runtime settings are registry profiles in `model_registry.json`.
+- Remote profiles: llm-gateway owns the offer (`OFFER` in `~/llm-gateway/tools/generate_profiles.py`),
+  resolved against `model_registry.json` into `~/llm-gateway/remote_profiles.json`, which `rig` reads via
+  `scripts/rig/remote_profiles.py`. Change a model's settings in the registry, then re-run the generator.
 - State: `brain/rig_mode.json`. Code: `shared/scripts/rig/rig.py`. Design: `workspace/implement/rig_boot_modes.md`.
 - Loading benchmark models while in bench mode: `start_custom_mode.py --models ... --skip-benchmark-start`.
   Without `--skip-benchmark-start` the old wrapper restarts the stack outside systemd.

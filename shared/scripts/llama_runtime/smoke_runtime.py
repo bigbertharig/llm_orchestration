@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Certify a llama-runtime image against every model the rig actually uses.
 
-The model list comes from the benchmarking model library: every model named by a role or a
-remote profile. Each loads alone on its normal lane (3090, one 1060, or a 1060 pair) with its
+The model list is every model named by a role in the benchmarking model library or by a remote
+profile llm-gateway offers (scripts/rig/remote_profiles.py). Each loads alone on its normal lane (3090, one 1060, or a 1060 pair) with its
 orchestration profile (default profile if it has none), must give a clean answer to the litmus
 question (no leaked reasoning) and answer a completion request, and is stopped before the next.
 Results go to the share under logs/runtime_upgrades/.
@@ -25,7 +25,9 @@ HERE = Path(__file__).resolve().parent
 TREE = HERE.parents[1]  # <tree>/scripts/llama_runtime -> <tree>
 sys.path.insert(0, str(TREE / "plans" / "shoulders" / "benchmarking" / "scripts" / "active"))
 sys.path.insert(0, str(TREE / "agents"))
+sys.path.insert(0, str(TREE / "scripts" / "rig"))
 import model_library  # noqa: E402
+import remote_profiles  # noqa: E402
 from brain_core import resolve_hotset_gguf  # noqa: E402
 
 PORT = 11450  # outside every mode's port range
@@ -48,7 +50,7 @@ def lane(entry: dict) -> tuple[str, str | None]:
 def models_in_use() -> list[str]:
     roles = model_library.load_roles()
     used = [spec["model"] for spec in roles["roles"].values()]
-    used += [rp["model"] for rp in roles["remote_profiles"]]
+    used += [rp["model"] for rp in remote_profiles.load().values()]
     return list(dict.fromkeys(used))
 
 

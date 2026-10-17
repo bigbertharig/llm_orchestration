@@ -37,8 +37,7 @@ STATE_PATH = LOCAL / "brain" / "rig_mode.json"
 STATE_MIRROR_PATH = SHARED / "brain" / "rig_mode.json"  # read by watchers on the Pi
 LOCK_PATH = LOCAL / "brain" / "rig_mode.lock"
 CONFIG_PATH = LOCAL / "agents" / "config.json"
-# Model library (benchmarking repo): remote profiles in model_roles.json, settings in model_registry.json.
-MODEL_LIBRARY_DIR = LOCAL / "plans" / "shoulders" / "benchmarking" / "scripts" / "active"
+# Remote profiles: llm-gateway's generated remote_profiles.json (see remote_profiles.py beside this file).
 RUN_RUNTIME = LOCAL / "scripts" / "llama_runtime" / "run_runtime.sh"
 
 # Stack modes run startup.py under these systemd units (installed from ./systemd/).
@@ -346,17 +345,17 @@ def report_busy(st: dict, wanted: str) -> int:
 # ---------------------------------------------------------------- remote mode
 
 def published_profiles() -> dict[str, dict]:
-    sys.path.insert(0, str(MODEL_LIBRARY_DIR))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     sys.path.insert(0, str(LOCAL / "agents"))
-    import model_library
+    import remote_profiles
     from brain_core import resolve_hotset_gguf
 
     try:
-        profiles = model_library.remote_profiles()
+        profiles = remote_profiles.load()
     except (OSError, KeyError, ValueError) as exc:
-        raise RigError(f"cannot resolve remote profiles from the model library: {exc}")
+        raise RigError(f"cannot read remote profiles from {remote_profiles.PATH}: {exc}")
     if not profiles:
-        raise RigError(f"no remote_profiles in {model_library.ROLES_PATH}")
+        raise RigError(f"no remote_profiles in {remote_profiles.PATH}")
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     for p in profiles.values():
         if not p.get("gpus_needed"):
