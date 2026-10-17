@@ -26,16 +26,18 @@ state="${FAKE_STATE:?}"
 cmd="$1"; shift
 case "$cmd" in
   run)
-    name=""; port=""
+    name=""; port=""; model=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --name) name="$2"; shift 2 ;;
         --port) port="$2"; shift 2 ;;
+        --model) model="$2"; shift 2 ;;
         *) shift ;;
       esac
     done
     echo "$(date +%s.%N) start $name" >> "$state/events"
     echo "$port" > "$state/container_$name"
+    [ -f "$state/serve_$port" ] || echo "$model" > "$state/serve_$port"
     if [ -f "$state/fail_$name" ]; then
       echo exited > "$state/exited_$name"
     else
@@ -69,7 +71,11 @@ exit 0
 FAKE_CURL = r"""#!/bin/bash
 url="${@: -1}"
 port="${url##*:}"; port="${port%%/*}"
-[ -f "${FAKE_STATE:?}/ready_$port" ]
+[ -f "${FAKE_STATE:?}/ready_$port" ] || exit 7
+case "$url" in
+  */v1/models) printf '{"data": [{"id": "%s"}]}' "$(cat "$FAKE_STATE/serve_$port")" ;;
+esac
+exit 0
 """
 
 
@@ -151,6 +157,27 @@ class RuntimeLoadLockTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 70, err)
         kinds = [kind for _ts, kind, name in self._events() if name == "rt-bad"]
         self.assertEqual(kinds, ["start", "removed"])
+
+    def test_refuses_a_port_another_runtime_is_serving(self):
+        # Another model already answers on the port (left over from an earlier test).
+        (self.state / "ready_18010").touch()
+        (self.state / "serve_18010").write_text("/models/other.gguf", encoding="utf-8")
+        proc = self._launch("rt-d", 18010)
+        _out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 75, err)
+        self.assertIn("already serving other.gguf", err)
+        self.assertFalse((self.state / "events").exists())
+
+    def test_wrong_model_on_the_port_fails_the_load(self):
+        # The probe is answered, but by a server reporting a different GGUF.
+        (self.state / "serve_18011").write_text("/models/other.gguf", encoding="utf-8")
+        proc = self._launch("rt-e", 18011)
+        _out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 70, err)
+        self.assertIn("expected 'model.gguf'", err)
+        kinds = [kind for _ts, kind, name in self._events() if name == "rt-e"]
+        self.assertEqual(kinds[0], "start")
+        self.assertIn("removed", kinds)
 
 
 if __name__ == "__main__":

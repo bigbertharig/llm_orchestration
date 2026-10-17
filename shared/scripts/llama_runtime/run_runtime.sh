@@ -223,6 +223,18 @@ http_ok() {
   curl -fsS -o /dev/null --max-time 3 "$1" 2>/dev/null
 }
 
+# File name of the GGUF the server on HOST:PORT reports, empty if nothing answers.
+# Never fails: "nothing answers" is a normal result under set -euo pipefail.
+served_model() {
+  curl -fsS --max-time 3 "http://${HOST}:${PORT}/v1/models" 2>/dev/null | python3 -c '
+import json, os, sys
+try:
+    print(os.path.basename(str(json.load(sys.stdin)["data"][0]["id"])))
+except Exception:
+    pass
+' 2>/dev/null || true
+}
+
 # Wait until every other runtime this script started is serving. Covers loads whose
 # launcher died before releasing the lock, so they can never overlap a new load.
 wait_for_other_loads() {
@@ -255,15 +267,29 @@ if ! flock -w "${LOAD_LOCK_WAIT_S}" 9; then
 fi
 wait_for_other_loads || exit 75
 
+# Containers share the host network, so a server already on this port would answer this
+# load's readiness probe and its requests. Refuse instead of serving the wrong model.
+occupant="$(served_model)"
+if [ -n "${occupant}" ] || http_ok "http://${HOST}:${PORT}/health"; then
+  log "port ${PORT} is already serving ${occupant:-a runtime}; stop it first"
+  exit 75
+fi
+
 log "lock held; starting container"
 CONTAINER_ID="$("${CMD[@]}")"
 
 deadline=$(( $(date +%s) + LOAD_READY_TIMEOUT_S ))
 while :; do
-  if http_ok "http://${HOST}:${PORT}/health"; then
+  state="$("${DOCKER_BIN}" inspect -f '{{.State.Running}}' "${NAME}" 2>/dev/null || echo missing)"
+  if [ "${state}" = "true" ] && http_ok "http://${HOST}:${PORT}/health"; then
+    served="$(served_model)"
+    if [ "${served}" != "$(basename "${MODEL}")" ]; then
+      log "port ${PORT} serves '${served}', expected '$(basename "${MODEL}")'; removing this container"
+      "${DOCKER_BIN}" rm -f "${NAME}" >/dev/null 2>&1 || true
+      exit 70
+    fi
     break
   fi
-  state="$("${DOCKER_BIN}" inspect -f '{{.State.Running}}' "${NAME}" 2>/dev/null || echo missing)"
   if [ "${state}" != "true" ]; then
     log "container stopped during load (running=${state}); last log lines:"
     "${DOCKER_BIN}" logs --tail 20 "${NAME}" >&2 2>&1 || true
