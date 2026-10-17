@@ -681,6 +681,7 @@ def build_suite_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
             "-e", f"HF_HOME={BENCHMARK_CACHE_ROOT / 'huggingface'}",
             "-e", f"HF_DATASETS_CACHE={BENCHMARK_CACHE_ROOT / 'huggingface' / 'datasets'}",
             "-e", f"XDG_CACHE_HOME={BENCHMARK_CACHE_ROOT / 'xdg'}",
+            "-e", f"NLTK_DATA={BENCHMARK_CACHE_ROOT / 'nltk_data'}",
             "-v", f"{SHARED_ROOT}:{SHARED_ROOT}",
             "-v", f"{suite_log_root}:/results",
             "-v", f"{BENCHMARKING_SCRIPTS}:/benchmark-scripts:ro",
