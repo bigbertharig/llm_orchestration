@@ -42,7 +42,7 @@ BENCHMARKING_SCRIPTS = SHARED_ROOT / "plans" / "shoulders" / "benchmarking"
 BENCHMARK_CACHE_ROOT = SHARED_ROOT / "cache" / "benchmarks"
 # The checkout this runner lives in (<tree>/scripts/benchmarks/run_campaign.py); its
 # agents/config.json holds this machine's facts, including the model hot-set roots.
-TREE = Path(__file__).resolve().parents[1]
+TREE = Path(__file__).resolve().parents[2]
 
 SUITE_CONTRACT_LABEL = "daedalmap.benchmark.contract"
 SUITE_CONTRACT_VERSION = "campaign-v1"
