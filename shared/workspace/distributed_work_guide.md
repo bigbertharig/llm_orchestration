@@ -330,6 +330,24 @@ used llama-server in Docker, `--split-mode layer`, `--ctx-size 4096`,
 | 1060 5-way (x1×5) | gemma-4:26b-a4b | MoE | 26B (4B) | 131 | **24.0** |
 | 1060 4-way (x1×4) | gemma-4:31b | Dense | 31B | 57 | **5.3** |
 
+October 2026 additions (`llama-runtime:b11669`, `--split-mode layer`, `-fit off`, ctx 8192, 768-token
+decode, single run; the 3090 was serving another model during the 1060 runs):
+
+| Config | Model | Type | Params (active) | Gen tok/s | Notes |
+|--------|-------|------|-----------------|-----------|-------|
+| 3090 solo | nex-n2.5:mini | MoE | 35B (3B) | **142.2** | 20.8 GB of model buffers |
+| 1060 5-way (x1×5) | nex-n2.5:mini | MoE | 35B (3B) | **21.7** | tensor split 1,1,1,1,1; 3.8-5.2 GB per card; 30-41 W avg per card |
+| 1060 4-way (x1×4) | nex-n2.5:mini | MoE | 35B (3B) | **22.0** | 1,1,1,1 does not fit; 0.75,1,1,1 fits with ~750 MB free per card |
+| 1060 5-way row split | nex-n2.5:mini | MoE | 35B (3B) | n/a | `--split-mode row` fails: "device CUDA0 does not support split buffers" (hybrid recurrent architecture) |
+
+Same 6-7x pattern as April: MoE about 6.5x slower on the 1060 farm than on the 3090 (Nex 6.5x,
+gemma-4:26b-a4b 6.3x), dense about 7.5x (qwen2.5-coder:14b, gemma-4:31b), and 4-way equals 5-way.
+The first card always holds about 1.3 GB more than its layer share (5153 MiB on CUDA0 in both the 4-
+and 5-way Nex loads), so give it a smaller tensor-split weight when VRAM is tight. Quality: litmus 3/3
+on both splits; greedy outputs diverge from the 3090 (2 of 10 GSM8K responses identical) but the
+4-way and 5-way splits agree with each other. Records:
+`benchmarking/results/runtime_experiments/nex_n25_mini_split{5_concurrent,4}_runtime_characterization_20261017.json`.
+
 Prior baseline (Feb 2026, Ollama, different runtime):
 - 1060 single 7B: 22.5 tok/s — matches current 22.7 tok/s within measurement noise
 - 1060 2-way 14B: 12.5 tok/s — matches current 11.9 tok/s
