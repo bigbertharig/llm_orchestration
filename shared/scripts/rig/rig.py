@@ -31,6 +31,7 @@ from pathlib import Path
 # catalog, profiles and the runtime script come from here, so idle/remote never need the network.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hw_jobs  # noqa: E402  (rig-side detached jobs, beside this file)
+import hw_state  # noqa: E402  (rig-side lease and claim record, beside this file)
 
 LOCAL = Path(__file__).resolve().parents[2]
 # Network storage (shared drive, later a NAS). Only the orchestration/bench stacks, the control
@@ -42,6 +43,8 @@ LOCK_PATH = LOCAL / "brain" / "rig_mode.lock"
 CONFIG_PATH = LOCAL / "agents" / "config.json"
 # Remote profiles: llm-gateway's generated remote_profiles.json (see remote_profiles.py beside this file).
 RUN_RUNTIME = LOCAL / "scripts" / "llama_runtime" / "run_runtime.sh"
+# GPU leases and claims, rig-local (hw_state.py); mirrored to SHARED/gpus/ for orchestration workers.
+HW_STATE_ROOT = LOCAL / "brain" / "hw"
 
 # Stack modes run startup.py under these systemd units (installed from ./systemd/).
 STACK_UNITS = {
@@ -694,10 +697,67 @@ def cmd_status(args) -> int:
     return 0
 
 
+def open_hw_state() -> hw_state.HardwareState:
+    return hw_state.HardwareState(HW_STATE_ROOT, LOCAL / "agents", SHARED if shared_available() else None)
+
+
+def emit(payload: dict, code: int = 0) -> int:
+    print(json.dumps(payload, indent=2), flush=True)
+    return code
+
+
+def cmd_lease(args) -> int:
+    """Lease record for controllers: list | acquire --spec JSON | renew | release. JSON out."""
+    try:
+        hs = open_hw_state()
+        if args.action == "list":
+            return emit({"leases": hs.leases(), "claims": hs.claims()})
+        if args.action == "acquire":
+            try:
+                spec = json.loads(args.spec or "")
+            except ValueError as exc:
+                raise hw_state.StateError("invalid", f"--spec is not JSON: {exc}") from exc
+            unknown = sorted(set(int(g) for g in spec.get("gpu_ids", [])) - set(expected_gpu_ids()))
+            if unknown:
+                raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {expected_gpu_ids()}")
+            spec.setdefault("metadata", {})["controller_host"] = caller()
+            return emit({"lease": hs.acquire(spec)})
+        if args.action == "renew":
+            return emit({"lease": hs.renew(args.lease_id, args.owner, args.ttl)})
+        hs.release(args.lease_id, args.owner, args.force)
+        return emit({"released": args.lease_id})
+    except hw_state.StateError as exc:
+        return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
+
+
+def cmd_claim(args) -> int:
+    """Claims take cards out of the shared pool: list | add NAME --gpus | remove NAME. JSON out."""
+    try:
+        hs = open_hw_state()
+        if args.action == "list":
+            return emit({"claims": hs.claims()})
+        if args.action == "add":
+            gpus = [int(g) for g in args.gpus.split(",")]
+            unknown = sorted(set(gpus) - set(expected_gpu_ids()))
+            if unknown:
+                raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {expected_gpu_ids()}")
+            return emit({"claim": hs.add_claim(args.name, gpus, args.note, args.by or caller())})
+        return emit({"released": hs.remove_claim(args.name)})
+    except hw_state.StateError as exc:
+        return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
+
+
 def cmd_observe(_args) -> int:
-    """Read-only snapshot for the rig manager: GPUs, every llama container, served ports, remote state."""
+    """Read-only snapshot for the rig manager: GPUs, every llama container, served ports, remote state,
+    rig jobs, and the lease/claim record."""
     st = read_state()
+    try:
+        hs = open_hw_state()
+        record = {"leases": hs.leases(), "claims": hs.claims()}
+    except hw_state.StateError as exc:
+        record = {"leases": [], "claims": [], "state_error": str(exc)}
     print(json.dumps({
+        **record,
         "observed_at": now_iso(),
         "expected_gpus": expected_gpu_ids(),
         "gpus": gpu_telemetry(),
@@ -775,6 +835,32 @@ def main() -> int:
     s.add_argument("--json", action="store_true", help="with --detach: print the job as JSON")
     s.set_defaults(fn=cmd_start)
     sub.add_parser("observe", help="JSON snapshot for the rig manager").set_defaults(fn=cmd_observe)
+    s = sub.add_parser("lease", help="GPU lease record (controllers): list | acquire | renew | release")
+    la = s.add_subparsers(dest="action", required=True)
+    la.add_parser("list")
+    x = la.add_parser("acquire")
+    x.add_argument("--spec", required=True,
+                   help='JSON: {controller, owner, run_id, gpu_ids, ports, ttl_s, lane, metadata}')
+    x = la.add_parser("renew")
+    x.add_argument("lease_id")
+    x.add_argument("--owner", required=True)
+    x.add_argument("--ttl", type=int, default=120)
+    x = la.add_parser("release")
+    x.add_argument("lease_id")
+    x.add_argument("--owner", default="")
+    x.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_lease)
+    s = sub.add_parser("claim", help="take cards out of the shared pool: list | add | remove")
+    ca = s.add_subparsers(dest="action", required=True)
+    ca.add_parser("list")
+    x = ca.add_parser("add")
+    x.add_argument("name")
+    x.add_argument("--gpus", required=True)
+    x.add_argument("--note", default="")
+    x.add_argument("--by", default="")
+    x = ca.add_parser("remove")
+    x.add_argument("name")
+    s.set_defaults(fn=cmd_claim)
     s = sub.add_parser("stop")
     s.add_argument("profiles", nargs="*", help="remote profile ids to unload (default: stop everything)")
     s.set_defaults(fn=cmd_stop)
