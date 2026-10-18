@@ -261,9 +261,9 @@ def gpu_telemetry() -> list[dict]:
     return out
 
 
-def llama_containers() -> list[dict]:
-    """Every running llama-server container, whoever started it: name, GPU ids, port."""
-    ids = run(["docker", "ps", "-q"], check=False).stdout.split()
+def llama_containers(include_stopped: bool = False) -> list[dict]:
+    """Every llama-server container, whoever started it: name, GPU ids, port (running ones by default)."""
+    ids = run(["docker", "ps", "-aq" if include_stopped else "-q"], check=False).stdout.split()
     if not ids:
         return []
     try:
@@ -284,9 +284,58 @@ def llama_containers() -> list[dict]:
             if env.startswith("NVIDIA_VISIBLE_DEVICES="):
                 gpus.update(int(d) for d in env.split("=", 1)[1].split(",") if d.strip().isdigit())
         port = next((int(cmd[i + 1]) for i, a in enumerate(cmd[:-1]) if a == "--port" and cmd[i + 1].isdigit()), None)
+        st = c.get("State") or {}
         out.append({"name": str(c.get("Name", "")).lstrip("/"), "gpus": sorted(gpus), "port": port,
-                    "started_at": (c.get("State") or {}).get("StartedAt")})
+                    "started_at": st.get("StartedAt"), "running": bool(st.get("Running")),
+                    "exit_code": st.get("ExitCode"), "oom_killed": bool(st.get("OOMKilled")),
+                    "finished_at": st.get("FinishedAt"), "error": st.get("Error") or ""})
     return out
+
+
+def _docker_time(value: str | None) -> datetime | None:
+    """Docker's RFC 3339 UTC time (nanoseconds) as a local datetime; None for unset."""
+    if not value or value.startswith("0001-"):
+        return None
+    try:
+        return datetime.fromisoformat(value[:19] + "+00:00").astimezone().replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def why_runtime(port: int | None = None, container: str | None = None) -> dict:
+    """Why a llama runtime is down: its container state, rig guard actions against it, and
+    earlyoom / kernel OOM kills since it started. The newest container for the port or name wins."""
+    found = [c for c in llama_containers(include_stopped=True)
+             if (container and c["name"] == container) or (port is not None and c["port"] == port)]
+    if not found:
+        return {"found": False, "summary": f"no llama container for {container or f':{port}'} "
+                                           "(it was removed; the launcher's own log has its last output)"}
+    c = max(found, key=lambda x: x.get("started_at") or "")
+    started = _docker_time(c.get("started_at")) or datetime.now()
+    guard = []
+    if hw_guard.EVENTS_PATH.exists():
+        for line in hw_guard.EVENTS_PATH.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line[:19] >= started.isoformat(timespec="seconds") and (
+                    c["name"] in line or "-> critical" in line):
+                guard.append(line)
+    since = started.strftime("%Y-%m-%d %H:%M:%S")
+    kills = [l for l in run(["sudo", "-n", "journalctl", "-u", "earlyoom", "--since", since, "-o", "cat"],
+                            check=False).stdout.splitlines() if "sending" in l.lower() or "kill" in l.lower()]
+    kills += [l for l in run(["sudo", "-n", "journalctl", "-k", "--since", since, "-o", "cat"],
+                             check=False).stdout.splitlines() if "killed process" in l.lower()]
+    logs = run(["docker", "logs", "--tail", "5", c["name"]], check=False)
+    if c["running"]:
+        summary = f"{c['name']} is still running"
+    elif any(c["name"] in g and "stopped" in g for g in guard):
+        summary = f"{c['name']} was stopped by the rig guard to free RAM"
+    elif c["oom_killed"]:
+        summary = f"{c['name']} was OOM-killed (container memory limit)"
+    elif kills:
+        summary = f"{c['name']} exited ({c['exit_code']}); an OOM killer acted while it ran"
+    else:
+        summary = f"{c['name']} exited with code {c['exit_code']}" + (f": {c['error']}" if c["error"] else "")
+    return {"found": True, "summary": summary, "container": c, "guard_events": guard[-5:],
+            "oom_kills": kills[-5:], "log_tail": (logs.stdout + logs.stderr).strip().splitlines()[-5:]}
 
 
 def unit_active(unit: str) -> bool:
@@ -810,6 +859,25 @@ def cmd_observe(_args) -> int:
     return 0
 
 
+def cmd_why(args) -> int:
+    """Why a runtime is down (for launchers that find their runtime gone)."""
+    if args.port is None and not args.container:
+        raise RigError("give --port or --container")
+    w = why_runtime(args.port, args.container)
+    if args.json:
+        print(json.dumps(w, indent=2))
+        return 0
+    say(w["summary"])
+    c = w.get("container")
+    if c:
+        say(f"  container {c['name']} GPU {c['gpus']} :{c['port']} exit={c['exit_code']} "
+            f"oom_killed={c['oom_killed']} started={c['started_at']} finished={c['finished_at']}")
+    for key, label in (("guard_events", "guard"), ("oom_kills", "oom"), ("log_tail", "log")):
+        for line in w.get(key, []):
+            say(f"  {label}: {line}")
+    return 0
+
+
 def cmd_start(args) -> int:
     if args.mode == "remote":
         return cmd_start_remote(args)
@@ -875,6 +943,11 @@ def main() -> int:
                                                   "choice per use; default: run_runtime.sh floor 0)")
     s.set_defaults(fn=cmd_start)
     sub.add_parser("observe", help="JSON snapshot for the rig manager").set_defaults(fn=cmd_observe)
+    s = sub.add_parser("why", help="why a runtime is down: exit, OOM, guard action, earlyoom")
+    s.add_argument("--port", type=int)
+    s.add_argument("--container")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_why)
     s = sub.add_parser("lease", help="GPU lease record (controllers): list | acquire | renew | release")
     la = s.add_subparsers(dest="action", required=True)
     la.add_parser("list")
