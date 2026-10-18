@@ -6,7 +6,7 @@ hardware. It keeps working when the controller or the network is gone.
 
 | File | Owns |
 |---|---|
-| `rig.py` (`/usr/local/bin/rig`) | command layer: modes, remote profiles, `observe`, `lease`, `claim`, `start`, `stop` |
+| `rig.py` (`/usr/local/bin/rig`) | command layer: modes, remote profiles, `observe`, `lease`, `claim`, `start`, `stop`, `why` (why a runtime is down: exit, OOM, guard action, earlyoom) |
 | `hw_jobs.py` | detached jobs: a load runs as its own systemd unit (`rig-load-<id>`), never on an ssh session |
 | `hw_state.py` | the GPU lease and claim record (rig-local `shared/brain/hw/gpus/`), mirrored to the drive |
 | `hw_guard.py` | always-on power, thermal and memory guard (`rig-guard.service`) and load admission |
