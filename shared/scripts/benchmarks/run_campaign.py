@@ -39,6 +39,9 @@ SUITE_CONTRACTS_PATH = SHARED_ROOT / "plans" / "shoulders" / "benchmarking" / "d
 MODELS_CATALOG_PATH = SHARED_ROOT / "agents" / "models.catalog.json"
 HISTORY_ROOT = SHARED_ROOT / "logs" / "benchmarks" / "campaigns" / "history"
 BENCHMARKING_SCRIPTS = SHARED_ROOT / "plans" / "shoulders" / "benchmarking"
+# GPU leases from the rig manager (llm-gateway docs/MANAGER.md), one per occupied slot.
+LEASE_HELPER = BENCHMARKING_SCRIPTS / "scripts" / "integration" / "harness_lease.sh"
+LEASE_RENEW_EVERY_S = 120
 BENCHMARK_CACHE_ROOT = SHARED_ROOT / "cache" / "benchmarks"
 # The checkout this runner lives in (<tree>/scripts/benchmarks/run_campaign.py); its
 # agents/config.json holds this machine's facts, including the model hot-set roots.
@@ -616,7 +619,7 @@ def build_runtime_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
     return cmd
 
 
-def start_runtime(block: BlockState, slot: GpuSlot) -> str:
+def start_runtime(block: BlockState, slot: GpuSlot, lease: Optional[str] = None) -> str:
     """Start the runtime container. Returns container name."""
     container_name = f"llama-campaign-{block.block_id}"
 
@@ -634,6 +637,8 @@ def start_runtime(block: BlockState, slot: GpuSlot) -> str:
         )
 
     cmd = build_runtime_cmd(block, slot)
+    if lease:
+        cmd.extend(["--lease", lease])
     log(f"  Loading runtime: {container_name}")
     log(f"  Command: {' '.join(cmd)}", verbose_only=True)
 
@@ -908,6 +913,76 @@ def load_checkpoint(state: CampaignState) -> bool:
 # Scheduler
 # ---------------------------------------------------------------------------
 
+class CampaignLeases:
+    """`benchmarks` leases from the rig manager, one per occupied slot.
+
+    Taken when a slot's runtime starts, renewed while held, released when the slot is freed. A
+    refused card fails that block; an unreachable manager runs without a lease (the rig audits the
+    load as no-lease). A release the manager refuses (runtime still on the card) is retried.
+    """
+
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        self.held: Dict[str, str] = {}      # slot name -> lease id
+        self.pending: Dict[str, str] = {}   # slot name -> lease id whose release must be retried
+        self.last_renew = time.monotonic()
+
+    def _call(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["bash", str(LEASE_HELPER), *args], capture_output=True, text=True,
+                              timeout=60, check=False)
+
+    def ensure(self, slot: "GpuSlot", model: str) -> Optional[str]:
+        if slot.name in self.held:
+            return self.held[slot.name]
+        proc = self._call("acquire", ",".join(str(g) for g in slot.gpu_ids), f"campaign-{slot.name}",
+                          self.run_id, model)
+        if proc.returncode != 0:
+            raise RuntimeError(f"rig manager did not lease {slot.name} (GPU {slot.gpu_ids}): "
+                               f"{proc.stderr.strip()[-300:]}")
+        lease = proc.stdout.strip() or None
+        if lease:
+            self.held[slot.name] = lease
+            log(f"  Lease {lease} for {slot.name} (GPU {slot.gpu_ids})")
+        else:
+            log(f"  Rig manager unreachable: {slot.name} runs without a lease")
+        return lease
+
+    def release(self, slot_name: str) -> None:
+        lease = self.held.pop(slot_name, None) or self.pending.pop(slot_name, None)
+        if not lease:
+            return
+        proc = self._call("release", lease, f"campaign-{slot_name}")
+        if proc.returncode != 0 or "failed" in proc.stderr:
+            self.pending[slot_name] = lease
+
+    def tick(self) -> None:
+        if time.monotonic() - self.last_renew < LEASE_RENEW_EVERY_S:
+            return
+        self.last_renew = time.monotonic()
+        for name, lease in list(self.held.items()):
+            self._call("renew", lease, f"campaign-{name}")
+        for name in list(self.pending):
+            self.release(name)
+
+    def release_all(self) -> None:
+        for name in list(self.held) + list(self.pending):
+            self.release(name)
+        if self.pending:
+            log(f"WARNING: leases not released (runtime still on the card?): {self.pending}")
+
+
+class OccupiedSlots(dict):
+    """slot name -> block id. Freeing a slot releases its lease."""
+
+    def __init__(self, leases: CampaignLeases):
+        super().__init__()
+        self.leases = leases
+
+    def pop(self, key, *default):
+        self.leases.release(key)
+        return super().pop(key, *default)
+
+
 class Scheduler:
     def __init__(
         self,
@@ -922,7 +997,8 @@ class Scheduler:
         self.max_active_models = max_active_models
         self.load_lock = False  # only one model loads at a time
         self.loading_block: Optional[str] = None
-        self.occupied: Dict[str, str] = {}  # slot_name -> block_id
+        self.leases = CampaignLeases(state.run_id)
+        self.occupied: Dict[str, str] = OccupiedSlots(self.leases)  # slot_name -> block_id
         self._shutdown = False
 
     def _runtime_group_members(self, group: str) -> List[BlockState]:
@@ -1113,7 +1189,8 @@ class Scheduler:
                 log(f"  Runtime command: {' '.join(build_runtime_cmd(bs, slot))}", verbose_only=True)
             else:
                 try:
-                    container_name = start_runtime(bs, slot)
+                    lease = self.leases.ensure(slot, bs.model)
+                    container_name = start_runtime(bs, slot, lease)
                     bs.runtime_container = container_name
                 except Exception as e:
                     bs.status = FAILED
@@ -1222,9 +1299,9 @@ class Scheduler:
                     log(f"Block {bid}: [dry-run] COMPLETED")
                     if self.handoff_runtime(bs):
                         continue
+                    stop_runtime(bs.runtime_container)
                     if bs.assigned_slot:
                         self.occupied.pop(bs.assigned_slot.name, None)
-                    stop_runtime(bs.runtime_container)
                 continue
 
             rc = bs.suite_process.poll()
@@ -1266,9 +1343,9 @@ class Scheduler:
                 continue
 
             # Release slot and stop runtime after the final suite in a group.
+            stop_runtime(bs.runtime_container)
             if bs.assigned_slot:
                 self.occupied.pop(bs.assigned_slot.name, None)
-            stop_runtime(bs.runtime_container)
 
     def release_slot(self, block_id: str) -> None:
         """Force-release a slot."""
@@ -1343,6 +1420,8 @@ class Scheduler:
             self.advance_deps()
             self.check_load_complete()
             self.try_start_load()
+            if not self.dry_run:
+                self.leases.tick()
 
             if not self.dry_run:
                 write_status(self.state)
@@ -1353,6 +1432,9 @@ class Scheduler:
 
             if not self.dry_run:
                 time.sleep(TICK_INTERVAL)
+
+        if not self.dry_run:
+            self.leases.release_all()
 
         # Final status
         completed = sum(1 for bs in self.state.blocks.values() if bs.status == COMPLETED)
