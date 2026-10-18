@@ -29,6 +29,9 @@ from pathlib import Path
 
 # Rig-local tree: the checkout this file lives in (<LOCAL>/scripts/rig/rig.py). State, config,
 # catalog, profiles and the runtime script come from here, so idle/remote never need the network.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hw_jobs  # noqa: E402  (rig-side detached jobs, beside this file)
+
 LOCAL = Path(__file__).resolve().parents[2]
 # Network storage (shared drive, later a NAS). Only the orchestration/bench stacks, the control
 # policy they read, and the model archive live here; it may be missing at any time.
@@ -61,6 +64,8 @@ REMOTE_MEMORY_LIMIT = "20g"
 GPU_FREE_MAX_USED_MB = 1000
 STACK_READY_TIMEOUT_S = 600
 REMOTE_READY_TIMEOUT_S = 600
+# A queued (detached) remote load waits this long for its turn while another load runs.
+REMOTE_QUEUE_TIMEOUT_S = 1800
 LOCK_WAIT_S = 5
 
 EXIT_FAIL = 1
@@ -84,6 +89,9 @@ def now_iso() -> str:
 
 
 def caller() -> str:
+    # RIG_CALLER: a detached job (hw_jobs) keeps the address of whoever asked for it.
+    if os.environ.get("RIG_CALLER"):
+        return os.environ["RIG_CALLER"]
     ssh = os.environ.get("SSH_CLIENT", "").split()
     return ssh[0] if ssh else "local"
 
@@ -571,6 +579,40 @@ def wait_remote(pid: str) -> str | None:
         time.sleep(3)
 
 
+def detach_remote(pid: str, args) -> int:
+    """Run `start remote <pid> --queue ...` as a rig job and return at once (see hw_jobs)."""
+    profiles = published_profiles()
+    if pid not in profiles:
+        raise RigError(f"unknown remote profile {pid}; published: {sorted(profiles)}")
+    entry = read_state().get("profiles", {}).get(pid)
+    if entry:
+        job = {"job": hw_jobs.unit_name(pid), "profile": pid, "active_state": "inactive",
+               "profile_state": entry["state"], "port": entry["port"], "already_running": True}
+    else:
+        argv = [sys.executable, str(Path(__file__).resolve()), "start", "remote", pid, "--queue"]
+        if args.gpus is not None:
+            argv += ["--gpus", args.gpus, "--port", str(args.port)]
+        if args.lease:
+            argv += ["--lease", args.lease]
+        job = {**hw_jobs.launch(pid, argv, caller(), f"rig remote load {pid}"), "profile": pid}
+    print(json.dumps(job) if args.json else
+          f"{pid}: job {job['job']} {'already running' if job['already_running'] else 'started'}", flush=True)
+    return 0
+
+
+def claim_remote_queued(pid: str, force: bool, placement: dict | None) -> tuple[list[str], int | None]:
+    """claim_remote, waiting for our turn while another load runs (rig rule: one load at a time)."""
+    deadline = time.time() + REMOTE_QUEUE_TIMEOUT_S
+    while True:
+        try:
+            with Lock():
+                return claim_remote([pid], force, placement)
+        except RigError as exc:
+            if exc.code != EXIT_LOCKED or time.time() > deadline:
+                raise
+            time.sleep(3)
+
+
 def cmd_start_remote(args) -> int:
     requested = args.profiles or [pid for pid, p in published_profiles().items() if p.get("default")]
     placement = None
@@ -578,12 +620,19 @@ def cmd_start_remote(args) -> int:
         if len(requested) != 1 or args.gpus is None or args.port is None:
             raise RigError("--gpus/--port/--lease place exactly one profile and need both --gpus and --port")
         placement = {"gpus": [int(g) for g in args.gpus.split(",")], "port": args.port, "lease": args.lease}
+    if args.detach:
+        if len(requested) != 1:
+            raise RigError("--detach starts exactly one profile")
+        return detach_remote(requested[0], args)
     wanted: list[str] = []
     errors: list[str] = []
     # Load sequentially: claim and launch one profile, wait until it serves, then the next.
     for i, pid in enumerate(requested):
-        with Lock():
-            claimed, early = claim_remote([pid], args.force and i == 0, placement)
+        if args.queue:
+            claimed, early = claim_remote_queued(pid, args.force and i == 0, placement)
+        else:
+            with Lock():
+                claimed, early = claim_remote([pid], args.force and i == 0, placement)
         if early is not None:
             return early
         wanted += claimed
@@ -649,8 +698,10 @@ def cmd_observe(_args) -> int:
         "containers": llama_containers(),
         "ports": {str(p): m for p, m in live_ports().items()},
         "mode": st["mode"],
+        "last_error": st.get("error"),
         "profiles": {pid: {k: e.get(k) for k in ("port", "gpus", "state", "container", "lease")}
                      for pid, e in st.get("profiles", {}).items()},
+        "jobs": hw_jobs.jobs(),
     }, indent=2))
     return 0
 
@@ -712,6 +763,10 @@ def main() -> int:
     s.add_argument("--gpus", help="remote, one profile: GPU ids chosen by the rig manager, e.g. 0 or 1,2")
     s.add_argument("--port", type=int, help="remote, one profile: port chosen by the rig manager")
     s.add_argument("--lease", help="remote, one profile: the manager lease it runs under")
+    s.add_argument("--detach", action="store_true",
+                   help="remote, one profile: run the load as a rig job and return at once (rig observe tracks it)")
+    s.add_argument("--queue", action="store_true", help=argparse.SUPPRESS)  # detached job: wait for our turn
+    s.add_argument("--json", action="store_true", help="with --detach: print the job as JSON")
     s.set_defaults(fn=cmd_start)
     sub.add_parser("observe", help="JSON snapshot for the rig manager").set_defaults(fn=cmd_observe)
     s = sub.add_parser("stop")
