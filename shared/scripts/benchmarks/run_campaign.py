@@ -706,6 +706,9 @@ def build_suite_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
             "-v", f"{SHARED_ROOT}:{SHARED_ROOT}",
             "-v", f"{suite_log_root}:/results",
             "-v", f"{BENCHMARKING_SCRIPTS}:/benchmark-scripts:ro",
+            # One EvalPlus scoring at a time on the rig (bench-code run.sh; peaks of 4.7 GB RAM each).
+            "-v", "/run/lock:/host-lock",
+            "-e", "BENCH_EVAL_LOCK=/host-lock/bench-evalplus.lock",
         ]
         if spec.get("container_gpu_access"):
             docker_gpu_spec = f'"device={gpu_spec}"' if len(slot.gpu_ids) > 1 else f"device={gpu_spec}"
