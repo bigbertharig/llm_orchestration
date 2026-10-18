@@ -1,0 +1,11 @@
+# /etc/default/earlyoom on the GPU rig (tracked copy; install with
+#   sudo install -m 644 earlyoom.default /etc/default/earlyoom && sudo systemctl restart earlyoom)
+#
+# -m 10   act when available RAM is below 10%
+# -s 100  ignore swap: the swap condition always holds, so RAM alone triggers. The rig's swap is
+#         mostly zram (RAM-backed), so "swap free" overstated the headroom, and on 2026-10-17 extra
+#         disk swap lifted it past the old -s 50 line and disarmed earlyoom; the rig hung until a
+#         hard reset. The rig guard (hw_guard.py) acts first, at its own critical line; earlyoom is
+#         the backstop if the guard itself is stuck.
+# -r 10   report every 10 s
+EARLYOOM_ARGS="-m 10 -s 100 -r 10 --avoid '(sshd|nfsd|systemd|brain\.py|gpu_core)' --prefer '(llama-server|bench-)' -n"

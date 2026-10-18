@@ -13,6 +13,8 @@ ExecStart=/home/bryan/llm-orchestration-venv/bin/python /home/bryan/llm_orchestr
 Restart=always
 RestartSec=5
 Nice=-5
+# The guard must outlive memory pressure: keep the kernel OOM killer and earlyoom off it.
+OOMScoreAdjust=-900
 
 [Install]
 WantedBy=multi-user.target

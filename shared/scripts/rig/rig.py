@@ -446,7 +446,8 @@ def place_profile(profile: dict, free_gpus: list[dict]) -> list[int] | None:
     return [chosen[i] for i in range(len(profile["gpus_needed"]))]
 
 
-def launch_profile(p: dict, gpus: list[int], port: int) -> str:
+def launch_profile(p: dict, gpus: list[int], port: int, lease: str | None = None,
+                   cache_ram: int | None = None) -> str:
     name = REMOTE_CONTAINER_PREFIX + p["id"]
     run(["docker", "rm", "-f", name], check=False)
     cmd = [
@@ -461,6 +462,10 @@ def launch_profile(p: dict, gpus: list[int], port: int) -> str:
         cmd += ["--image", p["image"]]
     for a in p.get("extra_args", []):
         cmd += ["--extra-arg", a]
+    if lease:
+        cmd += ["--lease", lease]
+    if cache_ram is not None:  # the controller's choice for this use; run_runtime.sh's floor is 0
+        cmd += ["--cache-ram", str(int(cache_ram))]
     # No timeout: run_runtime.sh holds the rig-wide model-load lock until the model is
     # serving and bounds its own waits; killing it mid-load would free the lock.
     run(cmd, timeout=None)
@@ -517,7 +522,7 @@ def claim_remote(requested: list[str], force: bool,
         if pid in loaded:
             say(f"  {pid}: already {loaded[pid]['state']} on :{loaded[pid]['port']}")
             continue
-        if placement is not None:
+        if placement is not None and "gpus" in placement:
             gpus, port = list(placement["gpus"]), int(placement["port"])
             free_ids = {x["index"] for x in free}
             if len(gpus) != len(profiles[pid]["gpus_needed"]):
@@ -563,7 +568,7 @@ def claim_remote(requested: list[str], force: bool,
                        "from": caller(), "lease": (placement or {}).get("lease")}
         save_state(refresh_remote_status(st))
         try:
-            launch_profile(p, gpus, port)
+            launch_profile(p, gpus, port, (placement or {}).get("lease"), (placement or {}).get("cache_ram"))
         except Exception:
             drop_remote_profile(st, pid, error=f"{pid}: launch failed")
             raise
@@ -615,6 +620,8 @@ def detach_remote(pid: str, args) -> int:
             argv += ["--gpus", args.gpus, "--port", str(args.port)]
         if args.lease:
             argv += ["--lease", args.lease]
+        if args.cache_ram is not None:
+            argv += ["--cache-ram", str(args.cache_ram)]
         job = {**hw_jobs.launch(pid, argv, caller(), f"rig remote load {pid}"), "profile": pid}
     print(json.dumps(job) if args.json else
           f"{pid}: job {job['job']} {'already running' if job['already_running'] else 'started'}", flush=True)
@@ -641,6 +648,8 @@ def cmd_start_remote(args) -> int:
         if len(requested) != 1 or args.gpus is None or args.port is None:
             raise RigError("--gpus/--port/--lease place exactly one profile and need both --gpus and --port")
         placement = {"gpus": [int(g) for g in args.gpus.split(",")], "port": args.port, "lease": args.lease}
+    if args.cache_ram is not None:
+        placement = {**(placement or {}), "cache_ram": args.cache_ram}
     if args.detach:
         if len(requested) != 1:
             raise RigError("--detach starts exactly one profile")
@@ -779,16 +788,21 @@ def cmd_observe(_args) -> int:
         record = {"leases": hs.leases(), "claims": hs.claims()}
     except hw_state.StateError as exc:
         record = {"leases": [], "claims": [], "state_error": str(exc)}
+    containers = llama_containers()
+    running = {c["name"] for c in containers}
     print(json.dumps({
         **record,
         "observed_at": now_iso(),
         "expected_gpus": expected_gpu_ids(),
         "gpus": gpu_telemetry(),
-        "containers": llama_containers(),
+        "containers": containers,
         "ports": {str(p): m for p, m in live_ports().items()},
         "mode": st["mode"],
         "last_error": st.get("error"),
-        "profiles": {pid: {k: e.get(k) for k in ("port", "gpus", "state", "container", "lease")}
+        # A profile whose container is no longer running (the guard stopped it, or it crashed) is "gone".
+        "profiles": {pid: {**{k: e.get(k) for k in ("port", "gpus", "state", "container", "lease")},
+                           **({"state": "gone"} if e.get("state") == "ready" and e.get("container") not in running
+                              else {})}
                      for pid, e in st.get("profiles", {}).items()},
         "jobs": hw_jobs.jobs(),
         "guard": guard_summary(),
@@ -857,6 +871,8 @@ def main() -> int:
                    help="remote, one profile: run the load as a rig job and return at once (rig observe tracks it)")
     s.add_argument("--queue", action="store_true", help=argparse.SUPPRESS)  # detached job: wait for our turn
     s.add_argument("--json", action="store_true", help="with --detach: print the job as JSON")
+    s.add_argument("--cache-ram", type=int, help="remote: llama-server host prompt cache in MiB (controller's "
+                                                  "choice per use; default: run_runtime.sh floor 0)")
     s.set_defaults(fn=cmd_start)
     sub.add_parser("observe", help="JSON snapshot for the rig manager").set_defaults(fn=cmd_observe)
     s = sub.add_parser("lease", help="GPU lease record (controllers): list | acquire | renew | release")

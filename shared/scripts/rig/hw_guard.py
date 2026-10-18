@@ -13,10 +13,14 @@ the last window sets the level:
     warn      loads wait (a new load adds power, heat and memory)
     critical  loads are refused; the event log gets a process snapshot
 
-A level drops only after the readings stay below it for `clear_samples` samples. The guard does not
-throttle or stop running work (that would change benchmark measurements); it gates new loads. Limits
-are in DEFAULT_LIMITS, overridable in the rig-local guard.json. The rig runs this whether or not the
-controller (the Pi) is reachable; `rig observe` reports the state for the controller's benefit.
+A level drops only after the readings stay below it for `clear_samples` samples. For power and
+temperature the guard gates new loads only (stopping or throttling running work would change
+benchmark measurements). For memory it also acts: when available RAM reads critical, it stops the
+llama runtime holding the most host RAM, at most once per cooldown. On 2026-10-17 RAM filled with
+nothing freeing it (earlyoom had been disarmed by extra swap) and the rig hung until a hard reset;
+losing one runtime is the better outcome. Limits are in DEFAULT_LIMITS, overridable in the
+rig-local guard.json. The rig runs this whether or not the controller (the Pi) is reachable;
+`rig observe` reports the state for the controller's benefit.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -34,7 +39,7 @@ from pathlib import Path
 
 LOCAL = Path(__file__).resolve().parents[2]
 HW_DIR = LOCAL / "brain" / "hw"
-STATE_PATH = HW_DIR / "guard_state.json"
+STATE_PATH = Path(os.getenv("RIG_GUARD_STATE", str(HW_DIR / "guard_state.json")))
 EVENTS_PATH = HW_DIR / "guard_events.log"
 LIMITS_PATH = HW_DIR / "guard.json"
 sys.path.insert(0, str(LOCAL / "scripts"))
@@ -52,6 +57,8 @@ DEFAULT_LIMITS = {
     "gpu_temp_c": {"warn": 83, "critical": 90},
     "cpu_package_c": {"warn": 90, "critical": 95},
     "mem_available_mb": {"warn": 4096, "critical": 2048},   # lower is worse
+    "memory_action": "stop_largest_runtime",   # or "hold_only"
+    "memory_action_cooldown_s": 60,            # let RAM recover before stopping another runtime
 }
 LEVELS = ("ok", "warn", "critical")
 
@@ -180,6 +187,51 @@ class Evaluator:
         return self.level, reasons
 
 
+# ------------------------------------------------------------------ memory action
+
+def memory_action_due(sample: dict, limits: dict, last_action_ts: float, now: float) -> bool:
+    """Act on the current reading (not the window): RAM is critical right now and the cooldown passed."""
+    mem = sample.get("mem_available_mb")
+    return (limits.get("memory_action") == "stop_largest_runtime" and mem is not None
+            and mem <= limits["mem_available_mb"]["critical"]
+            and now - last_action_ts >= float(limits["memory_action_cooldown_s"]))
+
+
+def runtime_memory() -> list[dict]:
+    """Every llama-server on the rig, largest host RAM (anonymous + swap) first, with its container."""
+    found = []
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            if (proc / "comm").read_text().strip() != "llama-server":
+                continue
+            status, cgroup = (proc / "status").read_text(), (proc / "cgroup").read_text()
+        except OSError:
+            continue
+
+        def kb(key: str) -> int:
+            m = re.search(rf"^{key}:\s+(\d+)", status, re.M)
+            return int(m.group(1)) if m else 0
+
+        cid = re.search(r"docker-([0-9a-f]{12,64})\.scope|/docker/([0-9a-f]{12,64})", cgroup)
+        found.append({"pid": int(proc.name), "host_mb": (kb("RssAnon") + kb("VmSwap")) // 1024,
+                      "container": (cid.group(1) or cid.group(2)) if cid else None})
+    return sorted(found, key=lambda r: -r["host_mb"])
+
+
+def stop_largest_runtime() -> str:
+    candidates = [r for r in runtime_memory() if r["container"]]
+    if not candidates:
+        return "no llama runtime container to stop"
+    target = candidates[0]
+    name = subprocess.run(["docker", "inspect", "-f", "{{.Name}}", target["container"]],
+                          capture_output=True, text=True, timeout=15).stdout.strip().lstrip("/")
+    proc = subprocess.run(["docker", "stop", "-t", "5", target["container"]],
+                          capture_output=True, text=True, timeout=60)
+    others = ", ".join(f"{r['pid']}:{r['host_mb']}MB" for r in candidates[1:]) or "none"
+    result = "stopped" if proc.returncode == 0 else f"FAILED to stop ({proc.stderr.strip()[:200]})"
+    return f"{result} {name or target['container'][:12]} (pid {target['pid']}, {target['host_mb']} MB host RAM); others: {others}"
+
+
 # ------------------------------------------------------------------ state and admission
 
 def read_state(path: Path = STATE_PATH) -> dict | None:
@@ -204,10 +256,18 @@ def admission(limits: dict | None = None, state_path: Path = STATE_PATH) -> tupl
 def run(limits: dict) -> int:
     ev = Evaluator(limits)
     since, last = _now(), None
+    last_action_ts, last_action = 0.0, None
     while True:
         started = time.time()
         sample = take_sample()
         level, reasons = ev.push(sample)
+        if memory_action_due(sample, limits, last_action_ts, started):
+            last_action_ts = started
+            last_action = f"{_now()} {stop_largest_runtime()}"
+            HW_DIR.mkdir(parents=True, exist_ok=True)
+            with EVENTS_PATH.open("a", encoding="utf-8") as fh:
+                fh.write(f"{last_action} [available memory {sample.get('mem_available_mb')} MB]\n")
+                fh.write(process_snapshot() + "\n\n")
         if level != last:
             since = _now()
             HW_DIR.mkdir(parents=True, exist_ok=True)
@@ -217,6 +277,7 @@ def run(limits: dict) -> int:
                     fh.write(process_snapshot() + "\n\n")
             last = level
         _write_json(STATE_PATH, {"level": level, "since": since, "reasons": reasons, "sample": sample,
+                                 "last_memory_action": last_action,
                                  "updated_at": _now(), "updated_ts": time.time(),
                                  "limits": {k: v for k, v in limits.items() if isinstance(v, dict)}})
         time.sleep(max(0.2, float(limits["interval_s"]) - (time.time() - started)))

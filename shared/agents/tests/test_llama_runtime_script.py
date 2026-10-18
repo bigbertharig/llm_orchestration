@@ -13,7 +13,7 @@ SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "llama_runtime" / "ru
 
 
 class LlamaRuntimeScriptTests(unittest.TestCase):
-    def _dry_run(self, gpus: str) -> str:
+    def _dry_run(self, gpus: str, *extra: str) -> str:
         with tempfile.TemporaryDirectory() as tmpdir:
             model = Path(tmpdir) / "model.gguf"
             model.write_text("stub", encoding="utf-8")
@@ -30,6 +30,7 @@ class LlamaRuntimeScriptTests(unittest.TestCase):
                     "--gpus",
                     gpus,
                     "--dry-run",
+                    *extra,
                 ],
                 capture_output=True,
                 text=True,
@@ -53,6 +54,19 @@ class LlamaRuntimeScriptTests(unittest.TestCase):
                                   capture_output=True, text=True, check=True).stdout.strip()
         out = self._dry_run("device=2")
         self.assertIn(expected, out)
+
+    def test_host_prompt_cache_is_off_by_default(self):
+        self.assertIn("--cache-ram 0", self._dry_run("device=2"))
+
+    def test_caller_sets_the_host_prompt_cache(self):
+        out = self._dry_run("device=2", "--cache-ram", "2048")
+        self.assertIn("--cache-ram 2048", out)
+        self.assertNotIn("--cache-ram 0", out)
+
+    def test_cache_in_extra_args_wins_over_the_floor(self):
+        out = self._dry_run("device=2", "--extra-arg", "--cache-ram", "--extra-arg", "512")
+        self.assertEqual(out.count("--cache-ram"), 1)
+        self.assertIn("--cache-ram 512", out)
 
 
 if __name__ == "__main__":

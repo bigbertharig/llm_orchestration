@@ -86,5 +86,19 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(hw_guard.admission(closed, self.path)[:2], (False, "unknown"))
 
 
+class MemoryActionTests(unittest.TestCase):
+    def test_acts_on_critical_memory_once_per_cooldown(self):
+        now = 1000.0
+        self.assertTrue(hw_guard.memory_action_due(sample(mem=1500), LIMITS, 0.0, now))
+        self.assertFalse(hw_guard.memory_action_due(sample(mem=1500), LIMITS, now - 30, now))
+        self.assertTrue(hw_guard.memory_action_due(sample(mem=1500), LIMITS, now - 61, now))
+
+    def test_warn_memory_or_hold_only_does_not_act(self):
+        self.assertFalse(hw_guard.memory_action_due(sample(mem=3000), LIMITS, 0.0, 1000.0))
+        hold = {**LIMITS, "memory_action": "hold_only"}
+        self.assertFalse(hw_guard.memory_action_due(sample(mem=1500), hold, 0.0, 1000.0))
+        self.assertFalse(hw_guard.memory_action_due({"mem_available_mb": None}, LIMITS, 0.0, 1000.0))
+
+
 if __name__ == "__main__":
     unittest.main()

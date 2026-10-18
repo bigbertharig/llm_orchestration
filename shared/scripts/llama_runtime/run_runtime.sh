@@ -26,6 +26,8 @@ Optional:
   --memory-limit SIZE         Docker --memory limit (e.g. 10g). Default: none (unlimited)
   --memory-swap SIZE          Docker --memory-swap limit (e.g. 12g). Default: none
   --extra-arg ARG             Repeatable extra llama-server arg
+  --cache-ram MIB             llama-server host prompt cache. Default: 0 (off; see below)
+  --lease LEASE_ID            Rig lease this runtime runs under (audited, see below)
   --dry-run                   Print command only
 
 Sequential loading (rig rule, not optional):
@@ -39,6 +41,21 @@ Sequential loading (rig rule, not optional):
   LLAMA_LOAD_LOCK_WAIT_S      Max wait for the lock. Default: 3600
   LLAMA_LOAD_READY_TIMEOUT_S  Max wait for this model, and for others to finish loading. Default: 900
   LLAMA_LOAD_SETTLE_S         Hold the lock this long after ready. Default: 5
+
+Rig guard (scripts/rig/hw_guard.py, rig-guard.service):
+  With the lock held, the load waits until the guard reads ok (power, temperature, memory), up to
+  LLAMA_GUARD_WAIT_S (default 600), and is refused (exit 75) if it does not. A guard that is not
+  running admits with a warning. LLAMA_GUARD=off skips the check (emergencies only).
+
+Host prompt cache:
+  llama-server keeps up to 8192 MiB of past prompt state in system RAM by default, per server.
+  System RAM is the rig's scarce resource (2026-10-17: five default caches filled 32 GB and hung
+  the rig), so the floor here is 0. The harness picks a cache per use and passes --cache-ram.
+  A --cache-ram given through --extra-arg also wins.
+
+Lease audit:
+  Every load is logged to brain/hw/lease_audit.log (rig-local) with its lease, or "no-lease", and
+  whether the lease holds these GPUs and this port. Audit only for now; nothing is refused.
 
 Example:
   run_runtime.sh \
@@ -66,7 +83,16 @@ TENSOR_SPLIT=""
 MEMORY_LIMIT=""
 MEMORY_SWAP=""
 DRY_RUN=0
+CACHE_RAM_MIB="${LLAMA_CACHE_RAM_MIB:-0}"
+LEASE=""
 EXTRA_ARGS=()
+TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+GUARD_SCRIPT="${TREE}/scripts/rig/hw_guard.py"
+GUARD_PYTHON="${LLAMA_GUARD_PYTHON:-/home/bryan/llm-orchestration-venv/bin/python}"
+[ -x "${GUARD_PYTHON}" ] || GUARD_PYTHON="python3"
+GUARD_WAIT_S="${LLAMA_GUARD_WAIT_S:-600}"
+LEASE_RECORD="${LLAMA_LEASE_RECORD:-${TREE}/brain/hw/gpus/leases.json}"
+LEASE_AUDIT_LOG="${LLAMA_LEASE_AUDIT_LOG:-${TREE}/brain/hw/lease_audit.log}"
 GPU_DOCKER_ARGS=()
 LLAMA_VISIBLE_DEVICES=()
 DOCKER_BIN="${DOCKER_BIN:-docker}"
@@ -95,6 +121,8 @@ while [ $# -gt 0 ]; do
     --memory-limit) MEMORY_LIMIT="${2:?}"; shift 2 ;;
     --memory-swap) MEMORY_SWAP="${2:?}"; shift 2 ;;
     --extra-arg) EXTRA_ARGS+=("${2:?}"); shift 2 ;;
+    --cache-ram) CACHE_RAM_MIB="${2:?}"; shift 2 ;;
+    --lease) LEASE="${2:?}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage >&2; exit 64 ;;
@@ -207,6 +235,18 @@ if [ -n "${TENSOR_SPLIT}" ]; then
   CMD+=(--tensor-split "${TENSOR_SPLIT}")
 fi
 
+if ! [[ "${CACHE_RAM_MIB}" =~ ^-?[0-9]+$ ]]; then
+  echo "--cache-ram must be an integer MiB: ${CACHE_RAM_MIB}" >&2
+  exit 64
+fi
+cache_in_extra=0
+for arg in "${EXTRA_ARGS[@]}"; do
+  case "${arg}" in --cache-ram|-cram|--cache-ram=*) cache_in_extra=1 ;; esac
+done
+if [ "${cache_in_extra}" -eq 0 ]; then
+  CMD+=(--cache-ram "${CACHE_RAM_MIB}")
+fi
+
 if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
@@ -266,6 +306,47 @@ if ! flock -w "${LOAD_LOCK_WAIT_S}" 9; then
   exit 75
 fi
 wait_for_other_loads || exit 75
+
+# Rig guard: a new load adds power, heat and memory. Checked with the lock held, so it sees the
+# rig after the previous load settled.
+if [ "${LLAMA_GUARD:-on}" != "off" ]; then
+  if ! "${GUARD_PYTHON}" "${GUARD_SCRIPT}" admit --wait "${GUARD_WAIT_S}"; then
+    log "rig guard did not admit this load; not starting it"
+    exit 75
+  fi
+fi
+
+# Lease audit (audit only): which lease this load runs under and whether it holds its GPUs and port.
+audit_lease() {
+  local verdict
+  verdict="$(LEASE="${LEASE}" GPUS="${GPUS}" PORT="${PORT}" python3 - "${LEASE_RECORD}" <<'PY' 2>/dev/null || echo "audit-error"
+import json, os, sys
+lease_id = os.environ["LEASE"]
+if not lease_id:
+    print("no-lease"); sys.exit()
+try:
+    leases = json.load(open(sys.argv[1]))["leases"]
+except Exception:
+    print("record-unreadable"); sys.exit()
+lease = next((l for l in leases if l.get("lease_id") == lease_id), None)
+if lease is None:
+    print("unknown-lease"); sys.exit()
+spec = os.environ["GPUS"].removeprefix("device=")
+gpus = {int(g) for g in spec.split(",") if g.strip().isdigit()}
+problems = []
+if not gpus <= set(lease.get("gpu_ids", [])):
+    problems.append(f"gpus {sorted(gpus)} not in lease {lease.get('gpu_ids')}")
+if int(os.environ["PORT"]) not in lease.get("ports", []):
+    problems.append(f"port {os.environ['PORT']} not in lease {lease.get('ports')}")
+print("ok" if not problems else "mismatch: " + "; ".join(problems))
+PY
+)"
+  mkdir -p "$(dirname "${LEASE_AUDIT_LOG}")" 2>/dev/null || true
+  printf '%s name=%s gpus=%s port=%s lease=%s %s\n' "$(date -Iseconds)" "${NAME}" "${GPUS}" "${PORT}" \
+    "${LEASE:-none}" "${verdict}" >> "${LEASE_AUDIT_LOG}" 2>/dev/null || true
+  log "lease audit: ${verdict}"
+}
+audit_lease
 
 # Containers share the host network, so a server already on this port would answer this
 # load's readiness probe and its requests. Refuse instead of serving the wrong model.

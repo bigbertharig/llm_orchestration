@@ -101,15 +101,18 @@ class RuntimeLoadLockTests(unittest.TestCase):
             LLAMA_LOAD_LOCK=str(self.tmp / "load.lock"),
             LLAMA_LOAD_SETTLE_S="0",
             LLAMA_LOAD_READY_TIMEOUT_S="20",
+            LLAMA_GUARD="off",
+            LLAMA_LEASE_AUDIT_LOG=str(self.tmp / "lease_audit.log"),
+            LLAMA_LEASE_RECORD=str(self.tmp / "leases.json"),
         )
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _launch(self, name: str, port: int) -> subprocess.Popen:
+    def _launch(self, name: str, port: int, *extra: str) -> subprocess.Popen:
         return subprocess.Popen(
             ["bash", str(SCRIPT), "--name", name, "--model", str(self.model),
-             "--port", str(port), "--gpus", "device=1", "--image", "llama-runtime:test"],
+             "--port", str(port), "--gpus", "device=1", "--image", "llama-runtime:test", *extra],
             env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
 
@@ -178,6 +181,42 @@ class RuntimeLoadLockTests(unittest.TestCase):
         kinds = [kind for _ts, kind, name in self._events() if name == "rt-e"]
         self.assertEqual(kinds[0], "start")
         self.assertIn("removed", kinds)
+
+    def _guard_state(self, level: str, age_s: float = 0.0) -> None:
+        import json
+        state = self.tmp / "guard_state.json"
+        state.write_text(json.dumps({"level": level, "reasons": [f"test {level}"],
+                                     "updated_ts": time.time() - age_s}), encoding="utf-8")
+        self.env.update(LLAMA_GUARD="on", RIG_GUARD_STATE=str(state), LLAMA_GUARD_WAIT_S="1")
+
+    def test_guard_critical_refuses_the_load_before_any_container_starts(self):
+        self._guard_state("critical")
+        proc = self._launch("rt-g", 18020)
+        _out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 75, err)
+        self.assertIn("not admitted", err)
+        self.assertFalse((self.state / "events").exists())
+
+    def test_guard_ok_admits_the_load(self):
+        self._guard_state("ok")
+        proc = self._launch("rt-h", 18021)
+        _out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, err)
+
+    def test_lease_audit_records_every_load(self):
+        import json
+        (self.tmp / "leases.json").write_text(json.dumps({"leases": [
+            {"lease_id": "lease-a", "gpu_ids": [1], "ports": [18022]}]}), encoding="utf-8")
+        for name, port, extra in (("rt-i", 18022, ("--lease", "lease-a")), ("rt-j", 18023, ()),
+                                  ("rt-k", 18024, ("--lease", "lease-a")), ("rt-l", 18025, ("--lease", "nope"))):
+            proc = self._launch(name, port, *extra)
+            _out, err = proc.communicate(timeout=30)
+            self.assertEqual(proc.returncode, 0, err)  # audit only: nothing is refused
+        lines = (self.tmp / "lease_audit.log").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(lines[0].endswith("lease=lease-a ok"), lines[0])
+        self.assertTrue(lines[1].endswith("lease=none no-lease"), lines[1])
+        self.assertIn("mismatch: port 18024 not in lease", lines[2])
+        self.assertTrue(lines[3].endswith("unknown-lease"), lines[3])
 
 
 if __name__ == "__main__":
