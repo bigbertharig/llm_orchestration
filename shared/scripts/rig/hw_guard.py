@@ -38,7 +38,10 @@ from datetime import datetime
 from pathlib import Path
 
 LOCAL = Path(__file__).resolve().parents[2]
-HW_DIR = LOCAL / "brain" / "hw"
+# The rig's hardware state lives in one rig-local place, whichever copy of this file runs (the rig
+# checkout, or the shared drive's copy that run_runtime.sh callers use). RIG_HW_DIR overrides.
+_RIG_LOCAL_HW = Path("/home/bryan/llm_orchestration/shared/brain/hw")
+HW_DIR = Path(os.getenv("RIG_HW_DIR") or (_RIG_LOCAL_HW if _RIG_LOCAL_HW.is_dir() else LOCAL / "brain" / "hw"))
 STATE_PATH = Path(os.getenv("RIG_GUARD_STATE", str(HW_DIR / "guard_state.json")))
 EVENTS_PATH = HW_DIR / "guard_events.log"
 LIMITS_PATH = HW_DIR / "guard.json"

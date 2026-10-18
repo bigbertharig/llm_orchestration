@@ -54,8 +54,9 @@ Host prompt cache:
   A --cache-ram given through --extra-arg also wins.
 
 Lease audit:
-  Every load is logged to brain/hw/lease_audit.log (rig-local) with its lease, or "no-lease", and
+  Every load is logged to <RIG_HW_DIR>/lease_audit.log with its lease, or "no-lease", and
   whether the lease holds these GPUs and this port. Audit only for now; nothing is refused.
+  RIG_HW_DIR (rig hardware state) defaults to the rig-local /home/bryan/llm_orchestration/shared/brain/hw.
 
 Example:
   run_runtime.sh \
@@ -91,8 +92,15 @@ GUARD_SCRIPT="${TREE}/scripts/rig/hw_guard.py"
 GUARD_PYTHON="${LLAMA_GUARD_PYTHON:-/home/bryan/llm-orchestration-venv/bin/python}"
 [ -x "${GUARD_PYTHON}" ] || GUARD_PYTHON="python3"
 GUARD_WAIT_S="${LLAMA_GUARD_WAIT_S:-600}"
-LEASE_RECORD="${LLAMA_LEASE_RECORD:-${TREE}/brain/hw/gpus/leases.json}"
-LEASE_AUDIT_LOG="${LLAMA_LEASE_AUDIT_LOG:-${TREE}/brain/hw/lease_audit.log}"
+# The rig's hardware state (guard, lease record, audit) lives in one rig-local place, whichever copy
+# of this script runs (rig checkout, or the shared drive's copy that lanes and the stack use).
+if [ -z "${RIG_HW_DIR:-}" ]; then
+  RIG_HW_DIR="/home/bryan/llm_orchestration/shared/brain/hw"
+  [ -d "${RIG_HW_DIR}" ] || RIG_HW_DIR="${TREE}/brain/hw"
+fi
+export RIG_HW_DIR
+LEASE_RECORD="${LLAMA_LEASE_RECORD:-${RIG_HW_DIR}/gpus/leases.json}"
+LEASE_AUDIT_LOG="${LLAMA_LEASE_AUDIT_LOG:-${RIG_HW_DIR}/lease_audit.log}"
 GPU_DOCKER_ARGS=()
 LLAMA_VISIBLE_DEVICES=()
 DOCKER_BIN="${DOCKER_BIN:-docker}"
