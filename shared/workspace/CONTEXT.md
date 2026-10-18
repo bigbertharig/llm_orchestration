@@ -136,6 +136,11 @@ ssh 10.0.0.3 rig stop                  # back to idle
   resolved against `model_registry.json` into `~/llm-gateway/remote_profiles.json`, which `rig` reads via
   `scripts/rig/remote_profiles.py`. Change a model's settings in the registry, then re-run the generator.
 - State: `brain/rig_mode.json`. Code: `shared/scripts/rig/rig.py`. Design: `workspace/implement/rig_boot_modes.md`.
+- Rig hardware layer (2026-10-17): `shared/scripts/rig/README.md`. The controller is llm-gateway's rig manager on
+  the Pi (`~/llm-gateway/docs/MANAGER.md`); the rig keeps the GPU lease/claim record (`rig lease`, `rig claim`,
+  rig-local `brain/hw/gpus/`, mirrored to `/mnt/shared/gpus/`), runs loads as detached jobs, and enforces the
+  hardware rules: `rig-guard.service` (power/thermal/RAM; gates every load in `run_runtime.sh`, frees RAM at
+  critical), one load at a time, host prompt cache off unless the caller sets `--cache-ram`, lease audit.
 - Loading benchmark models while in bench mode: `start_custom_mode.py --models ... --skip-benchmark-start`.
   Without `--skip-benchmark-start` the old wrapper restarts the stack outside systemd.
   `start_plan_mode.py` / `start_benchmark_mode.py` are superseded by `rig start`.
