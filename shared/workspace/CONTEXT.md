@@ -127,8 +127,9 @@ ssh 10.0.0.3 rig stop                  # back to idle
 - `start` refuses (exit 2) if another mode is running and reports who started it and when.
 - Remote is additive: `rig start remote <id>` places the profile on free GPUs matching its
   `gpus_needed` (exit 4 if none fit); `rig stop <id>` unloads one. `rig status --json` for scripts.
-- `rig-gateway.service` (repo `~/llm-gateway`, rig 127.0.0.1:8080) serves `gpu-rig/<profile>` over the
-  OpenAI API and loads profiles on first request. Deploy: `~/llm-gateway/deploy/deploy_rig.sh` from the Pi.
+- llm-gateway (Pi `~/llm-gateway`, `pi-gateway.service` on Pi 127.0.0.1:8080) serves `gpu-rig/<profile>` over
+  the OpenAI API and loads profiles on first request (`rig start remote` over ssh; rig ports reach the Pi
+  through `pi-rig-tunnel.service`). Deploy: `~/llm-gateway/deploy/deploy_pi.sh` on the Pi.
 - Stack modes run under systemd (`llm-orchestration.service` / `llm-bench.service`).
   Never start `startup.py` by hand.
 - Remote profiles: llm-gateway owns the offer (`OFFER` in `~/llm-gateway/tools/generate_profiles.py`),

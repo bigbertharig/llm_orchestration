@@ -367,6 +367,9 @@ def published_profiles() -> dict[str, dict]:
 def place_profile(profile: dict, free_gpus: list[dict]) -> list[int] | None:
     """Pick one free GPU per requirement, smallest card that fits first (keeps big cards free).
 
+    A requirement is {"min_vram_mb": N} and optionally {"max_vram_mb": M}, which keeps a profile
+    meant for small cards (the 1060s) off the 3090 even when the 3090 is free.
+
     Returns GPU indexes in requirement order (that order matches tensor_split), or None.
     """
     reqs = list(enumerate(profile["gpus_needed"]))
@@ -374,7 +377,8 @@ def place_profile(profile: dict, free_gpus: list[dict]) -> list[int] | None:
     pool = sorted(free_gpus, key=lambda g: (g["total_mb"], g["index"]))
     chosen: dict[int, int] = {}
     for pos, req in reqs:
-        fit = next((g for g in pool if g["total_mb"] >= int(req["min_vram_mb"])), None)
+        fit = next((g for g in pool if g["total_mb"] >= int(req["min_vram_mb"])
+                    and g["total_mb"] <= int(req.get("max_vram_mb", g["total_mb"]))), None)
         if fit is None:
             return None
         chosen[pos] = fit["index"]
@@ -453,10 +457,11 @@ def claim_remote(requested: list[str], force: bool) -> tuple[list[str], int | No
         gpus = place_profile(profiles[pid], free)
         port = next((p for p in REMOTE_PORTS if p not in used_ports and not served_model(p)), None)
         if gpus is None or port is None:
-            need = ", ".join(f"{r['min_vram_mb']}MB" for r in profiles[pid]["gpus_needed"])
+            need = ", ".join(f"{r['min_vram_mb']}-{r['max_vram_mb']}MB" if "max_vram_mb" in r
+                             else f">={r['min_vram_mb']}MB" for r in profiles[pid]["gpus_needed"])
             free_desc = ", ".join(f"GPU{x['index']} {x['total_mb']}MB" for x in free) or "none"
             raise RigError(
-                f"no capacity for {pid} (needs GPUs >= [{need}]; free: {free_desc}). "
+                f"no capacity for {pid} (needs GPUs [{need}]; free: {free_desc}). "
                 f"loaded: {remote_loaded_summary(st)}. Unload with `rig stop <profile>`.",
                 EXIT_NO_CAPACITY,
             )
