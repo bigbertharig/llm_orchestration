@@ -10,8 +10,9 @@ hardware. It keeps working when the controller or the network is gone.
 | `hw_jobs.py` | detached jobs: a load runs as its own systemd unit (`rig-load-<id>`), never on an ssh session |
 | `hw_state.py` | the GPU lease and claim record (rig-local `shared/brain/hw/gpus/`), mirrored to the drive |
 | `hw_guard.py` | always-on power, thermal and memory guard (`rig-guard.service`) and load admission |
+| `hw_plan.py` | the active controller and the plan queue (rig-local `brain/hw/plan.json`); `rig-plan.service` works through it |
 | `remote_profiles.py` | reads the profiles llm-gateway offers (`~/llm-gateway/remote_profiles.json`) |
-| `systemd/` | units: `rig-boot`, `rig-guard`, the stack modes; `earlyoom.default` (tracked `/etc/default/earlyoom`) |
+| `systemd/` | units: `rig-boot`, `rig-guard`, `rig-plan`, the stack modes; `earlyoom.default` (tracked `/etc/default/earlyoom`) |
 
 `../llama_runtime/run_runtime.sh` is the one path every model load takes (brain, workers, split
 workers, `rig.py`, campaigns, benchmark lanes, runtime smoke). It holds the rig rules for a load:
@@ -20,6 +21,16 @@ workers, `rig.py`, campaigns, benchmark lanes, runtime smoke). It holds the rig 
 2. the guard must read ok (`hw_guard.py admit`), checked with the lock held;
 3. host prompt cache off unless the caller asks (`--cache-ram`, floor 0);
 4. every load is logged with its lease, or `no-lease`, in `brain/hw/lease_audit.log` (audit only).
+
+## Controller and plan
+
+`rig observe` is the single report a controller reads: what the rig is doing now (GPUs, containers,
+profiles, leases, guard) and next (`plan`: the active controller and the queue). One controller is
+active at a time (`rig controller claim --id ID`); it heartbeats, and the rig refuses plan, lease
+and claim writes from any other controller. Another controller takes over when the heartbeat is
+older than 120 s (crashed) or by handoff (`--force`). `rig-plan.service` works through the queued
+items one at a time, in order (`load`, `unload`), then waits; loaded models stay loaded unless an
+item unloads them, and it keeps going with no controller connected. `rig plan show` lists the queue.
 
 ## Monitoring
 
