@@ -541,11 +541,17 @@ def claim_remote(requested: list[str], force: bool,
     for pid, gpus, port in plan:
         p = profiles[pid]
         say(f"  loading {pid} ({p['model']}) on GPU {gpus} -> :{port}")
-        container = launch_profile(p, gpus, port)
+        # Recorded before the launch: run_runtime.sh waits for the rig load lock and returns only once
+        # the model serves, and observers (the Pi manager) need to see the load while it waits.
         loaded[pid] = {"model": p["model"], "port": port, "gpus": gpus, "ctx_size": p["ctx_size"],
-                       "state": "loading", "container": container, "since": now_iso(), "from": caller(),
-                       "lease": (placement or {}).get("lease")}
-        save_state(refresh_remote_status(st))  # per launch, so a later launch failure can't orphan it
+                       "state": "loading", "container": REMOTE_CONTAINER_PREFIX + pid, "since": now_iso(),
+                       "from": caller(), "lease": (placement or {}).get("lease")}
+        save_state(refresh_remote_status(st))
+        try:
+            launch_profile(p, gpus, port)
+        except Exception:
+            drop_remote_profile(st, pid, error=f"{pid}: launch failed")
+            raise
     if loaded:
         save_state(refresh_remote_status(st))
     return wanted, None
