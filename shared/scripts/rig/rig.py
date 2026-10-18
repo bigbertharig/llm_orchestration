@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hw_jobs  # noqa: E402  (rig-side detached jobs, beside this file)
 import hw_state  # noqa: E402  (rig-side lease and claim record, beside this file)
 import hw_guard  # noqa: E402  (rig-side power/thermal/memory guard and load admission, beside this file)
+import hw_plan  # noqa: E402  (active controller + queue of what to do next; rig-plan.service works through it)
 
 LOCAL = Path(__file__).resolve().parents[2]
 # Network storage (shared drive, later a NAS). Only the orchestration/bench stacks, the control
@@ -787,12 +788,18 @@ def emit(payload: dict, code: int = 0) -> int:
     return code
 
 
+def open_plan() -> hw_plan.Plan:
+    return hw_plan.Plan(HW_STATE_ROOT)
+
+
 def cmd_lease(args) -> int:
-    """Lease record for controllers: list | acquire --spec JSON | renew | release. JSON out."""
+    """Lease record for controllers: list | acquire --spec JSON | renew | release. JSON out.
+    Writes need --controller <active controller id> once a controller is registered (hw_plan)."""
     try:
         hs = open_hw_state()
         if args.action == "list":
             return emit({"leases": hs.leases(), "claims": hs.claims()})
+        open_plan().require_active(args.controller)
         if args.action == "acquire":
             try:
                 spec = json.loads(args.spec or "")
@@ -807,7 +814,7 @@ def cmd_lease(args) -> int:
             return emit({"lease": hs.renew(args.lease_id, args.owner, args.ttl)})
         hs.release(args.lease_id, args.owner, args.force)
         return emit({"released": args.lease_id})
-    except hw_state.StateError as exc:
+    except (hw_state.StateError, hw_plan.PlanError) as exc:
         return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
 
 
@@ -817,6 +824,7 @@ def cmd_claim(args) -> int:
         hs = open_hw_state()
         if args.action == "list":
             return emit({"claims": hs.claims()})
+        open_plan().require_active(args.controller)
         if args.action == "add":
             gpus = [int(g) for g in args.gpus.split(",")]
             unknown = sorted(set(gpus) - set(expected_gpu_ids()))
@@ -824,7 +832,88 @@ def cmd_claim(args) -> int:
                 raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {expected_gpu_ids()}")
             return emit({"claim": hs.add_claim(args.name, gpus, args.note, args.by or caller())})
         return emit({"released": hs.remove_claim(args.name)})
-    except hw_state.StateError as exc:
+    except (hw_state.StateError, hw_plan.PlanError) as exc:
+        return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
+
+
+def cmd_controller(args) -> int:
+    """The active controller: show | claim --id ID [--force] | heartbeat --id ID | release --id ID."""
+    plan = open_plan()
+    try:
+        if args.action == "show":
+            return emit({"controller": plan.report()["controller"]})
+        if args.action == "claim":
+            return emit({"controller": plan.claim(args.id, caller(), args.force)})
+        if args.action == "heartbeat":
+            return emit({"controller": plan.heartbeat(args.id, caller())})
+        plan.release(args.id)
+        return emit({"released": args.id})
+    except hw_plan.PlanError as exc:
+        return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
+
+
+def run_plan_item(item: dict) -> tuple[bool, str]:
+    """Carry out one plan item with the existing rig commands. Blocking; the executor runs one at a time."""
+    a = item["args"]
+    pid = str(a["profile"])
+    me = [sys.executable, str(Path(__file__).resolve())]
+    env = {**os.environ, "RIG_CALLER": f"plan:{item.get('added_by')}"}
+    if item["kind"] == "load":
+        cmd = [*me, "start", "remote", pid, "--queue"]
+        if a.get("gpus") is not None:
+            cmd += ["--gpus", ",".join(str(g) for g in a["gpus"]), "--port", str(a["port"])]
+        if a.get("lease"):
+            cmd += ["--lease", str(a["lease"])]
+        if a.get("cache_ram") is not None:
+            cmd += ["--cache-ram", str(int(a["cache_ram"]))]
+    else:
+        cmd = [*me, "stop", pid]
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    out = (proc.stdout + proc.stderr).strip()
+    if item["kind"] == "unload" and proc.returncode != 0 and "not loaded" in out:
+        return True, f"{pid} was not loaded"
+    return proc.returncode == 0, out
+
+
+def cmd_plan(args) -> int:
+    """The plan queue: show [--json] | add --controller ID --kind K --args JSON | cancel ITEM --controller ID
+    | run (rig-plan.service: work through queued items one at a time, then wait)."""
+    plan = open_plan()
+    if args.action == "run":
+        for item_id in plan.recover():
+            say(f"plan: {item_id} was running when the executor stopped; marked failed")
+        say("plan executor: waiting for queued items")
+        while True:
+            item = plan.take_next()
+            if item is None:
+                time.sleep(3)
+                continue
+            say(f"plan: {item['id']} {item['kind']} {json.dumps(item['args'])}")
+            try:
+                ok, out = run_plan_item(item)
+            except Exception as exc:  # keep the executor alive; the item records why it failed
+                ok, out = False, f"{type(exc).__name__}: {exc}"
+            plan.finish(item["id"], ok, out)
+            say(f"plan: {item['id']} {'done' if ok else 'FAILED'}")
+    try:
+        if args.action == "show":
+            rep = plan.report()
+            if args.json:
+                return emit(rep)
+            c = rep["controller"]
+            say(f"controller: {c['id']} ({c['host']}) since {c['since']}, heartbeat {c['heartbeat_at']}"
+                + (" STALE" if c["stale"] else "") if c else "controller: none")
+            for i in rep["items"][-15:]:
+                say(f"  {i['id']:<20} {i['state']:<9} {i['kind']:<6} {json.dumps(i['args'])}")
+            return 0
+        if args.action == "add":
+            try:
+                item_args = json.loads(args.args or "{}")
+            except ValueError as exc:
+                raise hw_plan.PlanError("invalid", f"--args is not JSON: {exc}") from exc
+            return emit({"item": plan.add(args.controller, args.kind, item_args)})
+        return emit({"item": plan.cancel(args.controller, args.item_id)})
+    except hw_plan.PlanError as exc:
         return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
 
 
@@ -855,8 +944,17 @@ def cmd_observe(_args) -> int:
                      for pid, e in st.get("profiles", {}).items()},
         "jobs": hw_jobs.jobs(),
         "guard": guard_summary(),
+        # "Next": the active controller and the queue the rig is working through (hw_plan).
+        "plan": plan_report_safe(),
     }, indent=2))
     return 0
+
+
+def plan_report_safe() -> dict:
+    try:
+        return open_plan().report()
+    except (hw_plan.PlanError, OSError, ValueError) as exc:
+        return {"controller": None, "items": [], "next": [], "error": str(exc)}
 
 
 def cmd_why(args) -> int:
@@ -951,17 +1049,21 @@ def main() -> int:
     s = sub.add_parser("lease", help="GPU lease record (controllers): list | acquire | renew | release")
     la = s.add_subparsers(dest="action", required=True)
     la.add_parser("list")
+    ctl_help = "active controller id (required once a controller is registered: rig controller claim)"
     x = la.add_parser("acquire")
     x.add_argument("--spec", required=True,
                    help='JSON: {controller, owner, run_id, gpu_ids, ports, ttl_s, lane, metadata}')
+    x.add_argument("--controller", help=ctl_help)
     x = la.add_parser("renew")
     x.add_argument("lease_id")
     x.add_argument("--owner", required=True)
     x.add_argument("--ttl", type=int, default=120)
+    x.add_argument("--controller", help=ctl_help)
     x = la.add_parser("release")
     x.add_argument("lease_id")
     x.add_argument("--owner", default="")
     x.add_argument("--force", action="store_true")
+    x.add_argument("--controller", help=ctl_help)
     s.set_defaults(fn=cmd_lease)
     s = sub.add_parser("claim", help="take cards out of the shared pool: list | add | remove")
     ca = s.add_subparsers(dest="action", required=True)
@@ -971,9 +1073,33 @@ def main() -> int:
     x.add_argument("--gpus", required=True)
     x.add_argument("--note", default="")
     x.add_argument("--by", default="")
+    x.add_argument("--controller", help=ctl_help)
     x = ca.add_parser("remove")
     x.add_argument("name")
+    x.add_argument("--controller", help=ctl_help)
     s.set_defaults(fn=cmd_claim)
+    s = sub.add_parser("controller", help="the active controller: show | claim | heartbeat | release")
+    co = s.add_subparsers(dest="action", required=True)
+    co.add_parser("show")
+    for name in ("claim", "heartbeat", "release"):
+        x = co.add_parser(name)
+        x.add_argument("--id", required=True, help="controller id, e.g. pi or desktop")
+        if name == "claim":
+            x.add_argument("--force", action="store_true", help="handoff: take over from an active controller")
+    s.set_defaults(fn=cmd_controller)
+    s = sub.add_parser("plan", help="queue of what to do next: show | add | cancel | run (rig-plan.service)")
+    pa = s.add_subparsers(dest="action", required=True)
+    x = pa.add_parser("show")
+    x.add_argument("--json", action="store_true")
+    x = pa.add_parser("add")
+    x.add_argument("--controller", required=True)
+    x.add_argument("--kind", required=True, choices=hw_plan.KINDS)
+    x.add_argument("--args", required=True, help='JSON, e.g. {"profile": "coder-7b", "gpus": [1], "port": 11435}')
+    x = pa.add_parser("cancel")
+    x.add_argument("item_id")
+    x.add_argument("--controller", required=True)
+    pa.add_parser("run")
+    s.set_defaults(fn=cmd_plan)
     s = sub.add_parser("stop")
     s.add_argument("profiles", nargs="*", help="remote profile ids to unload (default: stop everything)")
     s.set_defaults(fn=cmd_stop)

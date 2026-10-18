@@ -1,0 +1,20 @@
+# Rig plan executor (scripts/rig/hw_plan.py, `rig plan run`): works through the queued plan items one
+# at a time (loads, unloads), then waits. Rig-side and independent of the controller; it keeps working
+# when no controller is connected. Loaded models stay loaded unless an item unloads them.
+# Install: sudo install -m 644 rig-plan.service /etc/systemd/system/ && sudo systemctl enable --now rig-plan
+[Unit]
+Description=Rig plan executor (works through the controller's queue)
+After=network-online.target docker.service rig-guard.service
+Wants=docker.service rig-guard.service
+
+[Service]
+Type=simple
+User=bryan
+Group=bryan
+Environment=HOME=/home/bryan
+ExecStart=/home/bryan/llm-orchestration-venv/bin/python /home/bryan/llm_orchestration/shared/scripts/rig/rig.py plan run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
