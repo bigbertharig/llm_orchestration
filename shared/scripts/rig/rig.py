@@ -84,7 +84,10 @@ class RigError(RuntimeError):
 
 
 def say(msg: str) -> None:
-    print(msg, flush=True)
+    try:
+        print(msg, flush=True)
+    except BrokenPipeError:  # reader went away (`rig status | head`); the command itself carries on
+        sys.stdout = open(os.devnull, "w")
 
 
 def now_iso() -> str:
