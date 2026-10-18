@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hw_jobs  # noqa: E402  (rig-side detached jobs, beside this file)
 import hw_state  # noqa: E402  (rig-side lease and claim record, beside this file)
+import hw_guard  # noqa: E402  (rig-side power/thermal/memory guard and load admission, beside this file)
 
 LOCAL = Path(__file__).resolve().parents[2]
 # Network storage (shared drive, later a NAS). Only the orchestration/bench stacks, the control
@@ -542,6 +543,14 @@ def claim_remote(requested: list[str], force: bool,
         used_ports.add(port)
         plan.append((pid, gpus, port))
 
+    if plan:
+        # Rig guard: a new load adds power, heat and memory; it starts only while the guard reads ok.
+        # EXIT_LOCKED makes a queued (detached) load wait for its turn instead of failing.
+        admitted, level, why = hw_guard.admission()
+        if not admitted:
+            raise RigError(f"guard {level}: load held: {why}", EXIT_LOCKED)
+        if level == "unknown":
+            say(f"  warning: {why}; loading without the guard")
     if entering:
         write_policy(MODE_POLICY["remote"], "rig_start_remote")
     for pid, gpus, port in plan:
@@ -693,11 +702,22 @@ def cmd_status(args) -> int:
         say(f"last error: {s['last_error']}")
     g = s["gpus"]
     say(f"gpus: {g['visible']}/{g['expected']} visible" + (f"  MISSING {g['missing']}" if g["missing"] else ""))
+    gs = guard_summary()
+    say(f"guard: {gs['level']} (loads {'admitted' if gs['loads_admitted'] else 'held'}) {gs['why']}")
     ports = live_ports()
     say("ports: " + (", ".join(f":{p} {m}" for p, m in ports.items()) if ports else "none serving"))
     if s["mode"] == "idle" and (ports or any(unit_active(u) for u in STACK_UNITS.values())):
         say("WARNING: state says idle but something is running; run `rig stop` to clean up")
     return 0
+
+
+def guard_summary() -> dict:
+    admitted, level, why = hw_guard.admission()
+    st = hw_guard.read_state() or {}
+    smp = st.get("sample", {})
+    return {"level": level, "loads_admitted": admitted, "why": why, "since": st.get("since"),
+            "gpu_power_total_w": smp.get("gpu_power_total_w"), "gpu_temp_max_c": smp.get("gpu_temp_max_c"),
+            "cpu_package_c": smp.get("cpu_package_c"), "mem_available_mb": smp.get("mem_available_mb")}
 
 
 def open_hw_state() -> hw_state.HardwareState:
@@ -771,6 +791,7 @@ def cmd_observe(_args) -> int:
         "profiles": {pid: {k: e.get(k) for k in ("port", "gpus", "state", "container", "lease")}
                      for pid, e in st.get("profiles", {}).items()},
         "jobs": hw_jobs.jobs(),
+        "guard": guard_summary(),
     }, indent=2))
     return 0
 

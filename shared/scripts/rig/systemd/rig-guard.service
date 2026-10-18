@@ -1,0 +1,18 @@
+# Rig hardware guard (scripts/rig/hw_guard.py): always-on power, thermal and memory watch that
+# gates model loads. Rig-side and independent of the controller; it runs offline too.
+# Install: sudo install -m 644 rig-guard.service /etc/systemd/system/ && sudo systemctl enable --now rig-guard
+[Unit]
+Description=Rig hardware guard (power, thermal, memory; load admission)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=bryan
+Group=bryan
+ExecStart=/home/bryan/llm-orchestration-venv/bin/python /home/bryan/llm_orchestration/shared/scripts/rig/hw_guard.py run
+Restart=always
+RestartSec=5
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
