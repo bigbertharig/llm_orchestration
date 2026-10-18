@@ -170,7 +170,7 @@ class Evaluator:
     def push(self, sample: dict) -> tuple[str, list[str]]:
         self.window.append(sample_level(sample, self.limits))
         worst = max((lvl for lvl, _ in self.window), key=LEVELS.index)
-        reasons = sorted({r for lvl, rs in self.window if lvl == worst for r in rs})
+        reasons = next(rs for lvl, rs in reversed(self.window) if lvl == worst)  # latest reading at that level
         if LEVELS.index(worst) >= LEVELS.index(self.level):
             self.level, self.calm = worst, 0
         else:
