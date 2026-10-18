@@ -229,6 +229,51 @@ def running_model_containers() -> list[str]:
             if n.startswith("llama-") or n.startswith(REMOTE_CONTAINER_PREFIX)]
 
 
+def gpu_telemetry() -> list[dict]:
+    proc = run(
+        ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,power.draw",
+         "--format=csv,noheader,nounits"],
+        check=False,
+    )
+    out = []
+    for line in proc.stdout.splitlines():
+        p = [x.strip() for x in line.split(",")]
+        if len(p) != 6 or not p[0].isdigit():
+            continue
+        num = lambda v: float(v) if v.replace(".", "", 1).isdigit() else None  # noqa: E731
+        out.append({"index": int(p[0]), "name": p[1], "total_mb": int(p[2]), "used_mb": int(p[3]),
+                    "util_pct": num(p[4]), "power_w": num(p[5])})
+    return out
+
+
+def llama_containers() -> list[dict]:
+    """Every running llama-server container, whoever started it: name, GPU ids, port."""
+    ids = run(["docker", "ps", "-q"], check=False).stdout.split()
+    if not ids:
+        return []
+    try:
+        items = json.loads(run(["docker", "inspect", *ids], check=False, timeout=30).stdout or "[]")
+    except ValueError:
+        return []
+    out = []
+    for c in items:
+        cfg = c.get("Config") or {}
+        cmd = [str(x) for x in (cfg.get("Cmd") or [])]
+        if not any("llama-server" in x for x in cmd + [str(x) for x in (cfg.get("Entrypoint") or [])]):
+            continue
+        gpus: set[int] = set()
+        for req in (c.get("HostConfig") or {}).get("DeviceRequests") or []:
+            for dev in req.get("DeviceIDs") or []:
+                gpus.update(int(d) for d in str(dev).split(",") if d.strip().isdigit())
+        for env in cfg.get("Env") or []:
+            if env.startswith("NVIDIA_VISIBLE_DEVICES="):
+                gpus.update(int(d) for d in env.split("=", 1)[1].split(",") if d.strip().isdigit())
+        port = next((int(cmd[i + 1]) for i, a in enumerate(cmd[:-1]) if a == "--port" and cmd[i + 1].isdigit()), None)
+        out.append({"name": str(c.get("Name", "")).lstrip("/"), "gpus": sorted(gpus), "port": port,
+                    "started_at": (c.get("State") or {}).get("StartedAt")})
+    return out
+
+
 def unit_active(unit: str) -> bool:
     return run(["systemctl", "is-active", "--quiet", unit], check=False).returncode == 0
 
@@ -414,9 +459,12 @@ def remote_loaded_summary(state: dict) -> str:
     return ", ".join(f"{pid} (GPU {e['gpus']}, :{e['port']}, {e['state']})" for pid, e in profiles.items())
 
 
-def claim_remote(requested: list[str], force: bool) -> tuple[list[str], int | None]:
+def claim_remote(requested: list[str], force: bool,
+                 placement: dict | None = None) -> tuple[list[str], int | None]:
     """Under the lock: enter remote mode if needed, place and launch new profiles.
 
+    placement ({"gpus": [...], "port": N, "lease": id}, one profile only) comes from the rig manager
+    (llm-gateway): launch exactly there instead of choosing, after checking the GPUs are free.
     Returns (profile ids to wait on, early exit code or None).
     """
     profiles = published_profiles()
@@ -454,8 +502,19 @@ def claim_remote(requested: list[str], force: bool) -> tuple[list[str], int | No
         if pid in loaded:
             say(f"  {pid}: already {loaded[pid]['state']} on :{loaded[pid]['port']}")
             continue
-        gpus = place_profile(profiles[pid], free)
-        port = next((p for p in REMOTE_PORTS if p not in used_ports and not served_model(p)), None)
+        if placement is not None:
+            gpus, port = list(placement["gpus"]), int(placement["port"])
+            free_ids = {x["index"] for x in free}
+            if len(gpus) != len(profiles[pid]["gpus_needed"]):
+                raise RigError(f"{pid} needs {len(profiles[pid]['gpus_needed'])} GPU(s); manager gave {gpus}")
+            if not set(gpus) <= free_ids:
+                raise RigError(f"manager placed {pid} on GPU {gpus} but GPU {sorted(set(gpus) - free_ids)} "
+                               f"is not free here", EXIT_NO_CAPACITY)
+            if port in used_ports or served_model(port):
+                raise RigError(f"manager placed {pid} on :{port} but that port is serving", EXIT_NO_CAPACITY)
+        else:
+            gpus = place_profile(profiles[pid], free)
+            port = next((p for p in REMOTE_PORTS if p not in used_ports and not served_model(p)), None)
         if gpus is None or port is None:
             need = ", ".join(f"{r['min_vram_mb']}-{r['max_vram_mb']}MB" if "max_vram_mb" in r
                              else f">={r['min_vram_mb']}MB" for r in profiles[pid]["gpus_needed"])
@@ -476,7 +535,8 @@ def claim_remote(requested: list[str], force: bool) -> tuple[list[str], int | No
         say(f"  loading {pid} ({p['model']}) on GPU {gpus} -> :{port}")
         container = launch_profile(p, gpus, port)
         loaded[pid] = {"model": p["model"], "port": port, "gpus": gpus, "ctx_size": p["ctx_size"],
-                       "state": "loading", "container": container, "since": now_iso(), "from": caller()}
+                       "state": "loading", "container": container, "since": now_iso(), "from": caller(),
+                       "lease": (placement or {}).get("lease")}
         save_state(refresh_remote_status(st))  # per launch, so a later launch failure can't orphan it
     if loaded:
         save_state(refresh_remote_status(st))
@@ -513,12 +573,17 @@ def wait_remote(pid: str) -> str | None:
 
 def cmd_start_remote(args) -> int:
     requested = args.profiles or [pid for pid, p in published_profiles().items() if p.get("default")]
+    placement = None
+    if args.gpus is not None or args.port is not None or args.lease:
+        if len(requested) != 1 or args.gpus is None or args.port is None:
+            raise RigError("--gpus/--port/--lease place exactly one profile and need both --gpus and --port")
+        placement = {"gpus": [int(g) for g in args.gpus.split(",")], "port": args.port, "lease": args.lease}
     wanted: list[str] = []
     errors: list[str] = []
     # Load sequentially: claim and launch one profile, wait until it serves, then the next.
     for i, pid in enumerate(requested):
         with Lock():
-            claimed, early = claim_remote([pid], args.force and i == 0)
+            claimed, early = claim_remote([pid], args.force and i == 0, placement)
         if early is not None:
             return early
         wanted += claimed
@@ -543,7 +608,7 @@ def status_payload() -> dict:
     st = read_state()
     g = gpu_check()
     profiles = [
-        {"id": pid, **{k: e[k] for k in ("model", "port", "gpus", "ctx_size", "state", "since", "from")}}
+        {"id": pid, **{k: e.get(k) for k in ("model", "port", "gpus", "ctx_size", "state", "since", "from", "lease")}}
         for pid, e in st.get("profiles", {}).items()
     ]
     return {
@@ -571,6 +636,22 @@ def cmd_status(args) -> int:
     say("ports: " + (", ".join(f":{p} {m}" for p, m in ports.items()) if ports else "none serving"))
     if s["mode"] == "idle" and (ports or any(unit_active(u) for u in STACK_UNITS.values())):
         say("WARNING: state says idle but something is running; run `rig stop` to clean up")
+    return 0
+
+
+def cmd_observe(_args) -> int:
+    """Read-only snapshot for the rig manager: GPUs, every llama container, served ports, remote state."""
+    st = read_state()
+    print(json.dumps({
+        "observed_at": now_iso(),
+        "expected_gpus": expected_gpu_ids(),
+        "gpus": gpu_telemetry(),
+        "containers": llama_containers(),
+        "ports": {str(p): m for p, m in live_ports().items()},
+        "mode": st["mode"],
+        "profiles": {pid: {k: e.get(k) for k in ("port", "gpus", "state", "container", "lease")}
+                     for pid, e in st.get("profiles", {}).items()},
+    }, indent=2))
     return 0
 
 
@@ -628,7 +709,11 @@ def main() -> int:
     s.add_argument("mode", choices=MODES)
     s.add_argument("profiles", nargs="*", help="remote profile ids (default: profiles marked default)")
     s.add_argument("--force", action="store_true", help="stop the current mode first")
+    s.add_argument("--gpus", help="remote, one profile: GPU ids chosen by the rig manager, e.g. 0 or 1,2")
+    s.add_argument("--port", type=int, help="remote, one profile: port chosen by the rig manager")
+    s.add_argument("--lease", help="remote, one profile: the manager lease it runs under")
     s.set_defaults(fn=cmd_start)
+    sub.add_parser("observe", help="JSON snapshot for the rig manager").set_defaults(fn=cmd_observe)
     s = sub.add_parser("stop")
     s.add_argument("profiles", nargs="*", help="remote profile ids to unload (default: stop everything)")
     s.set_defaults(fn=cmd_stop)
