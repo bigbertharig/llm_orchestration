@@ -9,14 +9,19 @@
 
 `nvidia-smi -pl` does not survive a reboot, so the rig sets the caps at every boot, after
 nvidia-persistenced, and run_runtime.sh checks the cards of every load against the plan before
-starting it (the double check: a load on a card at the wrong limit is refused). Caps go by card model, not index (indices moved when the risers were re-cabled):
-the GTX 1060s with a 120 W default run at 100 W, measured 2026-08-09 to keep about 98% of decode speed
-for 17% less energy and 5 C cooler (benchmarking results/runtime_experiments/
-gtx1060_power_cap_100w_20260809.json, gpu4_120w_vs_100w_sustained_decode_20260809.json); the
-factory-overclocked ones (156 W default) run at 120 W (operator, 2026-10-18). Cards without a rule keep their default (the
-3090 Ti: no cap measured yet). A planned value outside the card's min/max range is clamped.
+starting it (the double check: a load on a card at the wrong limit is refused). Caps go by card model
+and default limit, not index (indices moved when the risers were re-cabled): GTX 1060s with a 120 W
+default run at 100 W, measured 2026-08-09 to keep about 98% of decode speed for 17% less energy and
+5 C cooler (benchmarking results/runtime_experiments/gtx1060_power_cap_100w_20260809.json,
+gpu4_120w_vs_100w_sustained_decode_20260809.json); the factory-overclocked ones (156 W default) run
+at 120 W (operator, 2026-10-18). Cards without a rule keep their default (the 3090 Ti: no cap measured
+yet). A planned value outside the card's min/max range is clamped.
+
 Override in rig-local `brain/hw/power.json`: {"by_model": {"GTX 1060": {"156": 120, "120": 100}},
-"by_index": {"0": 400}}. A by_model value is watts, or watts per card default limit; by_index wins. The rig guard reads the resulting limits every sample: its power warn line is their sum.
+"by_index": {"0": 400}}. A by_model value is watts, or watts per card default limit; by_index wins.
+A temporary override until the next boot goes in /run/rig/power_override.json (same shape, read on
+top): /run is cleared at boot, so a crash or reboot brings the caps back (used for stress tests).
+The rig guard reads the resulting limits every sample: its power warn line is their sum.
 """
 
 from __future__ import annotations
@@ -33,15 +38,17 @@ LOCAL = Path(__file__).resolve().parents[2]
 # Rig-local hardware state, whichever copy of this file runs (rig checkout or the shared drive's copy).
 _HW = Path(os.getenv("RIG_HW_DIR") or "/home/bryan/llm_orchestration/shared/brain/hw")
 CONFIG_PATH = (_HW if _HW.is_dir() else LOCAL / "brain" / "hw") / "power.json"
+OVERRIDE_PATH = Path(os.getenv("RIG_POWER_OVERRIDE") or "/run/rig/power_override.json")
 DEFAULT_RULES = {"by_model": {"GTX 1060": {"156": 120, "120": 100}}, "by_index": {}}
 
 
-def load_rules(path: Path = CONFIG_PATH) -> dict:
+def load_rules(path: Path = CONFIG_PATH, override: Path | None = None) -> dict:
     rules = json.loads(json.dumps(DEFAULT_RULES))
-    if path.is_file():
-        for key, value in json.loads(path.read_text(encoding="utf-8")).items():
-            if isinstance(value, dict) and isinstance(rules.get(key), dict):
-                rules[key].update(value)
+    for f in (path, OVERRIDE_PATH if override is None else override):
+        if f.is_file():
+            for key, value in json.loads(f.read_text(encoding="utf-8")).items():
+                if isinstance(value, dict) and isinstance(rules.get(key), dict):
+                    rules[key].update(value)
     return rules
 
 
