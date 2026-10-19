@@ -11,6 +11,17 @@ Controller record: one active controller at a time. It heartbeats; another contr
 when there is none, when the active one's heartbeat is older than STALE_AFTER_S, or by explicit
 handoff (force). Plan edits from a controller that is not active are refused.
 
+Shared report (2026-10-18): the rig and the active controller each keep a copy of this document.
+The rig writes it (every write bumps `version`); the controller saves what `rig observe` returns to its
+own disk on every heartbeat. If either side crashes it recovers from the other:
+- the rig reboots: on the first start of a new boot (`boot_id` changes) the item that was running is
+  marked `interrupted` and the plan is held (`hold`); the rig boots neutral and runs nothing until the
+  active controller has looked at the report and resumes it (`resume`). A lost network without a reboot
+  is not a hold: the rig finishes what it was given.
+- the rig lost the file (disk, replacement): the controller's copy has a higher version, and the
+  controller writes it back (`restore`), still held, then resumes.
+- the controller crashed: it restarts from its own copy and reads the rig's live one.
+
 Item: {id, kind, args, state, added_by, added_at, started_at, ended_at, result}. Kinds:
   load    args {profile, gpus, port, lease, cache_ram}   -> `rig start remote` with that placement
   unload  args {profile}                                  -> `rig stop <profile>`
@@ -30,7 +41,8 @@ from filelock import FileLock
 SCHEMA_VERSION = 1
 STALE_AFTER_S = 120
 KINDS = ("load", "unload")
-STATES = ("queued", "running", "done", "failed", "cancelled")
+STATES = ("queued", "running", "done", "failed", "cancelled", "interrupted")
+FINISHED = ("done", "failed", "cancelled", "interrupted")
 KEEP_FINISHED = 50  # finished items kept in the file, newest last
 
 
@@ -67,17 +79,18 @@ class Plan:
 
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"schema_version": SCHEMA_VERSION, "controller": None, "items": []}
+            return {"schema_version": SCHEMA_VERSION, "controller": None, "items": [], "version": 0, "hold": None}
         data = json.loads(self.path.read_text(encoding="utf-8"))
         if data.get("schema_version") != SCHEMA_VERSION:
             raise PlanError("state", f"unsupported plan schema {data.get('schema_version')!r}")
         return data
 
     def _write(self, data: dict[str, Any]) -> None:
-        finished = [i for i in data["items"] if i["state"] in ("done", "failed", "cancelled")]
+        finished = [i for i in data["items"] if i["state"] in FINISHED]
         drop = {i["id"] for i in finished[:-KEEP_FINISHED]} if len(finished) > KEEP_FINISHED else set()
         data["items"] = [i for i in data["items"] if i["id"] not in drop]
         data["updated_at"] = _iso(_now())
+        data["version"] = int(data.get("version") or 0) + 1
         tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         tmp.replace(self.path)
@@ -89,7 +102,10 @@ class Plan:
             beat = _parse(ctl.get("heartbeat_at"))
             ctl = {**ctl, "stale": beat is None or (_now() - beat).total_seconds() > STALE_AFTER_S}
         return {"controller": ctl, "items": data["items"],
-                "next": [i for i in data["items"] if i["state"] in ("queued", "running")]}
+                "next": [i for i in data["items"] if i["state"] in ("queued", "running")],
+                "version": int(data.get("version") or 0), "updated_at": data.get("updated_at"),
+                "hold": data.get("hold"), "boot_id": data.get("rig_boot_id"), "booted_at": data.get("booted_at"),
+                "resumed": data.get("resumed"), "restored": data.get("restored")}
 
     # ---------------------------------------------------------------- controller
 
@@ -183,10 +199,11 @@ class Plan:
     # ---------------------------------------------------------------- executor side
 
     def take_next(self) -> dict[str, Any] | None:
-        """Mark the first queued item running and return it (None when nothing is queued or one runs)."""
+        """Mark the first queued item running and return it (None when nothing is queued, one runs, or the
+        plan is held after a reboot)."""
         with self.lock:
             data = self._read()
-            if any(i["state"] == "running" for i in data["items"]):
+            if data.get("hold") or any(i["state"] == "running" for i in data["items"]):
                 return None
             item = next((i for i in data["items"] if i["state"] == "queued"), None)
             if item is None:
@@ -205,12 +222,74 @@ class Plan:
             self._write(data)
 
     def recover(self) -> list[str]:
-        """After an executor restart: items left running did not finish; mark them failed."""
+        """After an executor restart in the same boot: items left running did not finish."""
         with self.lock:
             data = self._read()
-            stuck = [i for i in data["items"] if i["state"] == "running"]
-            for i in stuck:
-                i.update(state="failed", ended_at=_iso(_now()), result="executor restarted while running")
+            stuck = _interrupt(data, "the plan executor restarted while it ran")
             if stuck:
                 self._write(data)
-            return [i["id"] for i in stuck]
+            return stuck
+
+    def boot(self, boot_id: str) -> dict[str, Any] | None:
+        """First call in a new boot: interrupt what was running and hold the plan until the controller
+        resumes it. Later calls in the same boot do nothing. Returns the new hold, or None."""
+        with self.lock:
+            data = self._read()
+            if data.get("rig_boot_id") == boot_id:
+                return None
+            stuck = _interrupt(data, "the rig restarted while it ran")
+            now = _iso(_now())
+            data.update(rig_boot_id=boot_id, booted_at=now,
+                        hold={"reason": "boot", "since": now, "interrupted": stuck})
+            self._write(data)
+            return data["hold"]
+
+    def resume(self, controller: str) -> dict[str, Any]:
+        """The active controller has seen the report: clear the hold and let the queue run again."""
+        with self.lock:
+            data = self._read()
+            self._require_controller(data, controller)
+            held = data.get("hold")
+            data["hold"] = None
+            data["resumed"] = {"by": controller, "at": _iso(_now()), "hold": held}
+            self._write(data)
+            return self.report_of(data)
+
+    def restore(self, controller: str, doc: dict[str, Any]) -> dict[str, Any]:
+        """Write back the controller's copy when the rig's is behind (lost or replaced file). Refused when
+        the rig's copy is as new or newer. The plan stays held; the controller resumes it after."""
+        with self.lock:
+            try:
+                data = self._read()
+            except (PlanError, ValueError):  # unreadable file: anything is newer
+                data = {"schema_version": SCHEMA_VERSION, "controller": None, "items": [], "version": 0}
+            ctl = data.get("controller")
+            if ctl and ctl.get("id") != controller:
+                raise PlanError("not_controller", f"controller {ctl['id']} is active; only it restores the plan")
+            mine, theirs = int(data.get("version") or 0), int(doc.get("version") or 0)
+            if theirs <= mine:
+                raise PlanError("state", f"the rig's plan is current (version {mine} >= {theirs}); nothing restored")
+            restored = {"schema_version": SCHEMA_VERSION, "controller": doc.get("controller") or ctl,
+                        "items": [dict(i) for i in doc.get("items") or []], "version": theirs,
+                        "rig_boot_id": data.get("rig_boot_id"), "booted_at": data.get("booted_at")}
+            for key in ("stale",):
+                (restored["controller"] or {}).pop(key, None)
+            stuck = _interrupt(restored, "it was running when the rig lost its plan (restored from the controller)")
+            restored["hold"] = data.get("hold") or {"reason": "restored", "since": _iso(_now()), "interrupted": stuck}
+            restored["restored"] = {"by": controller, "at": _iso(_now()), "from_version": theirs, "rig_version": mine}
+            self._write(restored)
+            return self.report_of(restored)
+
+    def report_of(self, data: dict[str, Any]) -> dict[str, Any]:
+        with_ctl = data.get("controller")
+        return {"version": int(data.get("version") or 0), "hold": data.get("hold"),
+                "controller": with_ctl, "items": data.get("items", [])}
+
+
+def _interrupt(data: dict[str, Any], why: str) -> list[str]:
+    """Mark running items interrupted, saying what they were doing; returns their ids."""
+    stuck = [i for i in data["items"] if i["state"] == "running"]
+    for i in stuck:
+        what = f"{i['kind']} {i['args'].get('profile', '')}".strip()
+        i.update(state="interrupted", ended_at=_iso(_now()), result=f"interrupted: {why} ({what})")
+    return [i["id"] for i in stuck]

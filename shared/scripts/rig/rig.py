@@ -939,12 +939,18 @@ def cmd_plan(args) -> int:
     | run (rig-plan.service: work through queued items one at a time, then wait)."""
     plan = open_plan()
     if args.action == "run":
+        hold_plan_for_boot()  # also here: the executor can start before rig-boot.service
         for item_id in plan.recover():
-            say(f"plan: {item_id} was running when the executor stopped; marked failed")
+            say(f"plan: {item_id} was running when the executor stopped; marked interrupted")
         say("plan executor: waiting for queued items")
+        held_said = False
         while True:
             item = plan.take_next()
             if item is None:
+                held = (plan.report().get("hold") or {}).get("reason")
+                if held and not held_said:
+                    say(f"plan executor: plan held ({held}); waiting for the controller to resume it")
+                held_said = bool(held)
                 time.sleep(3)
                 continue
             say(f"plan: {item['id']} {item['kind']} {json.dumps(item['args'])}")
@@ -971,6 +977,14 @@ def cmd_plan(args) -> int:
             except ValueError as exc:
                 raise hw_plan.PlanError("invalid", f"--args is not JSON: {exc}") from exc
             return emit({"item": plan.add(args.controller, args.kind, item_args)})
+        if args.action == "resume":
+            return emit({"plan": plan.resume(args.controller)})
+        if args.action == "restore":
+            try:
+                doc = json.loads(args.doc)
+            except ValueError as exc:
+                raise hw_plan.PlanError("invalid", f"--doc is not JSON: {exc}") from exc
+            return emit({"plan": plan.restore(args.controller, doc)})
         return emit({"item": plan.cancel(args.controller, args.item_id)})
     except hw_plan.PlanError as exc:
         return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
@@ -1066,13 +1080,33 @@ def cmd_stop(args) -> int:
     return 0
 
 
+def boot_id() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return "unknown"
+
+
+def hold_plan_for_boot() -> None:
+    """First start in a new boot: interrupt what was running and hold the plan for the controller."""
+    try:
+        hold = open_plan().boot(boot_id())
+    except (hw_plan.PlanError, OSError, ValueError) as exc:
+        say(f"  warning: plan not checked at boot: {exc}")
+        return
+    if hold:
+        say(f"plan held after boot (interrupted: {', '.join(hold['interrupted']) or 'none'}); "
+            "waiting for the controller to resume it")
+
+
 def cmd_boot(_args) -> int:
-    """Called by rig-boot.service at power-on: record idle + GPU health."""
+    """Called by rig-boot.service at power-on: record idle + GPU health, hold the plan for the controller."""
     with Lock():
         g = gpu_check()
         write_policy("neutral", "rig_idle")
         err = None if g["ok"] else f"boot GPU check: missing {g['missing']}"
         write_state(mode="idle", status="idle", **({"error": err} if err else {}), **{"from": "boot"})
+    hold_plan_for_boot()
     say(f"rig idle; gpus {len(g['visible'])}/{g['expected']}" + (f" MISSING {g['missing']}" if g["missing"] else ""))
     return 0 if g["ok"] else EXIT_FAIL
 
@@ -1161,6 +1195,11 @@ def main() -> int:
     x = pa.add_parser("cancel")
     x.add_argument("item_id")
     x.add_argument("--controller", required=True)
+    x = pa.add_parser("resume", help="the active controller clears the hold after a reboot")
+    x.add_argument("--controller", required=True)
+    x = pa.add_parser("restore", help="write back the controller's newer copy of the plan")
+    x.add_argument("--controller", required=True)
+    x.add_argument("--doc", required=True, help="the plan report the controller kept (JSON)")
     pa.add_parser("run")
     s.set_defaults(fn=cmd_plan)
     s = sub.add_parser("stop")

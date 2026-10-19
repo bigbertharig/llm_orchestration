@@ -80,3 +80,12 @@ the runtime serves, the rig reads its log (`hw_loadlog.py`): a load that is not 
 refused and unloaded; a ready one records `fit` (layers, context, MiB per card, llama.cpp's projection)
 and the context llama.cpp allocated in its profile, which `rig observe` reports. `run_runtime.sh` also
 accepts `--ctx-size auto` (leave the context to llama.cpp's `--fit`), used for experiments only.
+
+## After a reboot (2026-10-18)
+
+The rig boots neutral and holds its plan (`hw_plan.py` `boot`, from `rig boot` and from the plan
+executor's start, whichever runs first in the new boot): the item that was running is marked
+`interrupted`, and nothing queued runs until the active controller has reviewed the report and
+resumed it (`rig plan resume --controller ID`). The controller keeps a copy of the report; if the
+rig's plan is behind it (lost file), the controller writes it back (`rig plan restore`). Details:
+llm-gateway `docs/MANAGER.md` rule 1c.

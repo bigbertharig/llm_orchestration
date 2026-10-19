@@ -70,7 +70,41 @@ class PlanTests(unittest.TestCase):
             self.plan.cancel("pi", a["id"])  # running items are not cancelled
         self.assertEqual(self.plan.recover(), [a["id"]])
         self.assertEqual({i["id"]: i["state"] for i in self.plan.report()["items"]},
-                         {a["id"]: "failed", b["id"]: "cancelled"})
+                         {a["id"]: "interrupted", b["id"]: "cancelled"})
+
+    def test_a_new_boot_interrupts_and_holds_until_the_controller_resumes(self):
+        self.plan.claim("pi", "h")
+        self.plan.boot("boot-1")
+        self.plan.resume("pi")
+        a = self.plan.add("pi", "load", {"profile": "a"})
+        b = self.plan.add("pi", "load", {"profile": "b"})
+        self.plan.take_next()                             # a is running when the rig goes down
+        hold = self.plan.boot("boot-2")
+        self.assertEqual(hold["interrupted"], [a["id"]])
+        self.assertIsNone(self.plan.boot("boot-2"))       # same boot again: nothing new
+        rep = self.plan.report()
+        self.assertEqual(rep["hold"]["reason"], "boot")
+        self.assertIn("rig restarted", self.plan.get(a["id"])["result"])
+        self.assertIsNone(self.plan.take_next())          # held: b waits
+        with self.assertRaises(hw_plan.PlanError):
+            self.plan.resume("desktop")                   # only the active controller resumes
+        self.plan.resume("pi")
+        self.assertEqual(self.plan.take_next()["id"], b["id"])
+
+    def test_restore_writes_back_a_newer_controller_copy_only(self):
+        self.plan.claim("pi", "h")
+        self.plan.add("pi", "load", {"profile": "a"})
+        copy = self.plan.report()                          # the controller's copy
+        with self.assertRaises(hw_plan.PlanError) as ctx:
+            self.plan.restore("pi", copy)                  # the rig is as new: refused
+        self.assertEqual(ctx.exception.kind, "state")
+        self.plan.path.unlink()                            # the rig lost its file
+        self.plan.boot("boot-9")
+        rep = self.plan.restore("pi", copy)
+        self.assertEqual([i["args"]["profile"] for i in rep["items"]], ["a"])
+        self.assertTrue(rep["hold"])                       # still held until the controller resumes
+        self.assertGreater(rep["version"], copy["version"])
+        self.assertEqual(self.plan.report()["controller"]["id"], "pi")
 
     def test_bad_items_are_refused(self):
         self.plan.claim("pi", "h")
