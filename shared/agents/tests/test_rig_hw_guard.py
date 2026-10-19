@@ -30,6 +30,16 @@ class LevelTests(unittest.TestCase):
         self.assertEqual(level, "critical")
         self.assertEqual(len(reasons), 2)
 
+    def test_power_lines_follow_the_card_limits(self):
+        limits = hw_guard.load_limits(Path("/nonexistent/guard.json"))
+        sample = {"gpu_power_total_w": 1000.0, "gpu_power_limit_total_w": 1122.0}
+        self.assertEqual(hw_guard.power_lines(sample, limits), {"warn": 1122.0, "critical": 1234.2})
+        self.assertEqual(hw_guard.sample_level(sample, limits)[0], "ok")
+        self.assertEqual(hw_guard.sample_level({**sample, "gpu_power_total_w": 1130.0}, limits)[0], "warn")
+        self.assertEqual(hw_guard.sample_level({**sample, "gpu_power_total_w": 1240.0}, limits)[0], "critical")
+        # limits unreadable: the fixed fallback lines
+        self.assertEqual(hw_guard.power_lines({"gpu_power_total_w": 700.0}, limits), {"warn": 650, "critical": 750})
+
     def test_missing_sensors_are_skipped(self):
         self.assertEqual(hw_guard.sample_level({"gpu_power_total_w": None}, LIMITS)[0], "ok")
 
@@ -38,7 +48,8 @@ class LevelTests(unittest.TestCase):
             path = Path(tmp) / "guard.json"
             path.write_text(json.dumps({"gpu_power_total_w": {"warn": 500}, "fail_closed": True}))
             limits = hw_guard.load_limits(path)
-        self.assertEqual(limits["gpu_power_total_w"], {"warn": 500, "critical": 750})
+        self.assertEqual(limits["gpu_power_total_w"]["warn"], 500)
+        self.assertFalse(limits["gpu_power_total_w"]["from_limits"])  # a fixed line in guard.json wins
         self.assertTrue(limits["fail_closed"])
 
 

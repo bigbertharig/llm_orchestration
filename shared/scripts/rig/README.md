@@ -38,6 +38,8 @@ item unloads them, and it keeps going with no controller connected. `rig plan sh
 `rig-guard.service` samples every 2 s: CPU package temperature, per-GPU temperature, instant power
 and utilization, available RAM and swap. The worst reading over 10 s sets `ok` / `warn` / `critical`
 (limits in `hw_guard.py` DEFAULT_LIMITS, overrides in rig-local `brain/hw/guard.json`).
+Total GPU power follows the cards themselves: warn at the sum of their `nvidia-smi` power limits
+(1122 W on 2026-10-18), critical 10% above; fixed numbers in `guard.json` replace that.
 
 | Level | Loads | Running work |
 |---|---|---|

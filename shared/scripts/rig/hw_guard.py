@@ -19,7 +19,9 @@ benchmark measurements). For memory it also acts: when available RAM reads criti
 llama runtime holding the most host RAM, at most once per cooldown. On 2026-10-17 RAM filled with
 nothing freeing it (earlyoom had been disarmed by extra swap) and the rig hung until a hard reset;
 losing one runtime is the better outcome. Limits are in DEFAULT_LIMITS, overridable in the
-rig-local guard.json. The rig runs this whether or not the controller (the Pi) is reachable;
+rig-local guard.json. Total GPU power follows the cards' own limits (`nvidia-smi` power.limit, read
+every sample): warn at their sum, the most the cards are set to draw together, critical 10% above it
+(spikes past the limits). Explicit warn/critical numbers in guard.json replace that. The rig runs this whether or not the controller (the Pi) is reachable;
 `rig observe` reports the state for the controller's benefit.
 """
 
@@ -49,14 +51,18 @@ sys.path.insert(0, str(LOCAL / "scripts"))
 from startup_thermal_monitor import cpu_temperatures, process_snapshot  # noqa: E402  (same sensors)
 
 # Resets on 2026-10-15/16 came at 650-750 W sampled GPU draw (3090 busy plus 1060s, dual-PSU wiring
-# suspect); the startup monitor aborts at CPU package 95 C; earlyoom kills near 10% free memory.
+# suspect). The PSU wiring was fixed after that (operator, 2026-10-18), so power now follows the cards'
+# limits; 650/750 W remain only as the fallback when the limits cannot be read.
+# The startup monitor aborts at CPU package 95 C; earlyoom kills near 10% free memory.
 DEFAULT_LIMITS = {
     "interval_s": 2.0,
     "window_samples": 5,          # worst reading over the last 10 s sets the level
     "clear_samples": 5,           # readings must stay below a level this long before it drops
     "stale_after_s": 15,          # admission treats an older state as "guard not running"
     "fail_closed": False,         # guard not running: False admits loads (with a warning), True refuses
-    "gpu_power_total_w": {"warn": 650, "critical": 750},
+    # from_limits: warn = sum of the cards' power limits, critical = that + critical_over_limits_pct.
+    # warn/critical here are the fallback (limits unreadable) or, set in guard.json, fixed lines.
+    "gpu_power_total_w": {"from_limits": True, "critical_over_limits_pct": 10, "warn": 650, "critical": 750},
     "gpu_temp_c": {"warn": 83, "critical": 90},
     "cpu_package_c": {"warn": 90, "critical": 95},
     "mem_available_mb": {"warn": 4096, "critical": 2048},   # lower is worse
@@ -71,6 +77,8 @@ def load_limits(path: Path = LIMITS_PATH) -> dict:
     if path.is_file():
         for key, value in json.loads(path.read_text(encoding="utf-8")).items():
             if isinstance(value, dict) and isinstance(limits.get(key), dict):
+                if key == "gpu_power_total_w" and ("warn" in value or "critical" in value):
+                    limits[key]["from_limits"] = False  # fixed lines configured: they win
                 limits[key].update(value)
             else:
                 limits[key] = value
@@ -98,7 +106,7 @@ def _num(text: str) -> float | None:
 
 
 def gpu_sample() -> list[dict]:
-    fields = "index,temperature.gpu,power.draw,power.draw.instant,utilization.gpu"
+    fields = "index,temperature.gpu,power.draw,power.limit,power.draw.instant,utilization.gpu"
     for query in (fields, fields.replace(",power.draw.instant", "")):
         try:
             out = subprocess.run(["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"],
@@ -110,9 +118,9 @@ def gpu_sample() -> list[dict]:
             p = [x.strip() for x in line.split(",")]
             if not p or not p[0].isdigit():
                 continue
-            instant = _num(p[3]) if len(p) == 5 else None
+            instant = _num(p[4]) if len(p) == 6 else None
             gpus.append({"index": int(p[0]), "temp_c": _num(p[1]), "power_w": _num(p[2]),
-                         "power_instant_w": instant, "util_pct": _num(p[-1])})
+                         "power_limit_w": _num(p[3]), "power_instant_w": instant, "util_pct": _num(p[-1])})
         if gpus:
             return gpus
     return []
@@ -133,11 +141,22 @@ def take_sample() -> dict:
     power = [g["power_instant_w"] if g["power_instant_w"] is not None else g["power_w"] for g in gpus]
     return {"at": _now(), "cpu_package_c": package_c, "gpus": gpus,
             "gpu_power_total_w": round(sum(p for p in power if p is not None), 1) if gpus else None,
+            "gpu_power_limit_total_w": (round(sum(g["power_limit_w"] for g in gpus), 1)
+                                        if gpus and all(g.get("power_limit_w") for g in gpus) else None),
             "gpu_temp_max_c": max((g["temp_c"] for g in gpus if g["temp_c"] is not None), default=None),
             **memory_sample()}
 
 
 # ------------------------------------------------------------------ evaluation (pure)
+
+def power_lines(sample: dict, limits: dict) -> dict:
+    """{warn, critical} for total GPU power: from the cards' limits unless fixed numbers are configured."""
+    lim = limits["gpu_power_total_w"]
+    total = sample.get("gpu_power_limit_total_w")
+    if lim.get("from_limits") and total:
+        return {"warn": total, "critical": round(total * (1 + lim.get("critical_over_limits_pct", 10) / 100), 1)}
+    return {"warn": lim["warn"], "critical": lim["critical"]}
+
 
 def sample_level(sample: dict, limits: dict) -> tuple[str, list[str]]:
     """Level of one sample, with the readings that set it."""
@@ -152,7 +171,8 @@ def sample_level(sample: dict, limits: dict) -> tuple[str, list[str]]:
     for key, label in (("gpu_power_total_w", "GPU power {v} W"), ("gpu_temp_max_c", "GPU temp {v} C"),
                        ("cpu_package_c", "CPU package {v} C")):
         value = sample.get(key)
-        lim = limits["gpu_temp_c" if key == "gpu_temp_max_c" else key]
+        lim = power_lines(sample, limits) if key == "gpu_power_total_w" else \
+            limits["gpu_temp_c" if key == "gpu_temp_max_c" else key]
         if value is None:
             continue
         for name in ("critical", "warn"):
