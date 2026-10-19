@@ -68,6 +68,11 @@ esac
 exit 0
 """
 
+FAKE_NVIDIA_SMI = r"""#!/bin/bash
+# GPU 1 is a GTX 1060 whose power limit is FAKE_POWER_LIMIT (planned: 100 W).
+echo "1, NVIDIA GeForce GTX 1060 6GB, ${FAKE_POWER_LIMIT:-100}.00, 120.00, 60.00, 140.00"
+"""
+
 FAKE_CURL = r"""#!/bin/bash
 url="${@: -1}"
 port="${url##*:}"; port="${port%%/*}"
@@ -87,7 +92,7 @@ class RuntimeLoadLockTests(unittest.TestCase):
         self.state = self.tmp / "state"
         self.bin.mkdir()
         self.state.mkdir()
-        for name, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL)):
+        for name, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL), ("nvidia-smi", FAKE_NVIDIA_SMI)):
             path = self.bin / name
             path.write_text(body, encoding="utf-8", newline="\n")
             path.chmod(path.stat().st_mode | stat.S_IEXEC)
@@ -102,6 +107,8 @@ class RuntimeLoadLockTests(unittest.TestCase):
             LLAMA_LOAD_SETTLE_S="0",
             LLAMA_LOAD_READY_TIMEOUT_S="20",
             LLAMA_GUARD="off",
+            HW_POWER_REPAIR="off",
+            RIG_HW_DIR=str(self.tmp),
             LLAMA_LEASE_AUDIT_LOG=str(self.tmp / "lease_audit.log"),
             LLAMA_LEASE_RECORD=str(self.tmp / "leases.json"),
         )
@@ -195,6 +202,14 @@ class RuntimeLoadLockTests(unittest.TestCase):
         _out, err = proc.communicate(timeout=30)
         self.assertEqual(proc.returncode, 75, err)
         self.assertIn("not admitted", err)
+        self.assertFalse((self.state / "events").exists())
+
+    def test_card_off_its_power_plan_is_refused_before_any_container_starts(self):
+        self.env.update(FAKE_POWER_LIMIT="120")  # rebooted: the cap is back at the factory default
+        proc = self._launch("rt-p", 18026)
+        _out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 75, err)
+        self.assertIn("GPU1 NVIDIA GeForce GTX 1060 6GB at 120 W, planned 100 W", err)
         self.assertFalse((self.state / "events").exists())
 
     def test_guard_ok_admits_the_load(self):

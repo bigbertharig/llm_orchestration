@@ -48,6 +48,11 @@ Rig guard (scripts/rig/hw_guard.py, rig-guard.service):
   LLAMA_GUARD_WAIT_S (default 600), and is refused (exit 75) if it does not. A guard that is not
   running admits with a warning. LLAMA_GUARD=off skips the check (emergencies only).
 
+Power limits (scripts/rig/hw_power.py, rig-power.service):
+  Before the lock, the load's cards are checked against their planned power limit (GTX 1060s 100 W).
+  A card off plan is re-applied once (sudo -n systemctl restart rig-power.service); if it is still
+  off, the load is refused (exit 75). LLAMA_POWER_CHECK=off skips it (emergencies only).
+
 Host prompt cache:
   llama-server keeps up to 8192 MiB of past prompt state in system RAM by default, per server.
   System RAM is the rig's scarce resource (2026-10-17: five default caches filled 32 GB and hung
@@ -93,6 +98,7 @@ GUARD_SCRIPT="${TREE}/scripts/rig/hw_guard.py"
 GUARD_PYTHON="${LLAMA_GUARD_PYTHON:-/home/bryan/llm-orchestration-venv/bin/python}"
 [ -x "${GUARD_PYTHON}" ] || GUARD_PYTHON="python3"
 GUARD_WAIT_S="${LLAMA_GUARD_WAIT_S:-600}"
+POWER_SCRIPT="${TREE}/scripts/rig/hw_power.py"
 # The rig's hardware state (guard, lease record, audit) lives in one rig-local place, whichever copy
 # of this script runs (rig checkout, or the shared drive's copy that lanes and the stack use).
 if [ -z "${RIG_HW_DIR:-}" ]; then
@@ -313,6 +319,15 @@ wait_for_other_loads() {
 exec 9>>"${LOAD_LOCK}"
 chmod 666 "${LOAD_LOCK}" 2>/dev/null || true
 log "waiting for the model-load lock (${LOAD_LOCK})"
+# Power limits: nvidia-smi caps reset at reboot; rig-power.service sets them, this is the double check.
+if [ "${LLAMA_POWER_CHECK:-on}" != "off" ] && [ -f "${POWER_SCRIPT}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+  POWER_GPUS="${GPUS#device=}"
+  if ! python3 "${POWER_SCRIPT}" check --gpus "${POWER_GPUS}" --repair; then
+    log "power limits are off plan on GPU ${POWER_GPUS}; not starting this load"
+    exit 75
+  fi
+fi
+
 if ! flock -w "${LOAD_LOCK_WAIT_S}" 9; then
   log "model-load lock not acquired within ${LOAD_LOCK_WAIT_S}s"
   exit 75

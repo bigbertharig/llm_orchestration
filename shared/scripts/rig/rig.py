@@ -132,7 +132,11 @@ def save_state(state: dict) -> dict:
 
 
 def shared_available() -> bool:
-    return (SHARED / "agents").is_dir()
+    # At boot the NFS automount can answer ENODEV before it is up (rig-boot.service failed on it).
+    try:
+        return (SHARED / "agents").is_dir()
+    except OSError:
+        return False
 
 
 def write_state(**fields) -> dict:

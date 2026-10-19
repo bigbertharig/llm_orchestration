@@ -11,6 +11,7 @@ hardware. It keeps working when the controller or the network is gone.
 | `hw_state.py` | the GPU lease and claim record (rig-local `shared/brain/hw/gpus/`), mirrored to the drive |
 | `hw_guard.py` | always-on power, thermal and memory guard (`rig-guard.service`) and load admission |
 | `hw_loadlog.py` | what a load actually got, from llama-server's startup log: llama.cpp's fit projection per card, layers offloaded, context, buffers per card |
+| `hw_power.py` | GPU power limits: set at boot by `rig-power.service` (GTX 1060s 100 W, others their default; rig-local `brain/hw/power.json` overrides), and re-checked by `run_runtime.sh` for the cards of every load |
 | `hw_plan.py` | the active controller and the plan queue (rig-local `brain/hw/plan.json`); `rig-plan.service` works through it |
 | `remote_profiles.py` | reads the profiles llm-gateway offers (`~/llm-gateway/remote_profiles.json`) |
 | `systemd/` | units: `rig-boot`, `rig-guard`, `rig-plan`, the stack modes; `earlyoom.default` (tracked `/etc/default/earlyoom`) |
@@ -39,7 +40,14 @@ item unloads them, and it keeps going with no controller connected. `rig plan sh
 and utilization, available RAM and swap. The worst reading over 10 s sets `ok` / `warn` / `critical`
 (limits in `hw_guard.py` DEFAULT_LIMITS, overrides in rig-local `brain/hw/guard.json`).
 Total GPU power follows the cards themselves: warn at the sum of their `nvidia-smi` power limits
-(1122 W on 2026-10-18), critical 10% above; fixed numbers in `guard.json` replace that.
+(950 W with the 1060s capped), critical 10% above; fixed numbers in `guard.json` replace that.
+
+Power limits: `nvidia-smi -pl` resets at every reboot, so `rig-power.service` (root, oneshot, after
+nvidia-persistenced) runs `hw_power.py apply` at boot. Caps go by card model, not index: GTX 1060s at
+100 W (2026-08-09 tests: about 2% decode speed for 17% less energy and 5 C cooler), the 3090 Ti at its
+450 W default (no cap measured). `run_runtime.sh` checks the cards of every load (`hw_power.py check`),
+re-applies once if a card is off plan, and refuses the load if it still is. `hw_power.py show` lists
+current and planned limits.
 
 | Level | Loads | Running work |
 |---|---|---|

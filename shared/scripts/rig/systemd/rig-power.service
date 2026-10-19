@@ -1,0 +1,16 @@
+# GPU power limits (scripts/rig/hw_power.py): nvidia-smi caps reset at every reboot, so the rig sets
+# them at boot (GTX 1060s 100 W; override in rig-local brain/hw/power.json). run_runtime.sh re-checks
+# the cards of every load. Install: sudo install -m 644 rig-power.service /etc/systemd/system/ &&
+# sudo systemctl enable --now rig-power
+[Unit]
+Description=Rig GPU power limits (hw_power.py: GTX 1060s at 100 W; caps reset at every boot)
+After=nvidia-persistenced.service
+Before=rig-guard.service rig-boot.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/bryan/llm_orchestration/shared/scripts/rig/hw_power.py apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
