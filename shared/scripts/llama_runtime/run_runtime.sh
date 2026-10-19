@@ -49,7 +49,7 @@ Rig guard (scripts/rig/hw_guard.py, rig-guard.service):
   running admits with a warning. LLAMA_GUARD=off skips the check (emergencies only).
 
 Power limits (scripts/rig/hw_power.py, rig-power.service):
-  Before the lock, the load's cards are checked against their planned power limit (GTX 1060s 100 W).
+  Before the lock, the load's cards are checked against their planned power limit (GTX 1060s 100 W, 156 W boards 120 W).
   A card off plan is re-applied once (sudo -n systemctl restart rig-power.service); if it is still
   off, the load is refused (exit 75). LLAMA_POWER_CHECK=off skips it (emergencies only).
 

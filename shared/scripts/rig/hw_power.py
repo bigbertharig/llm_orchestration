@@ -10,12 +10,13 @@
 `nvidia-smi -pl` does not survive a reboot, so the rig sets the caps at every boot, after
 nvidia-persistenced, and run_runtime.sh checks the cards of every load against the plan before
 starting it (the double check: a load on a card at the wrong limit is refused). Caps go by card model, not index (indices moved when the risers were re-cabled):
-the GTX 1060s run at 100 W, measured 2026-08-09 to keep about 98% of decode speed for 17% less energy
-and 5 C cooler (benchmarking results/runtime_experiments/gtx1060_power_cap_100w_20260809.json,
-gpu4_120w_vs_100w_sustained_decode_20260809.json). Cards without a rule keep their default (the
+the GTX 1060s with a 120 W default run at 100 W, measured 2026-08-09 to keep about 98% of decode speed
+for 17% less energy and 5 C cooler (benchmarking results/runtime_experiments/
+gtx1060_power_cap_100w_20260809.json, gpu4_120w_vs_100w_sustained_decode_20260809.json); the
+factory-overclocked ones (156 W default) run at 120 W (operator, 2026-10-18). Cards without a rule keep their default (the
 3090 Ti: no cap measured yet). A planned value outside the card's min/max range is clamped.
-Override in rig-local `brain/hw/power.json`: {"by_model": {"GTX 1060": 100}, "by_index": {"0": 400}}
-(by_index wins). The rig guard reads the resulting limits every sample: its power warn line is their sum.
+Override in rig-local `brain/hw/power.json`: {"by_model": {"GTX 1060": {"156": 120, "120": 100}},
+"by_index": {"0": 400}}. A by_model value is watts, or watts per card default limit; by_index wins. The rig guard reads the resulting limits every sample: its power warn line is their sum.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ LOCAL = Path(__file__).resolve().parents[2]
 # Rig-local hardware state, whichever copy of this file runs (rig checkout or the shared drive's copy).
 _HW = Path(os.getenv("RIG_HW_DIR") or "/home/bryan/llm_orchestration/shared/brain/hw")
 CONFIG_PATH = (_HW if _HW.is_dir() else LOCAL / "brain" / "hw") / "power.json"
-DEFAULT_RULES = {"by_model": {"GTX 1060": 100}, "by_index": {}}
+DEFAULT_RULES = {"by_model": {"GTX 1060": {"156": 120, "120": 100}}, "by_index": {}}
 
 
 def load_rules(path: Path = CONFIG_PATH) -> dict:
@@ -61,7 +62,10 @@ def planned(card: dict, rules: dict) -> float:
     """The limit this card should run at (pure)."""
     want = rules.get("by_index", {}).get(str(card["index"]))
     if want is None:
-        want = next((w for model, w in rules.get("by_model", {}).items() if model in card["name"]), None)
+        rule = next((w for model, w in rules.get("by_model", {}).items() if model in card["name"]), None)
+        if isinstance(rule, dict):  # watts per factory default limit (overclocked boards differ)
+            rule = rule.get(f"{card['default_w']:.0f}")
+        want = rule
     if want is None:
         want = card["default_w"]
     return max(card["min_w"], min(card["max_w"], float(want)))
