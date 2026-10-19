@@ -3,7 +3,9 @@
 # Install: sudo install -m 644 rig-guard.service /etc/systemd/system/ && sudo systemctl enable --now rig-guard
 [Unit]
 Description=Rig hardware guard (power, thermal, memory; load admission)
-After=multi-user.target
+# Not After=multi-user.target: rig-plan.service orders itself after the guard and both are wanted by
+# multi-user.target, so that was an ordering cycle and systemd dropped rig-plan at boot (2026-10-18).
+After=nvidia-persistenced.service rig-power.service
 
 [Service]
 Type=simple
