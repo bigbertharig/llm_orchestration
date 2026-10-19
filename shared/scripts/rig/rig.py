@@ -4,6 +4,7 @@
     ssh rig rig status [--json]
     ssh rig rig start <orchestration|bench> [--force]
     ssh rig rig start remote [profile ...] [--force]
+    ssh rig rig start remote <id> --spec JSON --gpus G --port P   any model, placed by the rig manager
     ssh rig rig stop [profile ...]
 
 One mode at a time. Boot leaves the rig idle (nothing running, no model on any GPU).
@@ -34,6 +35,7 @@ import hw_jobs  # noqa: E402  (rig-side detached jobs, beside this file)
 import hw_state  # noqa: E402  (rig-side lease and claim record, beside this file)
 import hw_guard  # noqa: E402  (rig-side power/thermal/memory guard and load admission, beside this file)
 import hw_plan  # noqa: E402  (active controller + queue of what to do next; rig-plan.service works through it)
+import hw_loadlog  # noqa: E402  (what a load actually got: llama.cpp fit projection, offload, ctx, buffers)
 
 LOCAL = Path(__file__).resolve().parents[2]
 # Network storage (shared drive, later a NAS). Only the orchestration/bench stacks, the control
@@ -474,6 +476,20 @@ def published_profiles() -> dict[str, dict]:
     return profiles
 
 
+def spec_profile(pid: str, spec: dict) -> dict:
+    """A load spec from the rig manager (`--spec`, llm-gateway `load_model`): any registry model, with the
+    context and tensor split the manager planned for the GPUs it leased. Same shape as a published profile."""
+    sys.path.insert(0, str(LOCAL / "agents"))
+    from brain_core import resolve_hotset_gguf
+
+    missing = [k for k in ("model", "gguf_path", "ctx_size") if not spec.get(k)]
+    if missing:
+        raise RigError(f"spec for {pid} lacks {missing}")
+    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    return {"batch_size": 64, "parallel": 1, "extra_args": [], **spec, "id": pid, "spec": True,
+            "gguf_path": str(resolve_hotset_gguf(spec["gguf_path"], config))}
+
+
 def place_profile(profile: dict, free_gpus: list[dict]) -> list[int] | None:
     """Pick one free GPU per requirement, smallest card that fits first (keeps big cards free).
 
@@ -506,6 +522,8 @@ def launch_profile(p: dict, gpus: list[int], port: int, lease: str | None = None
         "--ctx-size", str(p["ctx_size"]), "--batch-size", str(p["batch_size"]),
         "--parallel", str(p["parallel"]), "--memory-limit", REMOTE_MEMORY_LIMIT,
     ]
+    if p.get("n_gpu_layers") is not None:
+        cmd += ["--n-gpu-layers", str(p["n_gpu_layers"])]
     if p.get("tensor_split"):
         cmd += ["--tensor-split", p["tensor_split"]]
     if p.get("image"):
@@ -529,15 +547,21 @@ def remote_loaded_summary(state: dict) -> str:
     return ", ".join(f"{pid} (GPU {e['gpus']}, :{e['port']}, {e['state']})" for pid, e in profiles.items())
 
 
-def claim_remote(requested: list[str], force: bool,
-                 placement: dict | None = None) -> tuple[list[str], int | None]:
+def claim_remote(requested: list[str], force: bool, placement: dict | None = None,
+                 spec: dict | None = None) -> tuple[list[str], int | None]:
     """Under the lock: enter remote mode if needed, place and launch new profiles.
 
     placement ({"gpus": [...], "port": N, "lease": id}, one profile only) comes from the rig manager
     (llm-gateway): launch exactly there instead of choosing, after checking the GPUs are free.
+    spec (one profile, with placement): a manager load spec instead of a published profile.
     Returns (profile ids to wait on, early exit code or None).
     """
-    profiles = published_profiles()
+    if spec is not None:
+        if len(requested) != 1 or placement is None or "gpus" not in placement:
+            raise RigError("--spec loads exactly one profile and needs --gpus and --port")
+        profiles = {requested[0]: spec_profile(requested[0], spec)}
+    else:
+        profiles = published_profiles()
     unknown = [r for r in requested if r not in profiles]
     if unknown:
         raise RigError(f"unknown remote profile(s) {unknown}; published: {sorted(profiles)}")
@@ -575,7 +599,7 @@ def claim_remote(requested: list[str], force: bool,
         if placement is not None and "gpus" in placement:
             gpus, port = list(placement["gpus"]), int(placement["port"])
             free_ids = {x["index"] for x in free}
-            if len(gpus) != len(profiles[pid]["gpus_needed"]):
+            if not profiles[pid].get("spec") and len(gpus) != len(profiles[pid]["gpus_needed"]):
                 raise RigError(f"{pid} needs {len(profiles[pid]['gpus_needed'])} GPU(s); manager gave {gpus}")
             if not set(gpus) <= free_ids:
                 raise RigError(f"manager placed {pid} on GPU {gpus} but GPU {sorted(set(gpus) - free_ids)} "
@@ -615,7 +639,8 @@ def claim_remote(requested: list[str], force: bool,
         # the model serves, and observers (the Pi manager) need to see the load while it waits.
         loaded[pid] = {"model": p["model"], "port": port, "gpus": gpus, "ctx_size": p["ctx_size"],
                        "state": "loading", "container": REMOTE_CONTAINER_PREFIX + pid, "since": now_iso(),
-                       "from": caller(), "lease": (placement or {}).get("lease")}
+                       "from": caller(), "lease": (placement or {}).get("lease"),
+                       **({"spec": True, "tensor_split": p.get("tensor_split")} if p.get("spec") else {})}
         save_state(refresh_remote_status(st))
         try:
             launch_profile(p, gpus, port, (placement or {}).get("lease"), (placement or {}).get("cache_ram"))
@@ -637,10 +662,20 @@ def wait_remote(pid: str) -> str | None:
         if entry["state"] == "ready":
             return None
         if http_get(f"http://127.0.0.1:{entry['port']}/health")[0] == 200:
+            info = load_info(entry)
+            if info["offloaded"] is not None and not info["full_offload"]:
+                err = f"{pid}: refused, not fully on the GPUs: {hw_loadlog.summary(info)}"
+                with Lock():
+                    drop_remote_profile(read_state(), pid, error=err[:800])
+                return err
             with Lock():
                 st = read_state()
                 if pid in st.get("profiles", {}):
-                    st["profiles"][pid]["state"] = "ready"
+                    e = st["profiles"][pid]
+                    e["state"] = "ready"
+                    e["fit"] = {k: info[k] for k in ("n_ctx", "offloaded", "layers", "cards", "host_mb", "projection")}
+                    if info["n_ctx"]:
+                        e["ctx_size"] = info["n_ctx"]  # what llama.cpp allocated
                     save_state(refresh_remote_status(st))
             return None
         running = run(["docker", "inspect", "-f", "{{.State.Running}}", entry["container"]],
@@ -648,18 +683,25 @@ def wait_remote(pid: str) -> str | None:
         if running != "true" or time.time() > deadline:
             logs = run(["docker", "logs", "--tail", "15", entry["container"]], check=False)
             why = "container exited" if running != "true" else f"not ready within {REMOTE_READY_TIMEOUT_S}s"
-            err = f"{pid}: {why}\n{logs.stdout}{logs.stderr}".strip()
+            err = f"{pid}: {why}: {hw_loadlog.summary(load_info(entry))}\n{logs.stdout}{logs.stderr}".strip()
             with Lock():
                 drop_remote_profile(read_state(), pid, error=err[:800])
             return err
         time.sleep(3)
 
 
+def load_info(entry: dict) -> dict:
+    """What the runtime's llama.cpp reported at load (hw_loadlog), GPU ids in the load's order."""
+    logs = run(["docker", "logs", entry["container"]], check=False, timeout=30)
+    return hw_loadlog.parse(logs.stdout + logs.stderr, entry.get("gpus"))
+
+
 def detach_remote(pid: str, args) -> int:
     """Run `start remote <pid> --queue ...` as a rig job and return at once (see hw_jobs)."""
-    profiles = published_profiles()
-    if pid not in profiles:
-        raise RigError(f"unknown remote profile {pid}; published: {sorted(profiles)}")
+    if not args.spec:
+        profiles = published_profiles()
+        if pid not in profiles:
+            raise RigError(f"unknown remote profile {pid}; published: {sorted(profiles)}")
     entry = read_state().get("profiles", {}).get(pid)
     if entry:
         job = {"job": hw_jobs.unit_name(pid), "profile": pid, "active_state": "inactive",
@@ -672,19 +714,22 @@ def detach_remote(pid: str, args) -> int:
             argv += ["--lease", args.lease]
         if args.cache_ram is not None:
             argv += ["--cache-ram", str(args.cache_ram)]
+        if args.spec:
+            argv += ["--spec", args.spec]
         job = {**hw_jobs.launch(pid, argv, caller(), f"rig remote load {pid}"), "profile": pid}
     print(json.dumps(job) if args.json else
           f"{pid}: job {job['job']} {'already running' if job['already_running'] else 'started'}", flush=True)
     return 0
 
 
-def claim_remote_queued(pid: str, force: bool, placement: dict | None) -> tuple[list[str], int | None]:
+def claim_remote_queued(pid: str, force: bool, placement: dict | None,
+                        spec: dict | None = None) -> tuple[list[str], int | None]:
     """claim_remote, waiting for our turn while another load runs (rig rule: one load at a time)."""
     deadline = time.time() + REMOTE_QUEUE_TIMEOUT_S
     while True:
         try:
             with Lock():
-                return claim_remote([pid], force, placement)
+                return claim_remote([pid], force, placement, spec)
         except RigError as exc:
             if exc.code != EXIT_LOCKED or time.time() > deadline:
                 raise
@@ -692,6 +737,14 @@ def claim_remote_queued(pid: str, force: bool, placement: dict | None) -> tuple[
 
 
 def cmd_start_remote(args) -> int:
+    spec = None
+    if args.spec:
+        try:
+            spec = json.loads(args.spec)
+        except ValueError as exc:
+            raise RigError(f"--spec is not JSON: {exc}")
+        if len(args.profiles) != 1:
+            raise RigError("--spec loads exactly one profile id")
     requested = args.profiles or [pid for pid, p in published_profiles().items() if p.get("default")]
     placement = None
     if args.gpus is not None or args.port is not None or args.lease:
@@ -709,10 +762,10 @@ def cmd_start_remote(args) -> int:
     # Load sequentially: claim and launch one profile, wait until it serves, then the next.
     for i, pid in enumerate(requested):
         if args.queue:
-            claimed, early = claim_remote_queued(pid, args.force and i == 0, placement)
+            claimed, early = claim_remote_queued(pid, args.force and i == 0, placement, spec)
         else:
             with Lock():
-                claimed, early = claim_remote([pid], args.force and i == 0, placement)
+                claimed, early = claim_remote([pid], args.force and i == 0, placement, spec)
         if early is not None:
             return early
         wanted += claimed
@@ -866,6 +919,8 @@ def run_plan_item(item: dict) -> tuple[bool, str]:
             cmd += ["--lease", str(a["lease"])]
         if a.get("cache_ram") is not None:
             cmd += ["--cache-ram", str(int(a["cache_ram"]))]
+        if a.get("spec"):
+            cmd += ["--spec", json.dumps(a["spec"])]
     else:
         cmd = [*me, "stop", pid]
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -1039,6 +1094,8 @@ def main() -> int:
     s.add_argument("--json", action="store_true", help="with --detach: print the job as JSON")
     s.add_argument("--cache-ram", type=int, help="remote: llama-server host prompt cache in MiB (controller's "
                                                   "choice per use; default: run_runtime.sh floor 0)")
+    s.add_argument("--spec", help="remote, one profile: a manager load spec (JSON: model, gguf_path, ctx_size, "
+                                  "tensor_split, ...) instead of a published profile")
     s.set_defaults(fn=cmd_start)
     sub.add_parser("observe", help="JSON snapshot for the rig manager").set_defaults(fn=cmd_observe)
     s = sub.add_parser("why", help="why a runtime is down: exit, OOM, guard action, earlyoom")

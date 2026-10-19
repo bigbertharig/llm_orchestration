@@ -17,7 +17,8 @@ Required:
 Optional:
   --image IMAGE               Default: the model library runtime_image
   --host HOST                 Default: 127.0.0.1
-  --ctx-size N                Default: 2048
+  --ctx-size N|auto           Default: 2048. auto: left unset, llama.cpp --fit picks the largest
+                              context that fits the cards (floor --fit-ctx, via --extra-arg)
   --n-gpu-layers N            Default: 999
   --batch-size N              Default: 128
   --threads N                 Default: host nproc
@@ -224,7 +225,6 @@ CMD=(
   --model "${MODEL}"
   --host "${HOST}"
   --port "${PORT}"
-  --ctx-size "${CTX_SIZE}"
   --n-gpu-layers "${N_GPU_LAYERS}"
   --batch-size "${BATCH_SIZE}"
   --threads "${THREADS}"
@@ -234,6 +234,10 @@ CMD=(
   -ctv q8_0
   -lv 4
 )
+
+if [ "${CTX_SIZE}" != "auto" ]; then
+  CMD+=(--ctx-size "${CTX_SIZE}")
+fi
 
 if [ "${#LLAMA_VISIBLE_DEVICES[@]}" -gt 0 ]; then
   CMD+=(--device "$(IFS=,; echo "${LLAMA_VISIBLE_DEVICES[*]}")")

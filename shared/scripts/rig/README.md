@@ -10,6 +10,7 @@ hardware. It keeps working when the controller or the network is gone.
 | `hw_jobs.py` | detached jobs: a load runs as its own systemd unit (`rig-load-<id>`), never on an ssh session |
 | `hw_state.py` | the GPU lease and claim record (rig-local `shared/brain/hw/gpus/`), mirrored to the drive |
 | `hw_guard.py` | always-on power, thermal and memory guard (`rig-guard.service`) and load admission |
+| `hw_loadlog.py` | what a load actually got, from llama-server's startup log: llama.cpp's fit projection per card, layers offloaded, context, buffers per card |
 | `hw_plan.py` | the active controller and the plan queue (rig-local `brain/hw/plan.json`); `rig-plan.service` works through it |
 | `remote_profiles.py` | reads the profiles llm-gateway offers (`~/llm-gateway/remote_profiles.json`) |
 | `systemd/` | units: `rig-boot`, `rig-guard`, `rig-plan`, the stack modes; `earlyoom.default` (tracked `/etc/default/earlyoom`) |
@@ -59,3 +60,13 @@ sections 10-11):
 Open: what power/thermal critical should do; `fail_closed` when the guard is down; VRAM and RAM fit
 before placement; one stop path for every rig job; local results fallback when the drive is gone;
 serialized EvalPlus scoring (run notes section 3).
+
+## Model loads from the manager (2026-10-18)
+
+`rig start remote <id> --spec JSON --gpus G --port P --lease L` loads any registry model the rig manager
+planned (llm-gateway `docs/MANAGER.md`, "Model loads"): the spec carries the model, GGUF, context,
+tensor split and extra args; the manager queues it as a plan `load` item with `spec` in its args. After
+the runtime serves, the rig reads its log (`hw_loadlog.py`): a load that is not fully on the GPUs is
+refused and unloaded; a ready one records `fit` (layers, context, MiB per card, llama.cpp's projection)
+and the context llama.cpp allocated in its profile, which `rig observe` reports. `run_runtime.sh` also
+accepts `--ctx-size auto` (leave the context to llama.cpp's `--fit`), used for experiments only.
