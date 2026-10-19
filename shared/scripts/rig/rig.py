@@ -993,7 +993,9 @@ def cmd_observe(_args) -> int:
         "mode": st["mode"],
         "last_error": st.get("error"),
         # A profile whose container is no longer running (the guard stopped it, or it crashed) is "gone".
-        "profiles": {pid: {**{k: e.get(k) for k in ("port", "gpus", "state", "container", "lease")},
+        "profiles": {pid: {**{k: e.get(k) for k in ("port", "gpus", "state", "container", "lease", "model",
+                                                   "ctx_size", "tensor_split", "fit") if k in e or k in (
+                                                       "port", "gpus", "state", "container", "lease")},
                            **({"state": "gone"} if e.get("state") == "ready" and e.get("container") not in running
                               else {})}
                      for pid, e in st.get("profiles", {}).items()},
