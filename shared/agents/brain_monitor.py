@@ -321,6 +321,8 @@ class BrainMonitorMixin:
         """
         orphan_threshold_seconds = self.heartbeat_stale_seconds
         recovered = 0
+        probe_cache: Dict[str, bool] = {}
+        waiting: set = set()
 
         for task_file in self.processing_path.glob("*.json"):
             try:
@@ -383,13 +385,46 @@ class BrainMonitorMixin:
                 if elapsed < orphan_threshold_seconds:
                     continue
 
+                # Same rule for every worker, GPU or CPU: a stale owner whose host answers is
+                # dead (requeue now); one whose host does not answer is unreachable and may still
+                # come back with the result, so it waits (workspace/brain-behavior.md).
+                owner_state = "alive_not_claiming"
+                trigger = None
+                reason = "orphan_recovered"
+                if worker_state is None:
+                    owner_state = self._classify_missing_owner(assigned_to, probe_cache)
+                if owner_state == "unreachable":
+                    wait_key = f"{task_id}:{task.get('claim_id') or task.get('attempts')}"
+                    waiting.add(wait_key)
+                    first_seen = wait_key not in self._unreachable_waits()
+                    since = self._unreachable_waits().setdefault(wait_key, datetime.now())
+                    trigger = self._unreachable_reassign_trigger(task, running_workers, since)
+                    if trigger is None:
+                        if first_seen:
+                            self.log_decision(
+                                "ORPHAN_UNREACHABLE_WAIT",
+                                f"Owner {assigned_to} of {task.get('name', task_id[:8])} is unreachable; "
+                                f"waiting for it while other work remains",
+                                {
+                                    "task_id": task_id[:8],
+                                    "batch_id": task.get("batch_id"),
+                                    "previous_worker": assigned_to,
+                                    "claim_id": task.get("claim_id"),
+                                    "reassign_after_seconds": self._unreachable_cap(),
+                                },
+                            )
+                        continue
+                    self._unreachable_waits().pop(wait_key, None)
+                    reason = f"unreachable_reassigned_{trigger}"
+
                 task["orphan_recovered_at"] = datetime.now().isoformat()
                 task["orphan_recovered_from"] = assigned_to
-                self._save_requeued_task(task_file, task, "orphan_recovered")
+                task["orphan_owner_state"] = owner_state
+                self._save_requeued_task(task_file, task, reason)
                 recovered += 1
 
                 self.log_decision(
-                    "ORPHAN_REQUEUE",
+                    "ORPHAN_UNREACHABLE_REASSIGN" if trigger else "ORPHAN_REQUEUE",
                     f"Recovered orphaned processing task {task.get('name', task.get('task_id','')[:8])}",
                     {
                         "task_id": task.get("task_id", "")[:8],
@@ -398,6 +433,8 @@ class BrainMonitorMixin:
                         "elapsed_sec": int(elapsed),
                         "worker_running": worker_state is not None,
                         "worker_claimed_task": bool(worker_state is not None and is_claimed),
+                        "owner_state": owner_state,
+                        "trigger": trigger,
                         "action": "requeued"
                     }
                 )
@@ -405,7 +442,88 @@ class BrainMonitorMixin:
             except Exception as e:
                 self.logger.debug(f"Error recovering orphaned task {task_file}: {e}")
 
+        # Forget waits for claims that left processing (finished, or requeued by another path).
+        for key in list(self._unreachable_waits()):
+            if key not in waiting:
+                self._unreachable_waits().pop(key, None)
         return recovered
+
+    # ------------------------------------------------------------------ work recovery
+
+    def _unreachable_waits(self) -> Dict[str, datetime]:
+        if not hasattr(self, "unreachable_since"):
+            self.unreachable_since = {}
+        return self.unreachable_since
+
+    def _unreachable_cap(self):
+        """LARGE DEFAULT (config work_recovery.unreachable_reassign_after_seconds); None = no cap."""
+        return getattr(self, "unreachable_reassign_after_seconds", 14400)
+
+    def _owner_host(self, worker_name: str):
+        """Last known address of a worker on another host; None for workers on this machine.
+
+        CPU workers publish `ip_address` in shared/cpus/<name>/heartbeat.json. GPU agents run on the
+        rig next to the brain, so their host always answers and a stale one is dead.
+        """
+        shared_path = getattr(self, "shared_path", None)
+        cpus_path = Path(shared_path) / "cpus" if shared_path else None
+        if cpus_path is None or not cpus_path.exists():
+            return None
+        for hb_file in cpus_path.glob("*/heartbeat.json"):
+            try:
+                with open(hb_file) as f:
+                    hb = json.load(f)
+            except Exception:
+                continue
+            if str(hb.get("name") or "").strip() == worker_name:
+                return hb.get("ip_address") or hb.get("hostname")
+        return None
+
+    def _host_reachable(self, host: str) -> bool:
+        timeout = int(getattr(self, "host_probe_timeout_seconds", 1))
+        try:
+            return subprocess.run(
+                ["ping", "-c", "1", "-W", str(timeout), host],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout + 2,
+            ).returncode == 0
+        except Exception:
+            return False
+
+    def _classify_missing_owner(self, worker_name: str, probe_cache: Dict[str, bool]) -> str:
+        """'dead' (host answers or is this machine) or 'unreachable' (host does not answer)."""
+        host = self._owner_host(worker_name)
+        if not host:
+            return "dead"
+        if host not in probe_cache:
+            probe_cache[host] = self._host_reachable(host)
+        return "dead" if probe_cache[host] else "unreachable"
+
+    def _unreachable_reassign_trigger(self, task: Dict, running_workers: Dict[str, Dict], since: datetime):
+        """Why an unreachable owner's task should move now, or None to keep waiting.
+
+        - "tail": nothing else in its batch is queued or running on a live worker, so this task is
+          the last work (or what the rest waits on) and waiting gains nothing.
+        - "time_cap": unreachable longer than the LARGE DEFAULT cap.
+        """
+        cap = self._unreachable_cap()
+        if cap is not None and (datetime.now() - since).total_seconds() >= cap:
+            return "time_cap"
+        task_id = task.get("task_id")
+        batch_id = task.get("batch_id")
+        for lane in (self.queue_path, self.processing_path):
+            for f in lane.glob("*.json"):
+                if f.name.endswith(".heartbeat.json"):
+                    continue
+                try:
+                    with open(f) as fh:
+                        other = json.load(fh)
+                except Exception:
+                    continue
+                if other.get("task_id") == task_id or (batch_id and other.get("batch_id") != batch_id):
+                    continue
+                if lane == self.queue_path or other.get("assigned_to") in running_workers:
+                    return None
+        return "tail"
 
     def monitor_system(self):
         """Monitor GPU agent status, make resource allocation decisions.

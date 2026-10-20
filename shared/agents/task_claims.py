@@ -5,6 +5,12 @@ looks gone (orphan) or stuck, and another worker can claim it. If the first work
 (a CPU worker that lost the shared drive for a while) it can still finish later. Without a check, that
 late finish deleted the new owner's processing file and overwrote the result.
 
+The claim is the task's lease. Taking it is the move queue/ -> processing/ under the queue file lock,
+so only one worker holds it; `claim_id` names it; the per-task heartbeat sidecar shows it is still held.
+It ends in exactly two ways: its owner finishes (finalize_task, below), or the brain reassigns it
+(brain_monitor.py: dead owner, stuck task, or an unreachable owner whose task became the tail or hit
+the work_recovery time cap). An old heartbeat alone never frees it.
+
 Rules:
 - Every claim stamps a fresh `claim_id`; the brain scrubs it on requeue like `assigned_to`.
 - A successful result is accepted if no result exists yet (first result wins). The complete/ file is

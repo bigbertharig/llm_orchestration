@@ -189,6 +189,20 @@ class Brain(BrainGoalMixin, BrainCoreMixin, BrainPlanMixin, BrainTaskQueueMixin,
             "meta": 180,
         }
         self.force_kill_requeue_seconds = 60
+        # Work recovery (workspace/brain-behavior.md, "Work Recovery"): a task whose owner's host
+        # does not answer waits until it is the batch's last work, or until this cap. The cap is a
+        # LARGE DEFAULT (4 h), logged at startup so it does not become a forgotten limit; null = off.
+        work_recovery = self.config.get("work_recovery", {}) or {}
+        cap = work_recovery.get("unreachable_reassign_after_seconds", 14400)
+        self.unreachable_reassign_after_seconds = int(cap) if cap is not None else None
+        self.host_probe_timeout_seconds = int(work_recovery.get("host_probe_timeout_seconds", 1))
+        self.unreachable_since: Dict[str, datetime] = {}
+        self.logger.info(
+            "WORK_RECOVERY_POLICY unreachable_reassign_after_seconds=%s (large default, null=off) "
+            "host_probe_timeout_seconds=%s heartbeat_stale_seconds=%s",
+            self.unreachable_reassign_after_seconds, self.host_probe_timeout_seconds,
+            self.heartbeat_stale_seconds,
+        )
         self.thermal_wait_logged: set[str] = set()
         self.last_thermal_wait_count = 0
         # Track dependency auto-fix attempts (missing Python modules, etc.)

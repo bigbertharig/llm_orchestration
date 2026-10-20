@@ -256,6 +256,11 @@ def build_config(assignment, runtime, system):
             "max_power_w": 140,
         },
         "retry_policy": {"max_attempts": 3},
+        "work_recovery": {
+            "_comment": "LARGE DEFAULT time cap, see workspace/brain-behavior.md Work Recovery; null disables it",
+            "unreachable_reassign_after_seconds": 14400,
+            "host_probe_timeout_seconds": 1,
+        },
     }
 
     for w in assignment["gpus"]:

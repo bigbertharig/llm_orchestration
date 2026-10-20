@@ -83,6 +83,11 @@
   "retry_policy": {
     "max_attempts": 3
   },
+  "work_recovery": {
+    "_comment": "LARGE DEFAULT time cap, see workspace/brain-behavior.md Work Recovery; null disables it",
+    "unreachable_reassign_after_seconds": 14400,
+    "host_probe_timeout_seconds": 1
+  },
   "thermal_pause": {
     "initial_seconds": 30,
     "max_seconds": 300,
