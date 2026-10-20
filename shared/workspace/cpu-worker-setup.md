@@ -163,7 +163,10 @@ Image path:
 
 - `/media/bryan/shared/plans/shoulders/research_assistant/docs/worker-image.img.xz`
 
-Last updated: 2026-03-23 (predates the fleet standard; rebuild with the steps below)
+Last updated: 2026-10-20 (from worker 17 after `make_image_ready.sh`, 0 failed checks). Raw size
+7,910,457,344 bytes (fits any card of 8 GB or more), sha256 of the uncompressed image
+`dbc34240e9228a587882cf945bd928de76beb7a926d4708d60bb519e92983229`. The previous image is kept as
+`worker-image-20260323.img.xz`.
 
 Making a new image (needs the SD card in a Linux card reader, e.g. on the Pi):
 
@@ -185,6 +188,17 @@ Making a new image (needs the SD card in a Linux card reader, e.g. on the Pi):
    `check_worker.sh` on it.
 6. Update "Last updated" above and the image contents below.
 
+Capturing on Windows instead (done 2026-10-20; the Pi had no card reader attached): read the card as
+an administrator from `\\.\PhysicalDriveN` (check the number and size with `Get-Disk`) into a raw
+`.img`, then stream it to the Pi and compress there:
+`cat worker.img | ssh pi 'xz -T0 -6 > .../worker-image-new.img.xz.partial'`. Notes from that run:
+plain Python `read()` on the raw disk fails with EINVAL (use `readinto` into a page-aligned `mmap`
+buffer at explicit offsets); one USB reader hung for minutes per read and had to be swapped; Windows
+reports the card a little smaller than its real size, which is fine as long as the partition ends at
+or before the reported size. Before swapping the new image in, check it on the Pi: `xzcat | sha256sum`
+against the raw image's hash, then a read-only loop mount (`losetup -fP -r`, `e2fsck -fn`) to confirm
+the first-boot flag and machine id are gone.
+
 Burning:
 
 ```bash
@@ -194,14 +208,13 @@ xzcat /media/bryan/shared/plans/shoulders/research_assistant/docs/worker-image.i
 
 Image contents:
 
-- Armbian / Debian minimal (terminal-only)
-- NFS mount to the GPU rig in fstab (STALE: the share is on the Pi now; fix fstab after burning,
-  see the provisioning checklist, until the image is rebuilt)
-- Python 3 available
-- First-boot script at `/opt/first-boot.sh`
-- systemd service `cpu-agent.service` enabled
+- Armbian / Debian minimal (terminal-only), one ext4 partition (`armbi_root`), 1.2 GB used
+- Fleet standard from `prepare_worker.sh`: the Pi share fstab line (`10.0.0.2:/media/bryan/shared`),
+  `/etc/sudoers.d/90-bryan-nopasswd`, `/opt/worker-env` matching `requirements.txt`, unattended
+  updates and the other unused timers off
+- First-boot script at `/opt/first-boot.sh`, `first-boot.service` and `cpu-agent.service` enabled
+- Generalized: no `/opt/.first-boot-done`, empty `/etc/machine-id`, empty logs and shell history
 - Control plane SSH public key for both `root` and `bryan`
-- NOT in the image yet: `/etc/sudoers.d/90-bryan-nopasswd` (add it after burning)
 
 ---
 
@@ -328,7 +341,7 @@ python3 /media/bryan/shared/scripts/cpu_agent.py --once --name cpu-worker-10
 2. Burn the base image to microSD.
 3. Boot the worker and wait ~60s for first-boot to complete.
 4. Verify: `ssh 10.0.0.<octet> 'hostname'` returns `worker-<octet>`
-5. Old (2026-03-23) image only: point fstab at the Pi first, because `prepare_worker.sh` lives on the
+5. Old (2026-03-23) image only, not needed with the 2026-10-20 image: point fstab at the Pi first, because `prepare_worker.sh` lives on the
    share (use `ssh root@...` if bryan's sudo asks for a password):
    `ssh 10.0.0.<octet> "sudo sed -i 's#^10\.0\.0\.3:/mnt/shared /media/bryan/shared #10.0.0.2:/media/bryan/shared /media/bryan/shared #' /etc/fstab && sudo systemctl daemon-reload && sudo systemctl restart media-bryan-shared.automount"`
 6. `ssh 10.0.0.<octet> bash /media/bryan/shared/scripts/cpu_worker/prepare_worker.sh`
