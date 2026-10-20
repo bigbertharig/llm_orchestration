@@ -130,9 +130,14 @@ For a replacement rig at 10.0.0.3. A second rig next to this one is not supporte
 
 ### 1. Disabled Unnecessary Services
 
-cups, cups-browsed, avahi-daemon, ModemManager, switcheroo-control, power-profiles-daemon, colord,
-thermald, wpa_supplicant and anacron are disabled; NetworkManager-wait-online is disabled for boot
-speed. Ollama (the old runtime) is masked; its units remain on disk unused.
+cups, cups-browsed, avahi-daemon, ModemManager, switcheroo-control, colord, thermald,
+wpa_supplicant and anacron are disabled; NetworkManager-wait-online is disabled for boot speed.
+Ollama (the old runtime) is masked; its units remain on disk unused.
+
+power-profiles-daemon must be masked, not just disabled: GNOME's `gsd-power` starts it over D-Bus at
+login, and it sets the CPU governor back to `powersave` after `rig-performance-tune` has set
+`performance` (found 2026-10-20: all 8 threads on powersave with the daemon disabled).
+`prepare_rig.sh` masks it.
 
 ### 2. Removed Snap And Desktop Bloat
 

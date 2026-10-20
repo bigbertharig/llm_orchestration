@@ -34,6 +34,11 @@ unheld=$(comm -23 <(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' '*nvidia
   awk -v b="$DRIVER_BRANCH" '$1 ~ /^.i/ && $2 ~ b {sub(/:.*/, "", $2); print $2}' | sort -u) <(apt-mark showhold | sed 's/:.*//' | sort -u) | xargs)
 [ -z "$unheld" ] || step "hold $unheld" sudo apt-mark hold $unheld
 
+# power-profiles-daemon is started over D-Bus by GNOME (gsd-power) even when disabled, and puts the
+# CPU governor back to powersave after rig-performance-tune runs; masking is the only way to stop it
+[ "$(systemctl is-enabled power-profiles-daemon 2>/dev/null)" = "masked" ] ||
+  step "mask power-profiles-daemon, governor performance" bash -c "sudo systemctl mask --now power-profiles-daemon && sudo /usr/local/sbin/rig-performance-tune.sh"
+
 # rig units, tuning script and command
 for u in rig-boot rig-guard rig-plan rig-power rig-performance-tune llm-bench llm-orchestration; do
   install_file "$SYS/$u.service" "/etc/systemd/system/$u.service" 644

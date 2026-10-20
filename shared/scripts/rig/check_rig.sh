@@ -94,6 +94,8 @@ chk "rig-performance-tune.sh matches repo" same /usr/local/sbin/rig-performance-
 [ "$(readlink -f /usr/local/bin/rig)" = "$HERE/rig.py" ] && ok "rig command links to rig.py" || bad "rig command links to rig.py"
 gov=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | xargs)
 [ "$gov" = "performance" ] && ok "CPU governor performance" || bad "CPU governor performance" "$gov"
+ppd=$(systemctl is-enabled power-profiles-daemon 2>/dev/null)
+[ "$ppd" = "masked" ] || [ -z "$ppd" ] && ok "power-profiles-daemon masked" || bad "power-profiles-daemon masked" "$ppd (GNOME starts it over D-Bus and it resets the governor)"
 lvl=$(python3 -c "import json; print(json.load(open('$TREE/shared/brain/hw/guard_state.json'))['level'])" 2>/dev/null)
 [ "$lvl" = "ok" ] && ok "guard ok" || bad "guard ok" "${lvl:-no guard state}"
 chk "orchestration venv (requests, filelock)" /home/bryan/llm-orchestration-venv/bin/python -c 'import requests, filelock'
