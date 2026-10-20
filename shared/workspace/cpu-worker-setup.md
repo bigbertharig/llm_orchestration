@@ -125,13 +125,65 @@ done
 
 ---
 
+## Fleet Standard (source of truth)
+
+Since 2026-10-20 one folder defines a CPU worker: `shared/scripts/cpu_worker/` in this repo, live on the
+share at `/media/bryan/shared/scripts/cpu_worker/` (the Pi checkout's `shared/` is the drive).
+
+| File | Role |
+|---|---|
+| `prepare_worker.sh` | bring a worker to the standard; idempotent; run as bryan |
+| `check_worker.sh` | 17 PASS/FAIL readiness checks; exit 1 on any failure |
+| `requirements.txt` | the `/opt/worker-env` venv, pinned (`requests`, `ddgs` and dependencies: the third-party modules CPU batches have needed) |
+| `cpu-agent.service` | the agent unit, the same file on every worker (`--name cpu-%H`) |
+| `first-boot.sh`, `first-boot.service` | per-clone setup on a fresh card |
+| `make_image_ready.sh` | prepare + check + generalize a worker, then power off for imaging |
+
+`prepare_worker.sh` applies: the sudo rule, the Pi share fstab line, the venv exactly matching
+`requirements.txt` (missing installed, extras removed), the unit and first-boot files, and cleanup
+(apt cache, `~/.cache`, stray venvs, rotated logs). It turns off what a fleet worker does not use: the
+dead `ensure-shared-mount.timer`, `wpa_supplicant` (wired only), `man-db.timer`, and the `apt-daily`
+timers, so workers change only with the image or this script, not by themselves.
+
+Fleet:
+
+```bash
+# from the Pi
+for i in 10 11 12 14 15 16 17; do ssh 10.0.0.$i bash /media/bryan/shared/scripts/cpu_worker/prepare_worker.sh; done
+for i in 10 11 12 14 15 16 17; do ssh 10.0.0.$i bash /media/bryan/shared/scripts/cpu_worker/check_worker.sh | grep -E "FAIL|failed"; done
+```
+
+State 2026-10-20: workers 10-12 and 14-17 pass all checks (1.2-1.3 GB used each); an end-to-end test
+(seven CPU tasks queued with the brain stopped) completed on workers 11, 12, 14, 16 and the Pi's own
+agent with claim ids and durations recorded. Worker 13 is unplugged.
+
 ## Base Image
 
 Image path:
 
 - `/media/bryan/shared/plans/shoulders/research_assistant/docs/worker-image.img.xz`
 
-Last updated: 2026-03-23
+Last updated: 2026-03-23 (predates the fleet standard; rebuild with the steps below)
+
+Making a new image (needs the SD card in a Linux card reader, e.g. on the Pi):
+
+1. Pick the worker with the smallest card (worker 17, 8 GB; 14 and 16 have 16 GB, the rest 32 GB). An
+   image only fits cards at least its size; first-boot grows the filesystem on larger ones.
+2. `ssh 10.0.0.17 bash /media/bryan/shared/scripts/cpu_worker/make_image_ready.sh` - prepares, checks
+   (stops on any FAIL), removes the first-boot flag, blanks the machine id, empties logs and history,
+   then powers off.
+3. Move the card to the reader and find it with `lsblk`. On the Pi the shared drive is `/dev/sda`, so
+   the card is another device (for example `/dev/sdb`); check the size before reading.
+4. Keep the old image and write the new one:
+   ```bash
+   cd /media/bryan/shared/plans/shoulders/research_assistant/docs
+   mv worker-image.img.xz worker-image-20260323.img.xz
+   sudo dd if=/dev/sdX bs=4M status=progress | xz -T0 -6 > worker-image.img.xz
+   ```
+5. Put the card back and boot the worker: first-boot runs again (same IP and name, new SSH host key).
+   Clear the old key on the Pi (`ssh-keygen -f ~/.ssh/known_hosts_workers -R 10.0.0.17`), then run
+   `check_worker.sh` on it.
+6. Update "Last updated" above and the image contents below.
 
 Burning:
 
@@ -170,8 +222,8 @@ Expected runtime paths:
 
 - CPU agent:
   - `/media/bryan/shared/scripts/cpu_agent.py`
-- CPU worker logs (local to Pi):
-  - `/var/log/cpu-agent/cpu-worker-<id>.log`
+- CPU worker logs: the journal (`journalctl -u cpu-agent.service`); there is no
+  `/var/log/cpu-agent/` file
 - config:
   - `/media/bryan/shared/agents/config.json`
 
@@ -211,12 +263,13 @@ CPU agents start automatically on boot via:
 /etc/systemd/system/cpu-agent.service
 ```
 
-The service:
-- Waits for NFS mount (`RequiresMountsFor=/media/bryan/shared`)
-- Waits for the agent script to be accessible (ExecStartPre loop)
-- Runs as user `bryan`
-- Restarts on failure (10s delay)
-- Logs to `/var/log/cpu-agent/cpu-worker-<id>.log`
+The service (source: `shared/scripts/cpu_worker/cpu-agent.service`, the same file on every worker):
+- Starts after first boot, the network and remote filesystems
+- Waits for the agent script on the share (ExecStartPre loop, no start timeout). It no longer uses
+  `RequiresMountsFor`: a mount that failed at boot used to fail the agent for good
+- Runs as user `bryan`, named `cpu-<hostname>` (`--name cpu-%H`)
+- Restarts always (10 s delay)
+- Logs to the journal (`journalctl -u cpu-agent.service`)
 
 Manual control:
 
@@ -259,8 +312,8 @@ python3 /media/bryan/shared/scripts/cpu_agent.py --once --name cpu-worker-10
 
 ## Runtime Notes
 
-- CPU workers log locally to `/var/log/cpu-agent/` (zram-backed on Armbian,
-  survives reboot but not reimaging).
+- CPU workers log to the journal (Armbian keeps logs in RAM via armbian-ramlog and syncs them to
+  `/var/log.hdd`; they do not survive reimaging).
 - CPU workers are expected to stay simple:
   - no GPU ownership
   - no LLM runtime ownership
@@ -275,15 +328,13 @@ python3 /media/bryan/shared/scripts/cpu_agent.py --once --name cpu-worker-10
 2. Burn the base image to microSD.
 3. Boot the worker and wait ~60s for first-boot to complete.
 4. Verify: `ssh 10.0.0.<octet> 'hostname'` returns `worker-<octet>`
-5. Until the image is rebuilt: add the sudo rule (Users section; use `ssh root@...` for this one step
-   if bryan's sudo asks for a password) and point fstab at the Pi:
-   `ssh 10.0.0.<octet> "sudo sed -i 's#^10\.0\.0\.3:/mnt/shared /media/bryan/shared #10.0.0.2:/media/bryan/shared /media/bryan/shared #' /etc/fstab && sudo systemctl daemon-reload && sudo systemctl restart media-bryan-shared.automount && sudo systemctl restart cpu-agent.service"`
-6. Verify: NFS mount active (`mount | grep shared` shows `10.0.0.2:/media/bryan/shared`)
-7. Verify: agent running (`systemctl is-active cpu-agent.service`)
-8. Verify: heartbeat updating (`shared/cpus/cpu-worker-<id>/heartbeat.json`)
+5. Old (2026-03-23) image only: point fstab at the Pi first, because `prepare_worker.sh` lives on the
+   share (use `ssh root@...` if bryan's sudo asks for a password):
+   `ssh 10.0.0.<octet> "sudo sed -i 's#^10\.0\.0\.3:/mnt/shared /media/bryan/shared #10.0.0.2:/media/bryan/shared /media/bryan/shared #' /etc/fstab && sudo systemctl daemon-reload && sudo systemctl restart media-bryan-shared.automount"`
+6. `ssh 10.0.0.<octet> bash /media/bryan/shared/scripts/cpu_worker/prepare_worker.sh`
+7. `ssh 10.0.0.<octet> bash /media/bryan/shared/scripts/cpu_worker/check_worker.sh` shows 0 failed
 
-Fleet state 2026-10-20: workers 10-12 and 14-17 fixed (fstab on the Pi share, sudo rule, bryan login);
-worker 13 unplugged, needs steps 5-8 when it is back.
+Worker 13 (unplugged 2026-10-20) needs steps 5-7 when it is back.
 
 ---
 
