@@ -155,7 +155,9 @@ for i in 10 11 12 14 15 16 17; do ssh 10.0.0.$i bash /media/bryan/shared/scripts
 
 State 2026-10-20: workers 10-12 and 14-17 pass all checks (1.2-1.3 GB used each); an end-to-end test
 (seven CPU tasks queued with the brain stopped) completed on workers 11, 12, 14, 16 and the Pi's own
-agent with claim ids and durations recorded. Worker 13 is unplugged.
+agent with claim ids and durations recorded. Worker 13 (its SD card had been loose) was brought to the
+standard in place with provisioning steps 5-7 and passes all checks. Worker 10 stopped answering
+(no ARP reply) later the same day and needs a physical check.
 
 ## Base Image
 
@@ -347,7 +349,7 @@ python3 /media/bryan/shared/scripts/cpu_agent.py --once --name cpu-worker-10
 6. `ssh 10.0.0.<octet> bash /media/bryan/shared/scripts/cpu_worker/prepare_worker.sh`
 7. `ssh 10.0.0.<octet> bash /media/bryan/shared/scripts/cpu_worker/check_worker.sh` shows 0 failed
 
-Worker 13 (unplugged 2026-10-20) needs steps 5-7 when it is back.
+Worker 13 was brought up this way on 2026-10-20 (steps 5-7 on its existing card).
 
 ---
 
