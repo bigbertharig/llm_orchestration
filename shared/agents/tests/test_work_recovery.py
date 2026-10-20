@@ -100,6 +100,63 @@ class WorkRecoveryTests(unittest.TestCase):
         self.assertEqual(self.brain._recover_orphaned_processing_tasks(running_workers={}), 1)
         self.assertEqual(self._requeued("t1")["requeue_reason"], "unreachable_reassigned_time_cap")
 
+    def test_time_cap_marks_the_task_timed_out(self):
+        self.brain.unreachable_reassign_after_seconds = 100
+        self._processing("t1", "cpu-a")
+        self._queued("t2")
+        self.brain._unreachable_waits()["t1:c1"] = datetime.now() - timedelta(seconds=150)
+        self.brain._recover_orphaned_processing_tasks(running_workers={})
+        task = self._requeued("t1")
+        self.assertTrue(task["timed_out"])
+        self.assertEqual(task["timeouts"][0]["limit"], "work_recovery.unreachable_reassign_after_seconds")
+        self.assertGreaterEqual(task["timeouts"][0]["observed_s"], 150)
+        self.assertEqual(task["recovery_history"][-1]["claim_id"], "c1")
+        self.assertEqual(self._events("TASK_TIMED_OUT")[0]["details"]["worker"], "cpu-a")
+
+    def test_dead_owner_requeue_is_tracked_but_not_timed_out(self):
+        self.reachable["10.0.0.21"] = True
+        self._processing("t1", "cpu-a")
+        self.brain._recover_orphaned_processing_tasks(running_workers={})
+        task = self._requeued("t1")
+        self.assertNotIn("timed_out", task)
+        self.assertEqual(task["recovery_history"][0]["from_worker"], "cpu-a")
+        self.assertEqual(task["recovery_history"][0]["owner_state"], "dead")
+        self.assertEqual(self._events("TASK_TIMED_OUT"), [])
+
+    def test_stuck_requeue_marks_the_no_progress_timeout(self):
+        task = {"task_id": "t9", "batch_id": "batch-1", "name": "slow", "status": "processing",
+                "task_class": "llm", "assigned_to": "gpu-2", "started_at": STALE, "claim_id": "c9"}
+        task_file = self.brain.processing_path / "t9.json"
+        _write_json(task_file, task)
+        incident = self.brain._get_or_create_incident(task, {"success": False})
+        incident["stuck_abort_sent_at"] = (datetime.now() - timedelta(seconds=20)).isoformat()
+        incident["stuck_force_kill_sent_at"] = (datetime.now() - timedelta(seconds=10)).isoformat()
+        incident["stuck_abort_count"] = 2
+        self.brain._handle_stuck_tasks([{"task": task, "task_file": task_file, "task_id": "t9",
+                                         "assigned_to": "gpu-2", "elapsed_min": 20,
+                                         "progress_age_sec": 500, "threshold_sec": 420, "name": "slow"}])
+        queued = self._requeued("t9")
+        self.assertTrue(queued["timed_out"])
+        self.assertEqual(queued["timeouts"][0]["limit"], "task_no_progress_thresholds.llm")
+        self.assertEqual(queued["timeouts"][0]["observed_s"], 500)
+        self.assertEqual(self._events("TASK_TIMED_OUT")[0]["details"]["limit_s"], 420)
+
+    def test_review_script_summarizes_durations_and_timeouts(self):
+        import subprocess
+        complete = self.root / "tasks" / "complete"
+        _write_json(complete / "a.json", {"task_id": "a", "task_class": "llm", "duration_s": 30})
+        _write_json(complete / "b.json", {"task_id": "b", "task_class": "llm", "duration_s": 90,
+                                          "timed_out": True, "timeouts": [
+                                              {"limit": "task_no_progress_thresholds.llm", "limit_s": 420,
+                                               "observed_s": 500, "worker": "gpu-2", "action": "x"}]})
+        script = Path(__file__).resolve().parents[3] / "scripts" / "review_task_durations.py"
+        out = subprocess.run([sys.executable, str(script), "--shared-path", str(self.root), "--json"],
+                             capture_output=True, text=True, check=True).stdout
+        report = json.loads(out)
+        self.assertEqual(report["durations_by_class"]["llm"]["n"], 2)
+        self.assertEqual(report["durations_by_class"]["llm"]["max_s"], 90)
+        self.assertEqual(report["timeouts"][0]["observed_s"], 500)
+
     def test_null_cap_never_reassigns_on_time(self):
         self.brain.unreachable_reassign_after_seconds = None
         self._processing("t1", "cpu-a")

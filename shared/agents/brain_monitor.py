@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
+from task_claims import record_recovery
+
 
 class BrainMonitorMixin:
     def _detect_stuck_tasks(self, running_workers: Dict[str, Dict]) -> List[Dict]:
@@ -270,6 +272,13 @@ class BrainMonitorMixin:
                 continue
 
             current["stuck_requeue_count"] = int(current.get("stuck_requeue_count", 0)) + 1
+            timeout = {
+                "limit": f"task_no_progress_thresholds.{current.get('task_class', 'cpu')}",
+                "limit_s": stuck_info.get("threshold_sec"),
+                "observed_s": stuck_info.get("progress_age_sec"),
+            }
+            self._log_timed_out(current, worker_name, timeout, "force_kill_timeout")
+            record_recovery(current, "force_kill_timeout", worker_name, "stuck", timeout)
             self._save_requeued_task(task_file, current, "force_kill_timeout")
 
             hb_file = self.processing_path / f"{task_id}.heartbeat.json"
@@ -420,6 +429,15 @@ class BrainMonitorMixin:
                 task["orphan_recovered_at"] = datetime.now().isoformat()
                 task["orphan_recovered_from"] = assigned_to
                 task["orphan_owner_state"] = owner_state
+                timeout = None
+                if trigger == "time_cap":
+                    timeout = {
+                        "limit": "work_recovery.unreachable_reassign_after_seconds",
+                        "limit_s": self._unreachable_cap(),
+                        "observed_s": int((datetime.now() - since).total_seconds()),
+                    }
+                    self._log_timed_out(task, assigned_to, timeout, reason)
+                record_recovery(task, reason, assigned_to, owner_state, timeout)
                 self._save_requeued_task(task_file, task, reason)
                 recovered += 1
 
@@ -449,6 +467,22 @@ class BrainMonitorMixin:
         return recovered
 
     # ------------------------------------------------------------------ work recovery
+
+    def _log_timed_out(self, task: Dict, worker: str, timeout: Dict, action: str) -> None:
+        """A time limit moved this task; the task file also gets `timed_out` (task_claims.record_recovery)."""
+        self.log_decision(
+            "TASK_TIMED_OUT",
+            f"Timed out: {task.get('name', task.get('task_id', '')[:8])} on {worker} "
+            f"({timeout['limit']} {timeout['limit_s']} s, observed {timeout['observed_s']} s); {action}",
+            {
+                "task_id": str(task.get("task_id", ""))[:8],
+                "batch_id": task.get("batch_id"),
+                "task_class": task.get("task_class"),
+                "worker": worker,
+                "action": action,
+                **timeout,
+            },
+        )
 
     def _unreachable_waits(self) -> Dict[str, datetime]:
         if not hasattr(self, "unreachable_since"):

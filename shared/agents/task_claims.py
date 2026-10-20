@@ -100,6 +100,12 @@ def finalize_task(tasks_path: Path, task: Dict[str, Any], result: Dict[str, Any]
     task["status"] = "complete" if success else "failed"
     task["completed_at"] = datetime.now().isoformat()
     task["result"] = result
+    try:  # real durations, to learn realistic time limits (scripts/review_task_durations.py)
+        task["duration_s"] = round(
+            (datetime.fromisoformat(task["completed_at"]) - datetime.fromisoformat(task["started_at"]))
+            .total_seconds(), 1)
+    except (KeyError, TypeError, ValueError):
+        pass
 
     if success:
         if not _create_exclusive(tasks_path / "complete" / f"{task_id}.json", task):
@@ -119,6 +125,30 @@ def finalize_task(tasks_path: Path, task: Dict[str, Any], result: Dict[str, Any]
         processing_file.unlink(missing_ok=True)
         heartbeat_file.unlink(missing_ok=True)
     return outcome
+
+
+def record_recovery(
+    task: Dict[str, Any],
+    reason: str,
+    from_worker: Optional[str],
+    owner_state: str,
+    timeout: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Append to the task's recovery history (kept across requeues, ends up in complete/failed).
+
+    `timeout` is set when a time limit moved the task: {"limit": name, "limit_s": value,
+    "observed_s": measured}. It marks the task `timed_out` so it can be found and diagnosed later
+    (scripts/review_task_durations.py lists them next to real durations).
+    """
+    now = datetime.now().isoformat()
+    entry = {"at": now, "reason": reason, "from_worker": from_worker, "owner_state": owner_state,
+             "claim_id": task.get("claim_id")}
+    if timeout:
+        record = {"at": now, "worker": from_worker, "action": reason, **timeout}
+        entry["timeout"] = record
+        task["timed_out"] = True
+        task.setdefault("timeouts", []).append(record)
+    task.setdefault("recovery_history", []).append(entry)
 
 
 def drop_if_already_recorded(tasks_path: Path, queue_file: Path) -> bool:

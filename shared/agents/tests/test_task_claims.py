@@ -7,11 +7,12 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from task_claims import drop_if_already_recorded, finalize_task, owns_claim, stamp_claim
+from task_claims import drop_if_already_recorded, finalize_task, owns_claim, record_recovery, stamp_claim
 
 
 def _write(path: Path, data: dict) -> None:
@@ -103,6 +104,26 @@ class TaskClaimsTest(unittest.TestCase):
         _write(other, {"task_id": "t2", "status": "pending"})
         self.assertFalse(drop_if_already_recorded(self.tasks, other))
         self.assertTrue(other.exists())
+
+    def test_finish_records_duration(self):
+        task = self._claim("gpu-1")
+        task["started_at"] = (datetime.now() - timedelta(seconds=90)).isoformat()
+        finalize_task(self.tasks, task, {"success": True})
+        self.assertAlmostEqual(_read(self.tasks / "complete" / "t1.json")["duration_s"], 90, delta=5)
+
+    def test_recovery_history_and_timed_out_marker(self):
+        task = {"task_id": "t1", "claim_id": "c1"}
+        record_recovery(task, "orphan_recovered", "cpu-a", "dead")
+        self.assertNotIn("timed_out", task)
+        record_recovery(task, "unreachable_reassigned_time_cap", "cpu-b", "unreachable",
+                        {"limit": "work_recovery.unreachable_reassign_after_seconds",
+                         "limit_s": 14400, "observed_s": 14460})
+        self.assertTrue(task["timed_out"])
+        self.assertEqual(task["timeouts"][0]["limit_s"], 14400)
+        self.assertEqual(task["timeouts"][0]["worker"], "cpu-b")
+        self.assertEqual([h["reason"] for h in task["recovery_history"]],
+                         ["orphan_recovered", "unreachable_reassigned_time_cap"])
+        self.assertEqual(task["recovery_history"][0]["claim_id"], "c1")
 
     def test_each_claim_gets_a_new_id(self):
         task = {"task_id": "t1"}
