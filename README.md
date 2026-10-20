@@ -101,6 +101,11 @@ versioned deployment image; it is not the live NFS mount.
 - live on the Pi: `/media/bryan/shared`
 - live on the GPU rig: `/mnt/shared`
 
+Exception, the Pi (checked 2026-10-20): there `~/llm_orchestration/shared` is a bind mount of the
+shared drive, the same files as `/media/bryan/shared`. Edits in the Pi checkout are live at once (CPU
+workers read them on their next start), and the compare below always reports "synchronized" there.
+The rig checkout is a separate copy on local disk; its brain and GPU agents run from it.
+
 Compare source with the live Pi mount without changing anything:
 
 ```bash
