@@ -49,7 +49,8 @@ instead of "GPU slots and VRAM."
 Key constraints:
 - 1 gpu.py agent = 1 physical GPU = 0 or 1 models
 - Split GPU requires hardcoded pairs in `models.catalog.json`
-- PCIe x1 Gen1 bottleneck on worker GPUs (board limitation)
+- Worker GPUs on x1 risers (Gen2 since 2026-10-19): this slows loads only; split decode is set by
+  each 1060's VRAM speed (`distributed_work_guide.md`, split findings)
 - Brain uses LLM for output evaluation, decisions, goal planning — not purely scripted
 
 ---
