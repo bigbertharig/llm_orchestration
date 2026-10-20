@@ -167,6 +167,8 @@ Each layer handles problems at its level. Unresolvable issues escalate upward.
 | Command fails | Brain retries | Script exits non-zero, timeout |
 | Missing task field | Brain infers | `task_class` missing, brain infers from command |
 | GPU agent dies | Brain detects | Heartbeat stale, tasks stuck in processing |
+| Worker unreachable | Brain waits, then reassigns | Heartbeat stale and host does not answer; task waits until it is the batch's last work or the 4 h cap ([brain-behavior.md](brain-behavior.md#work-recovery)) |
+| Late result | First result wins | Requeued owner finishes anyway; extra result kept in `tasks/late/` |
 | Stuck task (>20 min) | Brain escalates | Abort signal -> force kill -> manual |
 | Output poor quality | Brain re-queues | Evaluation score < 3 |
 | Plan malformed | Claude (future) | Missing sections, invalid structure |

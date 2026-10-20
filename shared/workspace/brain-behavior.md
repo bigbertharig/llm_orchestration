@@ -328,6 +328,58 @@ truly_missing = [g for g in missing if gpu_miss_count[g] >= 3]
 
 ---
 
+## Work Recovery
+
+Added 2026-10-19. Code: `brain_monitor.py` (`_recover_orphaned_processing_tasks` and the work
+recovery helpers), `task_claims.py` (claims and finalization). The same model is planned for rigs
+under one controller: llm-gateway `docs/DESIGN_NOTES.md`, "Work recovery: one model at both levels".
+
+**Every worker is treated the same.** GPU agents and CPU workers differ only in where they run, so a
+task whose owner looks gone is classified by one rule:
+
+| Owner state | Signal | Action |
+|---|---|---|
+| alive, claims it | worker running and lists the task | nothing |
+| alive, not claiming | running but does not list the task, task heartbeat stale | requeue now |
+| dead | heartbeat stale and its host answers a ping (or it runs on this machine, as GPU agents do) | requeue now |
+| unreachable | heartbeat stale and its host does not answer (CPU worker off the network or the shared drive) | wait first, below |
+| stuck | alive, no progress past its class limit | abort, abort, kill, requeue (Stuck Task Escalation) |
+| thermal wait | GPU paused for temperature | nothing |
+
+The host comes from the worker's heartbeat (`shared/cpus/<name>/heartbeat.json` `ip_address`); a worker
+with no remote host is on the rig. One ping per host per monitor cycle.
+
+**Wait first for an unreachable owner.** It may still be working and come back with the result, so its
+task stays claimed while other work exists. It is reassigned when:
+- `tail`: nothing else in its batch is queued or running on a live worker (the batch is waiting on
+  it, so waiting gains nothing), or
+- `time_cap`: it has been unreachable for `work_recovery.unreachable_reassign_after_seconds`.
+
+**The claim is the lease.** A worker takes a task by moving it to `processing/` under the queue file
+lock and stamping a fresh `claim_id`; nothing else can take it. The lease ends only when its owner
+finishes or the brain reassigns it as above; an old heartbeat alone never frees it. If a reassigned
+owner comes back and finishes anyway, the first result wins and the other goes to `tasks/late/`
+(`task_claims.py`).
+
+Decision log events: `ORPHAN_REQUEUE` (dead or not claiming, with `owner_state`),
+`ORPHAN_UNREACHABLE_WAIT` (once per claim), `ORPHAN_UNREACHABLE_REASSIGN` (with `trigger`). Requeue
+reasons: `orphan_recovered`, `unreachable_reassigned_tail`, `unreachable_reassigned_time_cap`.
+
+### Time limits (all of them, review when work changes)
+
+Each of these can stop or move work on time alone. They are listed here so none becomes a hidden limit.
+
+| Limit | Value | Where | Effect |
+|---|---|---|---|
+| Unreachable owner cap | **14400 s (4 h), LARGE DEFAULT** | config `work_recovery.unreachable_reassign_after_seconds` (null = off); logged at brain start as `WORK_RECOVERY_POLICY` | reassign an unreachable owner's task even if other work remains |
+| Host probe timeout | 1 s | config `work_recovery.host_probe_timeout_seconds` | ping wait when classifying a stale owner |
+| Heartbeat stale | 120 s (4 x 30 s monitor) | `brain.py` `heartbeat_stale_seconds` | worker counts as gone; orphan checks start |
+| No-progress limits | llm 420 s, script 600 s, cpu 900 s, meta 180 s | `brain.py` `task_no_progress_thresholds` | stuck task escalation starts |
+| Kill grace | 60 s | `brain.py` `force_kill_requeue_seconds` | requeue a stuck task after force kill |
+| Retry attempts | 3 | config `retry_policy.max_attempts` | then abandon / HUMAN file |
+
+---
+
 ## Output Evaluation
 
 The brain evaluates worker output quality:
