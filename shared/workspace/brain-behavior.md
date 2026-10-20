@@ -378,6 +378,21 @@ Each of these can stop or move work on time alone. They are listed here so none 
 | Kill grace | 60 s | `brain.py` `force_kill_requeue_seconds` | requeue a stuck task after force kill |
 | Retry attempts | 3 | config `retry_policy.max_attempts` | then abandon / HUMAN file |
 
+**Timed-out marker.** When a time limit (the unreachable cap or a no-progress limit) moves a task, the
+task file gets `"timed_out": true` and an entry in `timeouts`: `limit` (the name in the table above),
+`limit_s`, `observed_s`, `worker`, `action`, `at`. The brain also logs `TASK_TIMED_OUT`. Both stay on
+the task through requeues and into its final complete/failed file. Liveness verdicts (a dead owner
+requeued at once) are not time-outs.
+
+**Tracking.** Every requeue appends to the task's `recovery_history`: when, `from_worker`, `reason`,
+`owner_state`, and the `claim_id` it ended (with the `timeout` record when one fired), next to the
+existing `workers_attempted`. Finished tasks record `duration_s`.
+
+**Learning the limits.** `python3 scripts/review_task_durations.py --shared-path /mnt/shared` (add
+`--history <plan>/history` for older batches) prints real durations per task class and every time-out
+with its limit and observed value. It never changes a limit: update the values in the table above (and
+their config or code) when the evidence says so.
+
 ---
 
 ## Output Evaluation
