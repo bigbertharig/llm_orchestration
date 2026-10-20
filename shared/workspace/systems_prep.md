@@ -108,6 +108,31 @@ Examples:
 
 These are operator convenience and startup-latency choices.
 
+### 8. PCIe Set To Gen2 In BIOS (2026-10-19)
+
+The BIOS PCIe speed setting is board-wide (no per-slot control). Measured on 2026-10-19:
+
+- Gen2: zero link replays on every GPU through a stress run, a 5-way split load, a 10-minute split
+  traffic test and a split sweep. NVMe (x1) reads 434 MB/s direct.
+- Gen3: NVMe reads 847 MB/s direct and a cold 5-way split load drops from 132 s to 90 s, but GPUs
+  1, 2, 4 and 5 logged link replays from boot (tens of thousands after testing; GPUs 2 and 4 hit
+  the 65535 counter cap). No AER or Xid, but the risers are marginal. Inference speed did not change.
+- Decision: Gen2. GPU 3 links at Gen1 regardless (its slot or riser).
+- Check after any riser or BIOS change: `nvidia-smi -q | grep "Replays Since Reset"` before and after
+  a split load.
+
+Details: benchmarking `BENCHMARK_LESSONS_LEARNED.md`, "PCIe generation and split scaling".
+
+### 9. Windows Desktop As A WSL Worker (2026-10-19)
+
+A Windows 10 desktop can join as a second rig through WSL2 Ubuntu. Scripts and steps:
+`shared/scripts/desktop_worker/README.md`.
+
+- Windows NVIDIA driver on the 580 branch (582.78 for Pascal cards); WSL uses the Windows driver.
+- Native `docker-ce` and `nvidia-container-toolkit` inside Ubuntu (not Docker Desktop).
+- Windows OpenSSH server with `bash.exe` as its default shell, key-only, Ethernet-only firewall rules.
+- Manual worker mode switch; it does not auto-start at boot.
+
 ---
 
 ## Important Boundary

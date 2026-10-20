@@ -360,6 +360,13 @@ speed (24.2 vs 24.0 tok/s) — the activation tensor transfer through PCIe x1
 more GPUs gives more VRAM headroom (bigger context, bigger models) without losing
 speed.
 
+> Correction (2026-10-19): measured, PCIe bandwidth is not what limits split decode. The same
+> 7B model decodes at 22-24 tok/s on 1 to 5 GTX 1060s, at Gen2 and at Gen3, and a split moves
+> only 6-58 MB/s per x1 link. Each hop costs well under a millisecond; the limit is each card's
+> own VRAM bandwidth, with the cards working one after another. PCIe speed shows up in loads and
+> in prefill batch size. See benchmarking `BENCHMARK_LESSONS_LEARNED.md`, "PCIe generation and
+> split scaling".
+
 **MoE on 4× cheap 1060s matches single-1060 7B speed.** The 26B MoE model at
 24.2 tok/s is faster than a single 1060 running 7B dense (22.7 tok/s), despite
 being a brain-class model with dramatically better reasoning. This is the free
