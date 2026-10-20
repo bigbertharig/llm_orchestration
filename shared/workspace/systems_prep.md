@@ -35,13 +35,16 @@ GPUs (PCIe slot order is the CUDA index order):
 | Index | Card | Bus | Factory limit | Planned limit (`hw_power.py`) |
 |---|---|---|---|---|
 | 0 | RTX 3090 Ti (EVGA) | 01:00.0 | 450 W | 450 W |
-| 1 | GTX 1060 6GB | 02:00.0 | 120 W | 100 W |
-| 2 | GTX 1060 6GB (156 W OC board) | 03:00.0 | 156 W | 120 W |
-| 3 | GTX 1060 6GB | 07:00.0 | 120 W | 100 W (links at Gen1) |
-| 4 | GTX 1060 6GB | 0D:00.0 | 120 W | 100 W |
-| 5 | GTX 1060 6GB (156 W OC board) | 10:00.0 | 156 W | 120 W |
+| 1 | GTX 1060 6GB, EVGA single fan (3842:6163), pair of GPU 3 | 02:00.0 | 120 W | 100 W |
+| 2 | GTX 1060 6GB, ASUS 156 W OC (1043:85ac), pair of GPU 5 | 03:00.0 | 156 W | 120 W |
+| 3 | GTX 1060 6GB, EVGA single fan (3842:6163), pair of GPU 1 | 07:00.0 | 120 W | 100 W (links at Gen1) |
+| 4 | GTX 1060 6GB, ASUS DUAL-GTX1060-O6G white 2-fan (1043:85b6), the unique card | 0D:00.0 | 120 W | 100 W |
+| 5 | GTX 1060 6GB, ASUS 156 W OC (1043:85ac), pair of GPU 2 | 10:00.0 | 156 W | 120 W |
 
-All 1060s sit on x1 risers; the 3090 Ti is on x16. After moving cards, rerun the stress compare
+Boards are identified by PCI subsystem ID (`lspci -s <bus> -vnn`), not by slot. All 1060s sit on x1
+risers; the 3090 Ti is on x16. Hottest under sustained single-card load (2026-10-20): GPU 3, a single-fan
+EVGA at 82-83 C with its fan at 90 percent; the 1060s report a 99 C slowdown and 102 C shutdown, and their
+GPU Boost target is 83 C (clocks drop above it). After moving cards, rerun the stress compare
 (llm-gateway `tools/rig_stress.py --compare`) and update this table.
 
 ---
@@ -217,7 +220,9 @@ Lost with the rig and rebuilt by the steps above:
 
 - `shared/agents/config.json` (machine facts; regenerate with `setup.py`)
 - `shared/brain/hw/`: lease and claim record (mirrored to `/mnt/shared/gpus/`), guard state and
-  events, lease audit log, plan queue; optional `power.json` and `guard.json` overrides
+  events, lease audit log, plan queue; optional `power.json` and `guard.json` overrides. Current
+  `guard.json` (2026-10-20): `{"gpu_temp_c": {"warn": 85, "critical": 90}}` (default warn 83 flapped on
+  GPU 3); restart `rig-guard` after changing it
 - the hot-sets (copies of archive models) and the Docker images (rebuilt from the repos)
 - the ssh keys
 
