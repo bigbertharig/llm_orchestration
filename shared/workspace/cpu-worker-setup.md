@@ -50,6 +50,7 @@ to be a separate, older copy.
 - gigabit ethernet
 - heatsinks strongly recommended
 - All 8 share a single power supply and network switch (power-cycled together)
+- The switch has ethernet ports for only 7 workers, so one worker is always offline; which one varies
 
 These machines are for low-memory CPU work, not heavyweight local model
 inference.
@@ -156,8 +157,7 @@ for i in 10 11 12 14 15 16 17; do ssh 10.0.0.$i bash /media/bryan/shared/scripts
 State 2026-10-20: workers 10-12 and 14-17 pass all checks (1.2-1.3 GB used each); an end-to-end test
 (seven CPU tasks queued with the brain stopped) completed on workers 11, 12, 14, 16 and the Pi's own
 agent with claim ids and durations recorded. Worker 13 (its SD card had been loose) was brought to the
-standard in place with provisioning steps 5-7 and passes all checks. Worker 10 stopped answering
-(no ARP reply) later the same day and needs a physical check.
+standard in place with provisioning steps 5-7 and passes all checks.
 
 ## Base Image
 
