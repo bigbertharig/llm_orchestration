@@ -24,10 +24,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+# This file sits in <shared root>/scripts/ both in the repo (shared/scripts/) and on the shared
+# drive (/media/bryan/shared/scripts/ or /mnt/shared/scripts/), so the agents are one level up.
+SHARED_ROOT = Path(__file__).resolve().parents[1]
 AGENTS_DIR_CANDIDATES = [
-    REPO_ROOT / "shared" / "agents",
+    SHARED_ROOT / "agents",
     Path("/media/bryan/shared/agents"),
+    Path("/mnt/shared/agents"),
 ]
 for candidate in AGENTS_DIR_CANDIDATES:
     if candidate.exists() and str(candidate) not in sys.path:
@@ -35,6 +38,7 @@ for candidate in AGENTS_DIR_CANDIDATES:
 
 from executor import PermissionExecutor  # noqa: E402
 from hardware import scan_cpu_temps  # noqa: E402
+from task_claims import drop_if_already_recorded, finalize_task, stamp_claim  # noqa: E402
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -577,7 +581,7 @@ class CpuAgent:
                 continue
 
             try:
-                if not task_file.exists():
+                if not task_file.exists() or drop_if_already_recorded(self.queue_path.parent, task_file):
                     self._release_lock(lock_path)
                     continue
                 task = _load_json(task_file)
@@ -615,6 +619,7 @@ class CpuAgent:
                 task["status"] = "processing"
                 task["assigned_to"] = self.agent_name
                 task["started_at"] = now
+                stamp_claim(task)
 
                 dest = self.processing_path / task_file.name
                 os.replace(task_file, dest)
@@ -628,29 +633,17 @@ class CpuAgent:
 
     def _finalize_task(self, task: Dict[str, Any], result: Dict[str, Any]) -> None:
         task_id = task["task_id"]
-        task["completed_at"] = datetime.now().isoformat()
-        task["result"] = result
-        task["status"] = "complete" if result.get("success") else "failed"
-
-        src = self.processing_path / f"{task_id}.json"
-        if src.exists():
-            try:
-                src.unlink()
-            except Exception:
-                pass
-
-        if self._active_task_heartbeat and self._active_task_heartbeat.exists():
-            try:
-                self._active_task_heartbeat.unlink()
-            except Exception:
-                pass
+        # First result wins; processing/ and the task heartbeat are only removed while this
+        # worker still owns the claim (agents/task_claims.py). A worker cut off from the shared
+        # drive long enough to be requeued lands here late.
+        outcome = finalize_task(self.queue_path.parent, task, result)
+        if outcome == "late":
+            self._log(f"task {task_id[:8]} finished after its claim moved on "
+                      f"({task.get('late_reason')}); kept in tasks/late/")
 
         # Clean up any leftover lock file from the queue
         queue_lock = self.queue_path / f"{task_id}.json.lock"
         self._release_lock(queue_lock)
-
-        out_dir = self.complete_path if task["status"] == "complete" else self.failed_path
-        _write_json(out_dir / f"{task_id}.json", task)
 
     def _execute_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task_id = task["task_id"]

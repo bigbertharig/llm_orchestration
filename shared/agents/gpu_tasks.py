@@ -21,6 +21,7 @@ from brain_core import (
     startup_gate_status,
 )
 from control_policy import control_policy_allows_task
+from task_claims import drop_if_already_recorded, stamp_claim
 from gpu_constants import (
     ATTESTATION_MISS_HARD_FAIL_THRESHOLD,
     ATTESTATION_MISS_SOFT_FAIL_THRESHOLD,
@@ -1030,6 +1031,8 @@ class GPUTaskMixin:
             if str(task_file).endswith('.lock'):
                 continue
             try:
+                if drop_if_already_recorded(self.queue_path.parent, task_file):
+                    continue
                 with open(task_file) as f:
                     task = json.load(f)
 
@@ -1142,6 +1145,7 @@ class GPUTaskMixin:
                         task["status"] = "processing"
                         task["assigned_to"] = self.name
                         task["started_at"] = task["last_attempt_at"]
+                        stamp_claim(task)
                         # Keep meta tasks visible in processing/ for observability.
                         new_path = self.processing_path / task_file.name
                         with open(new_path, 'w') as f:
@@ -1287,6 +1291,7 @@ class GPUTaskMixin:
                     task["status"] = "processing"
                     task["assigned_to"] = self.name
                     task["started_at"] = task["last_attempt_at"]
+                    stamp_claim(task)
 
                     # Move to processing
                     new_path = self.processing_path / task_file.name

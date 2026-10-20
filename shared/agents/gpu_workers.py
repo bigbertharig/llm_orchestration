@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
+from task_claims import finalize_task
+
 
 class WorkerResult:
     """Result from a completed worker subprocess."""
@@ -222,26 +224,18 @@ class GPUWorkerMixin:
         for wr in self.outbox:
             task = wr.task
             result = wr.result
+            result["max_vram_used_mb"] = wr.peak_vram_mb
 
-            task["status"] = "complete" if result.get("success") else "failed"
-            task["completed_at"] = datetime.now().isoformat()
-            task["result"] = result
-            task["result"]["max_vram_used_mb"] = wr.peak_vram_mb
-
-            dest_path = self.complete_path if result.get("success") else self.failed_path
-            dest_file = dest_path / f"{task['task_id']}.json"
-
-            with open(dest_file, 'w') as f:
-                json.dump(task, f, indent=2)
-
-            # Remove from processing
-            proc_file = self.processing_path / f"{task['task_id']}.json"
-            if proc_file.exists():
-                proc_file.unlink()
-            self._remove_task_heartbeat(task["task_id"])
-
-            status = "completed" if result.get("success") else "failed"
-            self.logger.info(f"Task {task['task_id'][:8]}... {status}")
+            # First result wins; processing/ and the heartbeat are only removed while this
+            # worker still owns the claim (task_claims.py).
+            outcome = finalize_task(self.complete_path.parent, task, result)
+            if outcome == "late":
+                self.logger.warning(
+                    f"Task {task['task_id'][:8]}... finished after its claim moved on "
+                    f"({task.get('late_reason')}); kept in tasks/late/"
+                )
+            else:
+                self.logger.info(f"Task {task['task_id'][:8]}... {'completed' if outcome == 'complete' else 'failed'}")
 
         count = len(self.outbox)
         self.outbox.clear()

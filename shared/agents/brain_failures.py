@@ -48,6 +48,7 @@ class BrainFailureMixin:
         task["requeue_reason"] = reason
         task.pop("assigned_to", None)
         task.pop("worker", None)
+        task.pop("claim_id", None)
         task.pop("started_at", None)
         task.pop("completed_at", None)
         task.pop("result", None)
@@ -67,7 +68,7 @@ class BrainFailureMixin:
         violations = []
         if task.get("status") != "pending":
             violations.append(f"status={task.get('status')!r}")
-        for field in ("assigned_to", "started_at", "completed_at"):
+        for field in ("assigned_to", "claim_id", "started_at", "completed_at"):
             if field in task:
                 violations.append(f"unexpected_{field}")
         result = task.get("result")
