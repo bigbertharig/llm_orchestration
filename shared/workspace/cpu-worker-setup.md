@@ -85,22 +85,35 @@ directly against shared scripts, queues, and outputs.
 
 ## SSH Access
 
-Two users have SSH key auth configured:
+Access standard (2026-10-20, same on every worker, like the Pi and the rig): log in as `bryan`,
+use passwordless `sudo` for system changes. `root` keeps the control plane's key as a fallback only
+(for example when sudo is broken); do not work as root day to day, it leaves root-owned files the
+agent (`bryan`) cannot write.
 
-- `root` — used for system administration
-- `bryan` — used by `restart_cpu_workers.sh` and the systemd service
+- `bryan` — normal login, `restart_cpu_workers.sh`, the systemd service; passwordless sudo from
+  `/etc/sudoers.d/90-bryan-nopasswd` (one line: `bryan ALL=(ALL) NOPASSWD:ALL`, mode 440)
+- `root` — fallback only: `ssh root@10.0.0.<octet>`
 
 Both have the control plane's public key in `~/.ssh/authorized_keys`.
 The key is baked into the base image via the first-boot script.
 
+Add the sudo rule to a worker that lacks it (from the control plane, once, needs a working sudo or
+the root fallback):
+
+```bash
+ssh -t 10.0.0.<octet> "echo 'bryan ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-bryan-nopasswd && sudo chmod 440 /etc/sudoers.d/90-bryan-nopasswd && sudo visudo -c"
+```
+
 SSH config on control plane (`~/.ssh/config`):
 
 ```
-Host 10.0.0.10 10.0.0.11 10.0.0.12 10.0.0.13 10.0.0.14 10.0.0.15 10.0.0.16 10.0.0.17
-    User root
+Host 10.0.0.10 10.0.0.11 10.0.0.12 10.0.0.13
+    User bryan
     StrictHostKeyChecking accept-new
     UserKnownHostsFile ~/.ssh/known_hosts_workers
 ```
+
+(14-17 have no entry and also log in as `bryan`, the default user.)
 
 If host keys change (reimaging, first-boot re-run), clear the stale entries:
 
@@ -130,11 +143,13 @@ xzcat /media/bryan/shared/plans/shoulders/research_assistant/docs/worker-image.i
 Image contents:
 
 - Armbian / Debian minimal (terminal-only)
-- NFS mount to GPU rig in fstab
+- NFS mount to the GPU rig in fstab (STALE: the share is on the Pi now; fix fstab after burning,
+  see the provisioning checklist, until the image is rebuilt)
 - Python 3 available
 - First-boot script at `/opt/first-boot.sh`
 - systemd service `cpu-agent.service` enabled
 - Control plane SSH public key for both `root` and `bryan`
+- NOT in the image yet: `/etc/sudoers.d/90-bryan-nopasswd` (add it after burning)
 
 ---
 
@@ -207,13 +222,13 @@ Manual control:
 
 ```bash
 # Check status
-ssh root@10.0.0.10 'systemctl status cpu-agent.service'
+ssh 10.0.0.10 'systemctl status cpu-agent.service'
 
 # Restart
-ssh root@10.0.0.10 'systemctl restart cpu-agent.service'
+ssh 10.0.0.10 'sudo systemctl restart cpu-agent.service'
 
 # Stop
-ssh root@10.0.0.10 'systemctl stop cpu-agent.service'
+ssh 10.0.0.10 'sudo systemctl stop cpu-agent.service'
 ```
 
 ---
@@ -259,10 +274,16 @@ python3 /media/bryan/shared/scripts/cpu_agent.py --once --name cpu-worker-10
 1. Ensure DHCP reservation exists on router for the Pi's MAC address.
 2. Burn the base image to microSD.
 3. Boot the worker and wait ~60s for first-boot to complete.
-4. Verify: `ssh root@10.0.0.<octet> 'hostname'` → `worker-<octet>`
-5. Verify: NFS mount active (`mount | grep shared`)
-6. Verify: agent running (`systemctl is-active cpu-agent.service`)
-7. Verify: heartbeat updating (`shared/cpus/cpu-worker-<id>/heartbeat.json`)
+4. Verify: `ssh 10.0.0.<octet> 'hostname'` returns `worker-<octet>`
+5. Until the image is rebuilt: add the sudo rule (Users section; use `ssh root@...` for this one step
+   if bryan's sudo asks for a password) and point fstab at the Pi:
+   `ssh 10.0.0.<octet> "sudo sed -i 's#^10\.0\.0\.3:/mnt/shared /media/bryan/shared #10.0.0.2:/media/bryan/shared /media/bryan/shared #' /etc/fstab && sudo systemctl daemon-reload && sudo systemctl restart media-bryan-shared.automount && sudo systemctl restart cpu-agent.service"`
+6. Verify: NFS mount active (`mount | grep shared` shows `10.0.0.2:/media/bryan/shared`)
+7. Verify: agent running (`systemctl is-active cpu-agent.service`)
+8. Verify: heartbeat updating (`shared/cpus/cpu-worker-<id>/heartbeat.json`)
+
+Fleet state 2026-10-20: workers 10-12 and 14-17 fixed (fstab on the Pi share, sudo rule, bryan login);
+worker 13 unplugged, needs steps 5-8 when it is back.
 
 ---
 
@@ -272,8 +293,8 @@ The dashboard drops CPU workers whose heartbeats are older than 10 minutes
 (`HEARTBEAT_MAX_S = 600`). If workers disappear from the dashboard:
 
 1. Check if the Pi is reachable: `ping 10.0.0.<octet>`
-2. Check agent status: `ssh root@10.0.0.<octet> 'systemctl status cpu-agent.service'`
-3. Check NFS mount: `ssh root@10.0.0.<octet> 'mount | grep shared'`
+2. Check agent status: `ssh 10.0.0.<octet> 'systemctl status cpu-agent.service'`
+3. Check NFS mount: `ssh 10.0.0.<octet> 'mount | grep shared'` (should be `10.0.0.2:/media/bryan/shared`)
 4. Check heartbeat file timestamp on shared drive
 
 ---
@@ -312,11 +333,13 @@ Then update the base image to include the new key.
 
 Check journal:
 ```bash
-ssh root@10.0.0.<octet> 'journalctl -u cpu-agent.service -n 30 --no-pager'
+ssh 10.0.0.<octet> 'journalctl -u cpu-agent.service -u media-bryan-shared.mount -n 30 --no-pager'
 ```
 
 Common causes:
-- NFS mount not available (check fstab, check GPU rig NFS server)
+- NFS mount not available (check fstab points at the Pi `10.0.0.2:/media/bryan/shared`, not the old
+  `10.0.0.3:/mnt/shared`; check the Pi NFS server). Seen 2026-10-20: every worker still on the rig
+  line, the mount timed out at boot and `cpu-agent.service` failed with result 'dependency'.
 - Permission error writing heartbeat (check file ownership on shared drive)
 - Python not available
 
