@@ -4,6 +4,12 @@ Date: 2026-03-04
 Scope: core orchestration (`shared/agents/*`)
 Status: Open (not implemented)
 
+> 2026-10-19: this plan is now part of the work-recovery model in llm-gateway
+> `docs/DESIGN_NOTES.md`, "Work recovery: one model at both levels" (step c). Its processing
+> timeouts and bounded requeues become the `stuck` and `dead` cases there; a new `unreachable`
+> case (CPU workers that lose the shared drive, later whole rigs) waits before reassigning.
+> Claim ids and first-result-wins finalization are done (`shared/agents/task_claims.py`).
+
 ## Goal
 
 Prevent stale queue/processing tasks from poisoning scheduling by adding deterministic lifecycle cleanup with bounded recovery.
