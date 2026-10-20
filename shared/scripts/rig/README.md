@@ -14,7 +14,9 @@ hardware. It keeps working when the controller or the network is gone.
 | `hw_power.py` | GPU power limits: set at boot by `rig-power.service` (GTX 1060s 100 W, the overclocked 156 W boards 120 W, others their default; rig-local `brain/hw/power.json` overrides), and re-checked by `run_runtime.sh` for the cards of every load |
 | `hw_plan.py` | the active controller and the plan queue (rig-local `brain/hw/plan.json`); `rig-plan.service` works through it |
 | `remote_profiles.py` | reads the profiles llm-gateway offers (`~/llm-gateway/remote_profiles.json`) |
-| `systemd/` | units: `rig-boot`, `rig-guard`, `rig-plan`, the stack modes; `earlyoom.default` (tracked `/etc/default/earlyoom`) |
+| `systemd/` | units: `rig-boot`, `rig-guard`, `rig-plan`, `rig-power`, `rig-performance-tune`, the stack modes; `earlyoom.default` (tracked `/etc/default/earlyoom`) |
+| `rig-performance-tune.sh` | boot tuning (`/usr/local/sbin`): CPU governor performance, swappiness 10, GPU persistence mode |
+| `check_rig.sh`, `prepare_rig.sh` | host standard for the rig (`shared/workspace/systems_prep.md`): PASS/FAIL readiness checks; idempotent setup (`--apply`) |
 
 `../llama_runtime/run_runtime.sh` is the one path every model load takes (brain, workers, split
 workers, `rig.py`, campaigns, benchmark lanes, runtime smoke). It holds the rig rules for a load:
