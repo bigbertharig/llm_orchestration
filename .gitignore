@@ -45,6 +45,8 @@ shared/scripts/*
 !shared/scripts/llama_runtime/**
 !shared/scripts/rig/
 !shared/scripts/rig/**
+!shared/scripts/desktop_worker/
+!shared/scripts/desktop_worker/**
 shared/scripts/rig/__pycache__/
 !shared/scripts/benchmarks/
 !shared/scripts/benchmarks/**
