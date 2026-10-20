@@ -1,0 +1,23 @@
+# CPU agent unit, the fleet standard (installed by prepare_worker.sh to /etc/systemd/system/).
+# One file for every worker: the name comes from the hostname (cpu-%H, e.g. cpu-worker-10), which
+# first-boot.sh sets, so this unit starts after it.
+# No RequiresMountsFor: a share that is late at boot must not fail the agent for good (2026-10-20 every
+# worker sat dead for about 12 days after a failed boot-time mount). ExecStartPre waits for the share
+# instead; the automount retries on each access.
+[Unit]
+Description=LLM Orchestration CPU Agent (cpu-%H)
+After=network-online.target remote-fs.target first-boot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bryan
+ExecStartPre=/bin/bash -c "until [ -f /media/bryan/shared/scripts/cpu_agent.py ]; do sleep 5; done"
+TimeoutStartSec=infinity
+ExecStart=/usr/bin/python3 /media/bryan/shared/scripts/cpu_agent.py --config /media/bryan/shared/agents/config.json --name cpu-%H
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

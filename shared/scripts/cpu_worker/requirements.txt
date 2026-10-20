@@ -1,0 +1,25 @@
+# CPU worker venv (/opt/worker-env), the fleet standard. prepare_worker.sh makes every worker match it
+# exactly. Third-party modules CPU batches have needed (batch env_manifest.json files, 2026-02 to 2026-05):
+# requests, ddgs (duckduckgo_search is its old name). Pins taken from worker-14 on 2026-10-20.
+anyio==4.12.1
+beautifulsoup4==4.14.3
+brotli==1.2.0
+certifi==2026.1.4
+charset-normalizer==3.4.4
+click==8.3.1
+ddgs==9.10.0
+fake-useragent==2.2.0
+h11==0.16.0
+h2==4.3.0
+hpack==4.1.0
+httpcore==1.0.9
+httpx==0.28.1
+hyperframe==6.1.0
+idna==3.11
+lxml==6.0.2
+primp==1.0.0
+requests==2.32.5
+socksio==1.0.0
+soupsieve==2.8.3
+typing_extensions==4.15.0
+urllib3==2.6.3

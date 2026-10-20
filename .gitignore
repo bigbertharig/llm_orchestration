@@ -47,6 +47,8 @@ shared/scripts/*
 !shared/scripts/rig/**
 !shared/scripts/desktop_worker/
 !shared/scripts/desktop_worker/**
+!shared/scripts/cpu_worker/
+!shared/scripts/cpu_worker/**
 shared/scripts/rig/__pycache__/
 !shared/scripts/benchmarks/
 !shared/scripts/benchmarks/**

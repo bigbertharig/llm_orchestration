@@ -1,0 +1,13 @@
+[Unit]
+Description=First boot setup (hostname + SSH keys)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/opt/.first-boot-done
+
+[Service]
+Type=oneshot
+ExecStart=/opt/first-boot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
