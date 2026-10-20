@@ -118,16 +118,16 @@ replace review or make fix decisions.
 | Motherboard | ASUS B250 Mining Expert (19× PCIe slots: 1× x16, 18× x1) |
 | CPU | Intel i7-7700K (4 cores / 8 threads, 4.2 GHz, LGA 1151) |
 | RAM | 2× 16GB DDR4-2133 UDIMM (32GB total, non-ECC) |
-| PCIe generation | 3.0 |
+| PCIe generation | Gen2, set board-wide in BIOS (2026-10-19; Gen3 logged riser link replays) |
 | PSU | Dual/triple PSU capable, ~2,200W total capacity |
 
 | GPU | Type | VRAM | Slot | Role | Models |
 |-----|------|------|------|------|--------|
-| 0 | RTX 3090 | 24GB | x16 | Brain | 26B–35B models (Qwen3.6, Gemma-4 26B/31B) |
+| 0 | RTX 3090 Ti | 24GB | x16 | Brain | 26B–35B models (Qwen3.6, Gemma-4 26B/31B) |
 | 1–5 | GTX 1060 | 6GB each | x1 risers | Workers | 3B–7B single, 14B split (pairs of 2) |
 
 Strengths: 19 PCIe slots, dual/triple PSU, proven stable, can hold many worker GPUs.
-Limits: PCIe 3.0 only, x1 risers for workers, 32GB RAM (2 slots maxed), 2017 platform.
+Limits: x1 risers for workers (fine for decode, slower loads), 32GB RAM (2 slots maxed), 2017 platform.
 
 **CPU workers (10.0.0.10–17) — Orange Pi Prime fleet**
 
@@ -354,28 +354,31 @@ Prior baseline (Feb 2026, Ollama, different runtime):
 
 ### Key findings
 
-**PCIe x1 is the bottleneck, not GPU count.** 4-way and 5-way MoE give identical
-speed (24.2 vs 24.0 tok/s) — the activation tensor transfer through PCIe x1
-(~0.25 GB/s) caps throughput regardless of how many GPUs share the work. Adding
-more GPUs gives more VRAM headroom (bigger context, bigger models) without losing
-speed.
+**The cards' own VRAM speed sets split decode, not PCIe (measured 2026-10-19).** A layer split
+runs the cards one after another: each token passes through every card's layers in turn, and each
+card is limited by how fast it reads its share of the weights from its own VRAM. The same 7B model
+decodes at 22-24 tok/s on 1 to 5 GTX 1060s, at Gen2 and at Gen3, and a split moves only 6-58 MB/s
+per x1 link (Gen2 x1 carries about 500 MB/s). That is why 4-way and 5-way MoE give the same speed
+(24.2 vs 24.0 tok/s): the same bytes are read per token by cards of the same speed. Adding cards adds
+VRAM (bigger context, bigger models) without losing or gaining decode speed. PCIe speed shows up only
+in load time (cold 5-way load 132 s at Gen2, 90 s at Gen3) and prefill is set by micro-batch size
+(`-ub 512` gave 2.4x). Details: benchmarking `BENCHMARK_LESSONS_LEARNED.md`, "PCIe generation and
+split scaling (2026-10-19)".
 
-> Correction (2026-10-19): measured, PCIe bandwidth is not what limits split decode. The same
-> 7B model decodes at 22-24 tok/s on 1 to 5 GTX 1060s, at Gen2 and at Gen3, and a split moves
-> only 6-58 MB/s per x1 link. Each hop costs well under a millisecond; the limit is each card's
-> own VRAM bandwidth, with the cards working one after another. PCIe speed shows up in loads and
-> in prefill batch size. See benchmarking `BENCHMARK_LESSONS_LEARNED.md`, "PCIe generation and
-> split scaling".
+> Earlier versions of this section said PCIe x1 was the bottleneck. That was an inference from the
+> 4-way vs 5-way result; the 2026-10-19 sweep measured the links directly and ruled it out.
 
 **MoE on 4× cheap 1060s matches single-1060 7B speed.** The 26B MoE model at
 24.2 tok/s is faster than a single 1060 running 7B dense (22.7 tok/s), despite
 being a brain-class model with dramatically better reasoning. This is the free
 upgrade — same speed, much smarter model, using hardware already in the rig.
 
-**Adding one x1 card to the 3090 costs 2.6-3.1× speed.** The 3090+1060 split
-shows the penalty of mixing a fast x16 card with a slow x1 card — the slowest
-link determines inter-GPU transfer speed. On a proper x16+x16 board the split
-penalty would be minimal (~10-15% for PCIe 4.0, ~5% for PCIe 5.0).
+**Adding one 1060 to the 3090 costs 2.6-3.1x speed.** The cause is the 1060, not its x1 link:
+the layers placed on the 1060 are read at the 1060's much lower VRAM bandwidth, and the 3090 waits
+for them on every token. A mixed split's speed depends on how many bytes sit on the slow card. Two
+cards of the same speed split with little penalty, whatever the slot (see the 1060 sweep above), so
+a 2x 3090 split would lose little. Benchmarks keep the 3090 and the 1060s separate for this reason
+(2026-10-20); only models too big for either side (70B and up) use an all-card split.
 
 **MoE is consistently ~2× faster than dense at similar total params.** This
 holds across every configuration — 3090 solo (152 vs 40 tok/s for 26B MoE vs
@@ -387,8 +390,9 @@ to available VRAM. The 3090+1060 split put 12.7GB on the 3090 and 3.3GB on the
 
 ### Implications for upgrade planning
 
-- A Threadripper build with 2× 3090 on PCIe 5.0 x16 slots would split with
-  minimal penalty (~5%), giving ~70-75 tok/s on 14B and ~140+ tok/s on MoE
+- A split of matched fast cards (for example 2x 3090) loses little, because both cards read at
+  the same speed; faster slots mainly shorten loads
+- Replacing slow cards speeds up splits directly; better PCIe or risers do not change decode
 - The existing B250 worker farm can run brain-class MoE models at worker-tier
   speed using 4-5 way splits — useful when the 3090 is busy
 - Future MoE models will keep getting better; the split infrastructure is ready
