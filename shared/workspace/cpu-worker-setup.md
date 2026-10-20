@@ -90,9 +90,9 @@ use passwordless `sudo` for system changes. `root` keeps the control plane's key
 (for example when sudo is broken); do not work as root day to day, it leaves root-owned files the
 agent (`bryan`) cannot write.
 
-- `bryan` — normal login, `restart_cpu_workers.sh`, the systemd service; passwordless sudo from
+- `bryan` - normal login, `restart_cpu_workers.sh`, the systemd service; passwordless sudo from
   `/etc/sudoers.d/90-bryan-nopasswd` (one line: `bryan ALL=(ALL) NOPASSWD:ALL`, mode 440)
-- `root` — fallback only: `ssh root@10.0.0.<octet>`
+- `root` - fallback only: `ssh root@10.0.0.<octet>`
 
 Both have the control plane's public key in `~/.ssh/authorized_keys`.
 The key is baked into the base image via the first-boot script.
