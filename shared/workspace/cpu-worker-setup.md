@@ -26,13 +26,19 @@ Current shared scripts:
 Normal behavior:
 
 - claim only `executor: worker` + `task_class: cpu`
-- write `queue -> processing -> complete/failed`
+- write `queue -> processing -> complete/failed`, finishing through
+  `shared/agents/task_claims.py` (same as GPU workers): each claim gets a `claim_id`,
+  the first result wins, and a worker that finishes after the brain requeued its task
+  (for example after losing the shared drive) writes to `tasks/late/` instead of
+  overwriting the result or deleting the new owner's processing file
 - publish heartbeats under:
   - `shared/cpus/cpu-worker-<id>/heartbeat.json` (worker folder path)
 
-This is separate from the local repo copy at
-`/home/bryan/llm_orchestration/scripts/cpu_agent.py`, which is useful for local
-development and diagnostics. The shared-script path is the cluster runtime path.
+Source of truth (2026-10-19): the repo file `shared/scripts/cpu_agent.py`, deployed to
+`/media/bryan/shared/scripts/cpu_agent.py` with
+`python3 scripts/sync_shared_source.py --live-root /media/bryan/shared` (compare) and
+`--apply` (copy). `scripts/cpu_agent.py` in a repo checkout only forwards to it; it used
+to be a separate, older copy.
 
 ---
 
