@@ -253,18 +253,19 @@ def running_model_containers() -> list[str]:
 
 def gpu_telemetry() -> list[dict]:
     proc = run(
-        ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,power.draw",
-         "--format=csv,noheader,nounits"],
+        ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,power.draw,"
+         "temperature.gpu,fan.speed,power.limit", "--format=csv,noheader,nounits"],
         check=False,
     )
     out = []
     for line in proc.stdout.splitlines():
         p = [x.strip() for x in line.split(",")]
-        if len(p) != 6 or not p[0].isdigit():
+        if len(p) != 9 or not p[0].isdigit():
             continue
         num = lambda v: float(v) if v.replace(".", "", 1).isdigit() else None  # noqa: E731
         out.append({"index": int(p[0]), "name": p[1], "total_mb": int(p[2]), "used_mb": int(p[3]),
-                    "util_pct": num(p[4]), "power_w": num(p[5])})
+                    "util_pct": num(p[4]), "power_w": num(p[5]), "temp_c": num(p[6]), "fan_pct": num(p[7]),
+                    "power_limit_w": num(p[8])})
     return out
 
 
