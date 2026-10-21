@@ -6,9 +6,9 @@ hardware. It keeps working when the controller or the network is gone.
 
 | File | Owns |
 |---|---|
-| `rig.py` (`/usr/local/bin/rig`) | command layer: modes, remote profiles, `observe`, `lease`, `claim`, `start`, `stop`, `why` (why a runtime is down: exit, OOM, guard action, earlyoom) |
+| `rig.py` (`/usr/local/bin/rig`) | command layer: modes, remote profiles, `observe`, `lease`, `claim` (add with `--ttl`/`--owner`, `renew`, `remove`), `kill --gpus` (operator override: stop runtimes, release leases, drop claims on cards), `start`, `stop`, `why` (why a runtime is down: exit, OOM, guard action, earlyoom) |
 | `hw_jobs.py` | detached jobs: a load runs as its own systemd unit (`rig-load-<id>`), never on an ssh session |
-| `hw_state.py` | the GPU lease and claim record (rig-local `shared/brain/hw/gpus/`), mirrored to the drive |
+| `hw_state.py` | the GPU lease and claim record (rig-local `shared/brain/hw/gpus/`), mirrored to the drive. A claim may cover busy cards (a split reserving its cards while it waits) and may carry a TTL its owner renews; expired claims are dropped and logged in `gpus/claims_expired.log` (llm-gateway MANAGER.md, "Reservations") |
 | `hw_guard.py` | always-on power, thermal and memory guard (`rig-guard.service`) and load admission |
 | `hw_loadlog.py` | what a load actually got, from llama-server's startup log: llama.cpp's fit projection per card, layers offloaded, context, buffers per card |
 | `hw_power.py` | GPU power limits: set at boot by `rig-power.service` (GTX 1060s 100 W, the overclocked 156 W boards 120 W, others their default; rig-local `brain/hw/power.json` overrides), and re-checked by `run_runtime.sh` for the cards of every load |
