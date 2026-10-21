@@ -1030,6 +1030,11 @@ def cmd_plan(args) -> int:
 def cmd_observe(_args) -> int:
     """Read-only snapshot for the rig manager: GPUs, every llama container, served ports, remote state,
     rig jobs, and the lease/claim record."""
+    # The plan is read before the profiles: a load marks its profile ready before its plan item done, so
+    # a plan item seen done here always has its profile's final state below. Read the other way round,
+    # the seconds spent on GPUs, containers and ports let a load finish in between, and the snapshot
+    # showed the item done with the profile still loading (the manager then failed a good load).
+    plan = plan_report_safe()
     st = read_state()
     try:
         hs = open_hw_state()
@@ -1057,7 +1062,7 @@ def cmd_observe(_args) -> int:
         "jobs": hw_jobs.jobs(),
         "guard": guard_summary(),
         # "Next": the active controller and the queue the rig is working through (hw_plan).
-        "plan": plan_report_safe(),
+        "plan": plan,
     }, indent=2))
     return 0
 
