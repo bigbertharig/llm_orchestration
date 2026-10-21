@@ -1,163 +1,24 @@
-# Dashboard Package
+# Dashboard package (orchestration data and controls)
 
-Web dashboard for monitoring and controlling the LLM orchestration system.
+The dashboard is served by llm-gateway on the Pi: `http://127.0.0.1:8080/dashboard` (from another
+machine: `ssh -N -L 8080:127.0.0.1:8080 pi`). See llm-gateway `docs/DASHBOARD.md`. Moved 2026-10-20;
+the old standalone server (`server.py`, port 8787) and its pages are gone.
 
-## Quick Start
+This package keeps the orchestration part, which the gateway imports:
 
-```bash
-# Run from scripts directory
-cd /home/bryan/llm_orchestration/scripts
-python -m dashboard --port 8787
+| Module | Owns |
+|---|---|
+| `data.py` | `summarize(shared_path, config)`: workers, brain GPUs, active batches and chains, task lanes, alerts |
+| `controls.py` | `Controls(shared_path, config)`: `options`, `start_plan`, `resume_plan`, `kill_plan`, `kill_all_active`, `batch_outputs`, `cleanup_stale` (task files only), `requeue_worker` |
+| `workers.py` | worker and brain heartbeats, thermal cause, GPU telemetry for worker rows |
+| `plans.py` | plan discovery, starters and inputs, batch history and outputs |
+| `alerts.py`, `chains.py` | batch failure and completion alerts, batch chain views |
+| `utils.py` | constants, file and time helpers, sanitization |
 
-# Or use the start script
-/home/bryan/llm_orchestration/shared/scripts/start_dashboard.sh
-```
+Anything that acts on GPUs or runtimes (unload, kill a card, reservations, force load) is the rig
+manager's job in llm-gateway (`docs/MANAGER.md`, "Reservations"). The old server's `clear_runtime`,
+`reset_gpu`, `return_default` and remote runtime cleanup were dropped for that reason: the dashboard's
+Rig tab kills or unloads through the manager, and `requeue_worker` returns that worker's tasks to the
+queue.
 
-Access at: http://localhost:8787
-
-## Package Structure
-
-```
-dashboard/
-├── __init__.py       # Package exports (main, summarize, __version__)
-├── __main__.py       # Entry point for `python -m dashboard`
-├── server.py         # HTTP handler, template loading, main()
-├── data.py           # Task loading, summarize() aggregator
-├── workers.py        # Worker/GPU status, telemetry, brain state
-├── plans.py          # Plan discovery, batch management, config
-├── alerts.py         # Alert collection (failures, completions)
-├── chains.py         # Batch chain visualization
-├── utils.py          # Constants, utilities, sanitization
-└── templates/
-    ├── base.css      # Shared CSS variables and styles
-    ├── dashboard.html# Main dashboard page structure
-    ├── dashboard.js  # Dashboard client-side logic (~800 lines)
-    ├── controls.html # Controls page structure
-    └── controls.js   # Controls client-side logic (~350 lines)
-```
-
-## Module Responsibilities
-
-### utils.py
-Pure utility functions with no internal dependencies:
-- **Constants**: `HEARTBEAT_WARN_S`, `HEARTBEAT_BAD_S`, `HEARTBEAT_MAX_S`, regex patterns
-- **File I/O**: `load_json()`, `load_config()`, `resolve_shared_path()`, `iter_task_files()`
-- **Time**: `heartbeat_age_seconds()`, `parse_iso_datetime()`, `format_duration_short()`, `file_mtime_iso()`
-- **Sanitization**: `sanitize_text()`, `sanitize_config_value()`, `sanitize_config_object()`, `normalize_github_url()`
-
-### workers.py
-Worker and GPU status loading:
-- `classify_thermal_cause()` - CPU/GPU/mixed thermal detection
-- `load_worker_rows()` - GPU and CPU worker heartbeats
-- `load_gpu_telemetry()` - Live nvidia-smi data (local or via SSH)
-- `load_brain_state()`, `load_brain_heartbeat()` - Brain agent state
-
-### plans.py
-Plan discovery and batch management:
-- `shoulders_dir()`, `shoulder_plan_dir()` - Path helpers
-- `discover_plans()`, `discover_plan_starters()` - Available plans
-- `find_batch_dir()`, `discover_recent_batches()` - Batch history
-- `collect_batch_outputs()` - Output file enumeration
-- `default_plan_config()`, `plan_input_help()` - Config helpers
-- `write_inline_input_file()` - Dashboard-submitted content
-- `run_shell()` - Shell command execution
-
-### alerts.py
-Alert collection:
-- `collect_recent_batch_failure_alerts()` - Recent fatal errors
-- `collect_recent_batch_completion_alerts()` - Recent completions
-
-### chains.py
-Batch chain building:
-- `extract_stage_item()` - Parse task names like `stage_contact_0019`
-- `build_batch_chain()` - Dependency chain visualization data
-
-### data.py
-Task loading and main aggregator:
-- `task_sort_key()`, `to_task_view()`, `lane_view()` - View transforms
-- `list_tasks()`, `list_private_tasks()` - Task enumeration
-- `count_by_batch()`, `is_system_meta_task()` - Helpers
-- `summarize()` - Main data aggregation (imports from all modules)
-
-### server.py
-HTTP server and handler:
-- `DashboardHandler` - Request routing, API endpoints
-- Template loading and caching
-- Control actions (kill, resume, start plans)
-- `main()` - Server entry point
-
-## API Endpoints
-
-### GET Endpoints
-- `/` - Main dashboard HTML
-- `/controls` - Controls page HTML
-- `/api/status` - JSON status (2-second poll)
-- `/api/control/options` - Available plans/batches
-
-### POST Endpoints
-- `/api/control/kill_plan` - Kill a batch
-- `/api/control/kill_all_active` - Kill all batches
-- `/api/control/return_default` - Reset to startup defaults
-- `/api/control/reset_gpu` - Targeted hard reset for one GPU worker
-- `/api/control/clear_runtime` - Clear worker/split runtime containers and stale runtime artifacts
-- `/api/control/resume_plan` - Resume a batch
-- `/api/control/start_plan` - Submit a new plan
-- `/api/control/batch_outputs` - Get batch output files
-
-Operator-facing control labels match the workspace docs:
-- `Start Plan`
-- `Kill Plan`
-- `Return To Default`
-- `Reset selected GPU`
-
-`/api/status` includes `control_policy` and `gpu_leases`. The dashboard header
-shows the current boot profile, admitted controllers, and active lease count;
-GPU rows show controller-neutral lease ownership from worker heartbeats.
-
-Reset/kill endpoints run stale-artifact cleanup hooks (orphan task locks, stale processing heartbeats, system meta cleanup) before reporting completion.
-
-## Reset Semantics
-
-- `/api/control/reset_gpu`:
-  - operator-targeted hard reset for one GPU worker
-  - requeues that worker's in-flight processing tasks
-  - kills the selected `gpu.py` worker process
-  - kills listeners on that worker runtime port
-  - clears split artifacts for split groups involving that GPU
-  - restarts only that worker
-- `/api/control/return_default`:
-  - full operator reset back to startup defaults for the rig
-
-This is intentionally different from the internal agent `reset_gpu_runtime` meta task used for thermal recovery logic.
-For normal operator recovery, prefer the dashboard control endpoints.
-
-## Templates
-
-Templates use `{{PLACEHOLDER}}` syntax for inlining at serve time:
-- `{{BASE_CSS}}` - Shared CSS from `base.css`
-- `{{DASHBOARD_JS}}` - Dashboard JavaScript
-- `{{CONTROLS_JS}}` - Controls JavaScript
-
-CSS/JS are inlined into HTML at serve time (no separate static file serving).
-
-## Configuration
-
-Default config path: `../shared/agents/config.json`
-
-Override with `--config /path/to/config.json`
-
-## Development
-
-The package uses relative imports. Always run from the parent directory:
-
-```bash
-cd /home/bryan/llm_orchestration/scripts
-python -m dashboard --port 8787
-```
-
-To test imports:
-```python
-from dashboard import main, summarize
-from dashboard.utils import load_json
-from dashboard.workers import load_worker_rows
-```
+Tests: `python -m pytest -q dashboard/test_data.py dashboard/test_workers.py` from `scripts/`.

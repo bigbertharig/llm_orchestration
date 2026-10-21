@@ -1,18 +1,12 @@
-"""LLM Orchestration Dashboard Package.
+"""Orchestration dashboard data and controls.
 
-A web dashboard for monitoring and controlling the LLM orchestration system.
-Provides real-time status of workers, batches, tasks, and system health.
-
-Usage:
-    python -m dashboard --port 8787
-
-Or import and use programmatically:
-    from dashboard import main, summarize
-    main()
+The dashboard itself is served by llm-gateway on the Pi (http://127.0.0.1:8080/dashboard; llm-gateway
+docs/DASHBOARD.md). This package keeps the orchestration part: `summarize()` (workers, batches, task
+lanes, alerts) and `Controls` (start, resume and kill plans, batch outputs, task-file cleanup).
 """
 
+from .controls import Controls
 from .data import summarize
-from .server import main
 
-__version__ = "1.0.0"
-__all__ = ["main", "summarize", "__version__"]
+__version__ = "2.0.0"
+__all__ = ["Controls", "summarize", "__version__"]
