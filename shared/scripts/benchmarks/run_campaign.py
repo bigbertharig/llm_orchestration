@@ -42,6 +42,10 @@ BENCHMARKING_SCRIPTS = SHARED_ROOT / "plans" / "shoulders" / "benchmarking"
 # GPU leases from the rig manager (llm-gateway docs/MANAGER.md), one per occupied slot.
 LEASE_HELPER = BENCHMARKING_SCRIPTS / "scripts" / "integration" / "harness_lease.sh"
 LEASE_RENEW_EVERY_S = 120
+# A card the manager refuses (claimed or leased elsewhere) is skipped for this long, and a block gives
+# up after this many refusals per card it could use (3 tries pinned to one card, 15 for `single`).
+LEASE_REFUSED_COOLDOWN_S = 60
+LEASE_REFUSALS_PER_CARD = 3
 BENCHMARK_CACHE_ROOT = SHARED_ROOT / "cache" / "benchmarks"
 # The checkout this runner lives in (<tree>/scripts/benchmarks/run_campaign.py); its
 # agents/config.json holds this machine's facts, including the model hot-set roots.
@@ -109,12 +113,12 @@ def slots_conflict(a: GpuSlot, b: GpuSlot) -> bool:
 
 
 def find_free_slot(
-    placement: str, occupied: Dict[str, str]
+    placement: str, occupied: Dict[str, str], skip: Set[str] = frozenset()
 ) -> Optional[GpuSlot]:
     """Find a free slot for the given placement.
 
-    occupied: slot_name -> block_id currently using it.
-    Returns the first non-conflicting slot, or None.
+    occupied: slot_name -> block_id currently using it. skip: slot names to pass over (cards the
+    rig manager just refused). Returns the first non-conflicting slot, or None.
     """
     candidates = PLACEMENT_SLOTS.get(placement)
     if not candidates:
@@ -123,6 +127,8 @@ def find_free_slot(
     occupied_slots = [SLOTS[name] for name in occupied if name in SLOTS]
 
     for slot_name in candidates:
+        if slot_name in skip:
+            continue
         slot = SLOTS[slot_name]
         conflict = any(slots_conflict(slot, occ) for occ in occupied_slots)
         if not conflict:
@@ -915,6 +921,10 @@ def load_checkpoint(state: CampaignState) -> bool:
 # Scheduler
 # ---------------------------------------------------------------------------
 
+class LeaseRefused(RuntimeError):
+    """The rig manager refused a card (claimed or leased by other work)."""
+
+
 class CampaignLeases:
     """`benchmarks` leases from the rig manager, one per occupied slot.
 
@@ -939,7 +949,7 @@ class CampaignLeases:
         proc = self._call("acquire", ",".join(str(g) for g in slot.gpu_ids), f"campaign-{slot.name}",
                           self.run_id, model)
         if proc.returncode != 0:
-            raise RuntimeError(f"rig manager did not lease {slot.name} (GPU {slot.gpu_ids}): "
+            raise LeaseRefused(f"rig manager did not lease {slot.name} (GPU {slot.gpu_ids}): "
                                f"{proc.stderr.strip()[-300:]}")
         lease = proc.stdout.strip() or None
         if lease:
@@ -1001,6 +1011,8 @@ class Scheduler:
         self.loading_block: Optional[str] = None
         self.leases = CampaignLeases(state.run_id)
         self.occupied: Dict[str, str] = OccupiedSlots(self.leases)  # slot_name -> block_id
+        self.refused_at: Dict[str, float] = {}       # slot name -> when the manager last refused it
+        self.lease_refusals: Dict[str, int] = {}     # block id -> refusals so far
         self._shutdown = False
 
     def _runtime_group_members(self, group: str) -> List[BlockState]:
@@ -1151,7 +1163,9 @@ class Scheduler:
                 if group not in active_groups and len(active_groups) >= self.max_active_models:
                     continue
 
-            slot = find_free_slot(bs.placement, self.occupied)
+            now = time.monotonic()
+            cooling = {name for name, t in self.refused_at.items() if now - t < LEASE_REFUSED_COOLDOWN_S}
+            slot = find_free_slot(bs.placement, self.occupied, cooling)
             if slot is None:
                 continue
 
@@ -1194,6 +1208,24 @@ class Scheduler:
                     lease = self.leases.ensure(slot, bs.model)
                     container_name = start_runtime(bs, slot, lease)
                     bs.runtime_container = container_name
+                except LeaseRefused as e:
+                    self.load_lock = False
+                    self.loading_block = None
+                    self.occupied.pop(slot.name, None)
+                    self.refused_at[slot.name] = time.monotonic()
+                    n = self.lease_refusals[bid] = self.lease_refusals.get(bid, 0) + 1
+                    limit = LEASE_REFUSALS_PER_CARD * max(1, len(PLACEMENT_SLOTS.get(bs.placement, [])))
+                    if n < limit:
+                        bs.status = WAITING_GPU
+                        bs.assigned_slot = None
+                        bs.started_at = bs.load_started_at = None
+                        log(f"Block {bid}: {slot.name} refused ({n} of {limit}); trying another card "
+                            f"or this one again in {LEASE_REFUSED_COOLDOWN_S} s")
+                    else:
+                        bs.status = FAILED
+                        bs.error = f"no card leased after {n} refusals: {e}"
+                        bs.ended_at = now_iso()
+                        log(f"Block {bid}: FAILED, {bs.error}")
                 except Exception as e:
                     bs.status = FAILED
                     bs.error = f"runtime start failed: {e}"
