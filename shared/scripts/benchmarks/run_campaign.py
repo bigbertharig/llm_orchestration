@@ -42,10 +42,13 @@ BENCHMARKING_SCRIPTS = SHARED_ROOT / "plans" / "shoulders" / "benchmarking"
 # GPU leases from the rig manager (llm-gateway docs/MANAGER.md), one per occupied slot.
 LEASE_HELPER = BENCHMARKING_SCRIPTS / "scripts" / "integration" / "harness_lease.sh"
 LEASE_RENEW_EVERY_S = 120
-# A card the manager refuses (claimed or leased elsewhere) is skipped for this long, and a block gives
-# up after this many refusals per card it could use (3 tries pinned to one card, 15 for `single`).
+# A card the manager refuses (claimed or leased elsewhere) is skipped for this long. A `single` block
+# gives up after this many refusals per card it could use (15 over its five cards). A split or pinned
+# block reserves its slot's cards instead (llm-gateway MANAGER.md, "Reservations") and waits for them,
+# up to LEASE_RESERVATION_WAIT_S, so single work cannot starve it.
 LEASE_REFUSED_COOLDOWN_S = 60
 LEASE_REFUSALS_PER_CARD = 3
+LEASE_RESERVATION_WAIT_S = 7200
 BENCHMARK_CACHE_ROOT = SHARED_ROOT / "cache" / "benchmarks"
 # The checkout this runner lives in (<tree>/scripts/benchmarks/run_campaign.py); its
 # agents/config.json holds this machine's facts, including the model hot-set roots.
@@ -929,25 +932,34 @@ class CampaignLeases:
     """`benchmarks` leases from the rig manager, one per occupied slot.
 
     Taken when a slot's runtime starts, renewed while held, released when the slot is freed. A
-    refused card fails that block; an unreachable manager runs without a lease (the rig audits the
-    load as no-lease). A release the manager refuses (runtime still on the card) is retried.
+    refused card is retried by the scheduler; a split or pinned block reserves its slot's cards
+    meanwhile (`reserve`, a claim with a TTL renewed here), so single work cannot take them as they
+    free (llm-gateway MANAGER.md, "Reservations"). An unreachable manager runs without a lease (the
+    rig audits the load as no-lease). A release the manager refuses (runtime still on the card) is
+    retried.
     """
 
     def __init__(self, run_id: str):
         self.run_id = run_id
         self.held: Dict[str, str] = {}      # slot name -> lease id
         self.pending: Dict[str, str] = {}   # slot name -> lease id whose release must be retried
+        self.reserved: Dict[str, str] = {}  # slot name -> claim name holding its cards while it waits
         self.last_renew = time.monotonic()
 
     def _call(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(["bash", str(LEASE_HELPER), *args], capture_output=True, text=True,
                               timeout=60, check=False)
 
+    def _claim_name(self, slot: "GpuSlot") -> str:
+        return re.sub(r"[^a-z0-9_-]+", "-", f"campaign-{self.run_id}-{slot.name}".lower())[:64]
+
     def ensure(self, slot: "GpuSlot", model: str) -> Optional[str]:
         if slot.name in self.held:
             return self.held[slot.name]
-        proc = self._call("acquire", ",".join(str(g) for g in slot.gpu_ids), f"campaign-{slot.name}",
-                          self.run_id, model)
+        args = ["acquire", ",".join(str(g) for g in slot.gpu_ids), f"campaign-{slot.name}", self.run_id, model]
+        if slot.name in self.reserved:
+            args.append(self.reserved[slot.name])
+        proc = self._call(*args)
         if proc.returncode != 0:
             raise LeaseRefused(f"rig manager did not lease {slot.name} (GPU {slot.gpu_ids}): "
                                f"{proc.stderr.strip()[-300:]}")
@@ -957,7 +969,26 @@ class CampaignLeases:
             log(f"  Lease {lease} for {slot.name} (GPU {slot.gpu_ids})")
         else:
             log(f"  Rig manager unreachable: {slot.name} runs without a lease")
+        self.unreserve(slot.name)  # the lease holds the cards now
         return lease
+
+    def reserve(self, slot: "GpuSlot", model: str) -> bool:
+        """Reserve a slot's cards while they are busy. False if another claim already covers them."""
+        if slot.name in self.reserved:
+            return True
+        name = self._claim_name(slot)
+        proc = self._call("reserve", ",".join(str(g) for g in slot.gpu_ids), name, f"campaign-{self.run_id}", model)
+        if proc.returncode != 0:
+            log(f"  Could not reserve {slot.name} (GPU {slot.gpu_ids}): {proc.stderr.strip()[-200:]}")
+            return False
+        self.reserved[slot.name] = name
+        log(f"  Reserved {slot.name} (GPU {slot.gpu_ids}) as {name} while it waits")
+        return True
+
+    def unreserve(self, slot_name: str) -> None:
+        name = self.reserved.pop(slot_name, None)
+        if name:
+            self._call("unreserve", name)
 
     def release(self, slot_name: str) -> None:
         lease = self.held.pop(slot_name, None) or self.pending.pop(slot_name, None)
@@ -973,10 +1004,15 @@ class CampaignLeases:
         self.last_renew = time.monotonic()
         for name, lease in list(self.held.items()):
             self._call("renew", lease, f"campaign-{name}")
+        for slot_name, claim in list(self.reserved.items()):
+            if self._call("renew-reservation", claim, f"campaign-{self.run_id}").returncode != 0:
+                self.reserved.pop(slot_name, None)  # lapsed or removed by an operator: re-reserved on refusal
         for name in list(self.pending):
             self.release(name)
 
     def release_all(self) -> None:
+        for name in list(self.reserved):
+            self.unreserve(name)
         for name in list(self.held) + list(self.pending):
             self.release(name)
         if self.pending:
@@ -1013,6 +1049,7 @@ class Scheduler:
         self.occupied: Dict[str, str] = OccupiedSlots(self.leases)  # slot_name -> block_id
         self.refused_at: Dict[str, float] = {}       # slot name -> when the manager last refused it
         self.lease_refusals: Dict[str, int] = {}     # block id -> refusals so far
+        self.reserved_since: Dict[str, float] = {}   # block id -> when its split/pinned wait began
         self._shutdown = False
 
     def _runtime_group_members(self, group: str) -> List[BlockState]:
@@ -1214,6 +1251,24 @@ class Scheduler:
                     self.occupied.pop(slot.name, None)
                     self.refused_at[slot.name] = time.monotonic()
                     n = self.lease_refusals[bid] = self.lease_refusals.get(bid, 0) + 1
+                    if bs.placement != "single":
+                        # A split or pinned block cannot move: reserve its cards and wait for them.
+                        since = self.reserved_since.setdefault(bid, time.monotonic())
+                        reserved = self.leases.reserve(slot, bs.model)
+                        if time.monotonic() - since < LEASE_RESERVATION_WAIT_S:
+                            bs.status = WAITING_GPU
+                            bs.assigned_slot = None
+                            bs.started_at = bs.load_started_at = None
+                            log(f"Block {bid}: {slot.name} busy (try {n}); "
+                                + ("reserved, " if reserved else "not reserved (claimed elsewhere), ")
+                                + f"waiting up to {LEASE_RESERVATION_WAIT_S} s in all")
+                        else:
+                            self.leases.unreserve(slot.name)
+                            bs.status = FAILED
+                            bs.error = f"cards not free after {LEASE_RESERVATION_WAIT_S} s: {e}"
+                            bs.ended_at = now_iso()
+                            log(f"Block {bid}: FAILED, {bs.error}")
+                        return
                     limit = LEASE_REFUSALS_PER_CARD * max(1, len(PLACEMENT_SLOTS.get(bs.placement, [])))
                     if n < limit:
                         bs.status = WAITING_GPU

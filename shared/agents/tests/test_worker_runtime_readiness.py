@@ -180,6 +180,62 @@ class WorkerRuntimeReadinessTests(unittest.TestCase):
             self.assertFalse(task_file.exists())
             self.assertTrue((gpu.processing_path / "task-1.json").exists())
 
+    def _claims(self, tmp, claims):
+        path = Path(tmp) / "gpus" / "claims.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema_version": 1, "claims": claims}), encoding="utf-8")
+
+    def _one_task(self, gpu, **extra):
+        task = {"task_id": "task-1", "task_class": "llm", "llm_model": "qwen2.5:7b", "priority": 5, **extra}
+        task_file = gpu.queue_path / "task-1.json"
+        task_file.write_text(json.dumps(task), encoding="utf-8")
+        return task_file
+
+    def test_claim_tasks_skips_work_on_a_card_reserved_by_another_controller(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = MockClaimGpu(Path(tmp), runtime_state="ready_single")
+            gpu.gpu_id = 2
+            self._claims(tmp, [{"name": "wait-m-g1-2", "gpu_ids": [1, 2], "owner": "llm-gateway",
+                                "expires_at": "2999-01-01T00:00:00Z"}])
+            task_file = self._one_task(gpu)
+            self.assertEqual(gpu.claim_tasks(), [])
+            self.assertTrue(task_file.exists())
+
+    def test_own_and_expired_claims_do_not_block_work(self):
+        for claim in ({"name": "plans-split-pair_1_2", "gpu_ids": [1, 2], "owner": "plans"},
+                      {"name": "lane-1-2", "gpu_ids": [1, 2], "expires_at": "2000-01-01T00:00:00Z"}):
+            with self.subTest(claim=claim["name"]), tempfile.TemporaryDirectory() as tmp:
+                gpu = MockClaimGpu(Path(tmp), runtime_state="ready_single")
+                gpu.gpu_id = 2
+                self._claims(tmp, [claim])
+                self._one_task(gpu)
+                self.assertEqual(len(gpu.claim_tasks()), 1)
+
+    def test_a_work_task_pinned_to_another_worker_is_left_for_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpu = MockClaimGpu(Path(tmp), runtime_state="ready_single")
+            task_file = self._one_task(gpu, target_worker="gpu-3")
+            self.assertEqual(gpu.claim_tasks(), [])
+            self.assertTrue(task_file.exists())
+            task_file.write_text(json.dumps({"task_id": "task-1", "task_class": "llm", "llm_model": "qwen2.5:7b",
+                                             "priority": 5, "target_worker": "gpu-2"}), encoding="utf-8")
+            self.assertEqual(len(gpu.claim_tasks()), 1)
+
+    def test_rig_reservation_names_and_gpus(self):
+        import rig_reservations
+        self.assertEqual(rig_reservations.claim_name("pair_1_3"), "plans-split-pair_1_3")
+        self.assertEqual(rig_reservations.gpu_ids(["gpu-3", "gpu-1", "brain"]), [1, 3])
+        import os
+        old = os.environ.get("RIG_RESERVATIONS")
+        os.environ["RIG_RESERVATIONS"] = "off"
+        try:
+            self.assertFalse(rig_reservations.reserve("pair_1_3", ["gpu-1", "gpu-3"], "m"))
+        finally:
+            if old is None:
+                os.environ.pop("RIG_RESERVATIONS", None)
+            else:
+                os.environ["RIG_RESERVATIONS"] = old
+
     def test_claim_tasks_skips_all_work_when_leased_to_another_controller(self):
         with tempfile.TemporaryDirectory() as tmp:
             gpu = MockClaimGpu(Path(tmp), runtime_state="ready_single")

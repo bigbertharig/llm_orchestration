@@ -17,7 +17,7 @@ import os
 import shutil
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -84,16 +84,62 @@ class HardwareState:
 
     # ---------------------------------------------------------------- claims
 
-    def claims(self) -> list[dict[str, Any]]:
+    # A claim takes cards out of the shared pool: only leases naming it get them. It may be placed on
+    # cards that are still leased (the holder keeps them until it releases), which is how a split
+    # reserves its cards while it waits for them (docs: llm-gateway MANAGER.md, "Reservations").
+    # With ttl_s the claim lapses unless its owner renews it, so a dead run frees its cards; without
+    # one it is permanent until removed.
+
+    @staticmethod
+    def _expired(claim: dict[str, Any], now: datetime | None = None) -> bool:
+        expires = claim.get("expires_at")
+        if not expires:
+            return False
+        try:
+            when = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        return when <= (now or datetime.now(timezone.utc))
+
+    @staticmethod
+    def _expiry(ttl_s: int | None) -> str | None:
+        if not ttl_s:
+            return None
+        if int(ttl_s) <= 0:
+            raise StateError("invalid", "ttl_s must be positive")
+        return (datetime.now(timezone.utc) + timedelta(seconds=int(ttl_s))).isoformat(
+            timespec="seconds").replace("+00:00", "Z")
+
+    def _read_claims(self) -> list[dict[str, Any]]:
         if not self.claims_path.exists():
             return []
         return list(json.loads(self.claims_path.read_text(encoding="utf-8")).get("claims", []))
 
-    def add_claim(self, name: str, gpu_ids: list[int], note: str = "", by: str = "") -> dict[str, Any]:
+    def _write_claims(self, claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Write the live claims (expired ones dropped and logged); returns them. Under claims_lock."""
+        now = datetime.now(timezone.utc)
+        live = [c for c in claims if not self._expired(c, now)]
+        gone = [c for c in claims if self._expired(c, now)]
+        if gone:
+            with open(self.root / "gpus" / "claims_expired.log", "a", encoding="utf-8") as log:
+                for c in gone:
+                    log.write(f"{_now()} expired {c['name']} gpus={c['gpu_ids']} owner={c.get('owner', '')} "
+                              f"expires_at={c.get('expires_at')} purpose={c.get('purpose', '')}\n")
+        _write_json(self.claims_path, {"schema_version": 1, "claims": live})
+        return live
+
+    def claims(self) -> list[dict[str, Any]]:
+        """Live claims: expired ones are ignored here and dropped from the record on the next write."""
+        now = datetime.now(timezone.utc)
+        return [c for c in self._read_claims() if not self._expired(c, now)]
+
+    def add_claim(self, name: str, gpu_ids: list[int], note: str = "", by: str = "", *,
+                  owner: str = "", ttl_s: int | None = None, purpose: str = "", model: str = "") -> dict[str, Any]:
         name = str(name or "").strip()
         ids = sorted({int(g) for g in gpu_ids})
         if not name or not ids:
             raise StateError("invalid", "a claim needs a name and at least one GPU")
+        expires = self._expiry(ttl_s)
         with self.claims_lock:
             claims = self.claims()
             if any(c["name"] == name for c in claims):
@@ -102,20 +148,58 @@ class HardwareState:
                 overlap = sorted(set(ids) & set(c["gpu_ids"]))
                 if overlap:
                     raise StateError("conflict", f"GPU {overlap} already claimed by {c['name']}")
-            claim = {"name": name, "gpu_ids": ids, "note": note, "by": by, "at": _now()}
-            _write_json(self.claims_path, {"schema_version": 1, "claims": claims + [claim]})
+            claim = {"name": name, "gpu_ids": ids, "note": note, "by": by, "at": _now(),
+                     "owner": str(owner or by or "").strip()}
+            if expires:
+                claim.update(ttl_s=int(ttl_s), expires_at=expires)
+            if purpose:
+                claim["purpose"] = purpose
+            if model:
+                claim["model"] = model
+            self._write_claims(self._read_claims() + [claim])
         self.mirror()
         return claim
 
+    def renew_claim(self, name: str, owner: str = "", ttl_s: int | None = None) -> dict[str, Any]:
+        """Push a claim's expiry out by ttl_s (default: its own ttl_s). An expired claim is gone."""
+        with self.claims_lock:
+            claims = self._read_claims()
+            match = next((c for c in claims if c["name"] == name and not self._expired(c)), None)
+            if match is None:
+                raise StateError("not_found", f"no claim {name} (expired or removed)")
+            if owner and match.get("owner") and match["owner"] != owner:
+                raise StateError("ownership", f"claim {name} is owned by {match['owner']}, not {owner}")
+            ttl = int(ttl_s or match.get("ttl_s") or 0)
+            if not ttl:
+                return match  # permanent claim: nothing to renew
+            match.update(ttl_s=ttl, expires_at=self._expiry(ttl), renewed_at=_now())
+            self._write_claims(claims)
+        self.mirror()
+        return match
+
     def remove_claim(self, name: str) -> dict[str, Any]:
+        """Remove a claim by name. No owner check: this is also the operator's override."""
         with self.claims_lock:
             claims = self.claims()
             match = [c for c in claims if c["name"] == name]
             if not match:
                 raise StateError("not_found", f"no claim {name}")
-            _write_json(self.claims_path, {"schema_version": 1, "claims": [c for c in claims if c["name"] != name]})
+            self._write_claims([c for c in self._read_claims() if c["name"] != name])
         self.mirror()
         return match[0]
+
+    def remove_claims_on(self, gpu_ids: list[int]) -> list[dict[str, Any]]:
+        """Remove every claim that covers any of these cards (the operator's kill)."""
+        ids = {int(g) for g in gpu_ids}
+        with self.claims_lock:
+            claims = self.claims()
+            dropped = [c for c in claims if ids & set(c["gpu_ids"])]
+            if dropped:
+                names = {c["name"] for c in dropped}
+                self._write_claims([c for c in self._read_claims() if c["name"] not in names])
+        if dropped:
+            self.mirror()
+        return dropped
 
     # ---------------------------------------------------------------- leases
 

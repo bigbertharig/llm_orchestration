@@ -56,6 +56,48 @@ class HardwareStateTests(unittest.TestCase):
         hs.remove_claim("bench")
         self.assertEqual(hs.claims(), [])
 
+    def test_a_claim_reserves_cards_that_are_still_leased(self):
+        hs = self.make()
+        held = hs.acquire(spec([1]))["lease_id"]
+        hs.add_claim("split-1-2", [1, 2], owner="lane-1-2", ttl_s=60, purpose="split load", model="m:14b")
+        with self.assertRaises(hw_state.StateError):  # the free partner cannot be taken by single work
+            hs.acquire(spec([2]))
+        hs.release(held, owner="llm-gateway")
+        lease = hs.acquire(spec([1, 2], metadata={"claim": "split-1-2"}))
+        self.assertEqual(lease["gpu_ids"], [1, 2])
+
+    def test_claims_with_a_ttl_lapse_unless_renewed(self):
+        hs = self.make()
+        claim = hs.add_claim("wait", [3], owner="campaign-x", ttl_s=60)
+        self.assertIn("expires_at", claim)
+        renewed = hs.renew_claim("wait", "campaign-x", 120)
+        self.assertEqual(renewed["ttl_s"], 120)
+        with self.assertRaises(hw_state.StateError) as ctx:
+            hs.renew_claim("wait", "someone-else")
+        self.assertEqual(ctx.exception.kind, "ownership")
+        # Lapse it: an expired claim no longer blocks leases and is dropped (and logged) on the next write.
+        record = json.loads(hs.claims_path.read_text())
+        record["claims"][0]["expires_at"] = "2000-01-01T00:00:00Z"
+        hs.claims_path.write_text(json.dumps(record))
+        self.assertEqual(hs.claims(), [])
+        hs.acquire(spec([3]))
+        hs.add_claim("other", [4])
+        self.assertEqual([c["name"] for c in json.loads(hs.claims_path.read_text())["claims"]], ["other"])
+        self.assertIn("expired wait", (self.root / "gpus" / "claims_expired.log").read_text())
+        with self.assertRaises(hw_state.StateError) as ctx:
+            hs.renew_claim("wait")
+        self.assertEqual(ctx.exception.kind, "not_found")
+
+    def test_a_claim_without_ttl_is_permanent_and_kill_drops_claims_on_cards(self):
+        hs = self.make()
+        claim = hs.add_claim("bench", [0])
+        self.assertNotIn("expires_at", claim)
+        self.assertEqual(hs.renew_claim("bench"), claim)
+        hs.add_claim("pair", [4, 5])
+        dropped = hs.remove_claims_on([5])
+        self.assertEqual([c["name"] for c in dropped], ["pair"])
+        self.assertEqual([c["name"] for c in hs.claims()], ["bench"])
+
     def test_release_checks_the_owner(self):
         hs = self.make()
         lid = hs.acquire(spec([3]))["lease_id"]

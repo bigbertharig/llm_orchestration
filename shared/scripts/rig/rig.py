@@ -876,7 +876,9 @@ def cmd_lease(args) -> int:
 
 
 def cmd_claim(args) -> int:
-    """Claims take cards out of the shared pool: list | add NAME --gpus | remove NAME. JSON out."""
+    """Claims take cards out of the shared pool: list | add NAME --gpus [--ttl S --owner O] |
+    renew NAME [--ttl S] | remove NAME. A claim may cover cards that are still leased: that is how a
+    split reserves its cards while it waits (MANAGER.md, "Reservations"). JSON out."""
     try:
         hs = open_hw_state()
         if args.action == "list":
@@ -887,8 +889,42 @@ def cmd_claim(args) -> int:
             unknown = sorted(set(gpus) - set(expected_gpu_ids()))
             if unknown:
                 raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {expected_gpu_ids()}")
-            return emit({"claim": hs.add_claim(args.name, gpus, args.note, args.by or caller())})
+            return emit({"claim": hs.add_claim(args.name, gpus, args.note, args.by or caller(), owner=args.owner,
+                                               ttl_s=args.ttl, purpose=args.purpose, model=args.model)})
+        if args.action == "renew":
+            return emit({"claim": hs.renew_claim(args.name, args.owner, args.ttl)})
         return emit({"released": hs.remove_claim(args.name)})
+    except (hw_state.StateError, hw_plan.PlanError) as exc:
+        return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
+
+
+def cmd_kill(args) -> int:
+    """Operator override: stop every llama runtime on these cards, release every lease that holds any of
+    them, and drop every claim on them. It does not take the rig mode lock (a load holds it for minutes);
+    a profile whose runtime was stopped reads as gone, and the controller's reconciler clears it. A load
+    still queued or running in the plan for these cards is not cancelled here (rigctl cancel ITEM)."""
+    try:
+        gpus = sorted({int(g) for g in args.gpus.split(",")})
+        unknown = sorted(set(gpus) - set(expected_gpu_ids()))
+        if unknown:
+            raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {expected_gpu_ids()}")
+        open_plan().require_active(args.controller)
+        stopped = []
+        for c in llama_containers():
+            if set(c["gpus"]) & set(gpus):
+                run(["docker", "rm", "-f", c["name"]], check=False, timeout=60)
+                stopped.append(c["name"])
+        hs = open_hw_state()
+        released = []
+        for lease in hs.leases():
+            if set(int(g) for g in lease.get("gpu_ids", [])) & set(gpus):
+                hs.release(lease["lease_id"], force=True)
+                released.append(lease["lease_id"])
+        dropped = [c["name"] for c in hs.remove_claims_on(gpus)]
+        print(f"kill GPU {gpus} by {caller()}: stopped {stopped or 'nothing'}, released {released or 'nothing'}, "
+              f"claims dropped {dropped or 'none'}" + (f" ({args.reason})" if args.reason else ""), file=sys.stderr)
+        return emit({"gpus": gpus, "stopped": stopped, "released": released, "claims_dropped": dropped,
+                     "reason": args.reason, "by": caller()})
     except (hw_state.StateError, hw_plan.PlanError) as exc:
         return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
 
@@ -1170,11 +1206,25 @@ def main() -> int:
     x.add_argument("--gpus", required=True)
     x.add_argument("--note", default="")
     x.add_argument("--by", default="")
+    x.add_argument("--owner", default="", help="who renews it (default: --by)")
+    x.add_argument("--ttl", type=int, default=None, help="seconds until it lapses unless renewed (default: never)")
+    x.add_argument("--purpose", default="")
+    x.add_argument("--model", default="")
+    x.add_argument("--controller", help=ctl_help)
+    x = ca.add_parser("renew")
+    x.add_argument("name")
+    x.add_argument("--owner", default="")
+    x.add_argument("--ttl", type=int, default=None, help="default: the claim's own ttl")
     x.add_argument("--controller", help=ctl_help)
     x = ca.add_parser("remove")
     x.add_argument("name")
     x.add_argument("--controller", help=ctl_help)
     s.set_defaults(fn=cmd_claim)
+    s = sub.add_parser("kill", help="operator override: stop runtimes, release leases, drop claims on cards")
+    s.add_argument("--gpus", required=True)
+    s.add_argument("--reason", default="")
+    s.add_argument("--controller", help=ctl_help)
+    s.set_defaults(fn=cmd_kill)
     s = sub.add_parser("controller", help="the active controller: show | claim | heartbeat | release")
     co = s.add_subparsers(dest="action", required=True)
     co.add_parser("show")

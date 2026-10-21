@@ -21,6 +21,7 @@ from brain_core import (
     startup_gate_status,
 )
 from control_policy import control_policy_allows_task
+import rig_reservations
 from task_claims import drop_if_already_recorded, stamp_claim
 from gpu_constants import (
     ATTESTATION_MISS_HARD_FAIL_THRESHOLD,
@@ -968,6 +969,34 @@ class GPUTaskMixin:
         self.active_meta_task = None
         self.last_meta_heartbeat = 0.0
 
+    def _read_gpu_claim(self) -> Optional[Dict[str, Any]]:
+        """A live rig claim on this GPU that is not orchestration's own (rig_reservations.PREFIX), read
+        from the rig's mirror on the shared drive (<shared>/gpus/claims.json). None when there is none
+        or the record cannot be read (claims only add protection; leases stay the hard gate)."""
+        gpu_id = getattr(self, "gpu_id", None)
+        if gpu_id is None:
+            return None
+        try:
+            path = Path(self.shared_path) / "gpus" / "claims.json"
+            claims = json.loads(path.read_text(encoding="utf-8")).get("claims", []) if path.exists() else []
+        except (OSError, ValueError):
+            return None
+        now = datetime.now().astimezone()
+        for claim in claims:
+            if not isinstance(claim, dict) or int(gpu_id) not in [int(g) for g in claim.get("gpu_ids", [])]:
+                continue
+            if str(claim.get("name", "")).startswith(rig_reservations.PREFIX):
+                continue
+            expires = claim.get("expires_at")
+            if expires:
+                try:
+                    if datetime.fromisoformat(str(expires).replace("Z", "+00:00")) <= now:
+                        continue
+                except ValueError:
+                    continue
+            return claim
+        return None
+
     def claim_tasks(self) -> List[Dict]:
         """
         Visit the board: claim as many tasks as fit within VRAM budget.
@@ -990,6 +1019,14 @@ class GPUTaskMixin:
             ).strip()
             self.logger.info(
                 f"TASKS_LEASED: skip claiming queued work while leased to {lease_owner}"
+            )
+            return []
+        foreign_claim = self._read_gpu_claim()
+        if foreign_claim:
+            # Another controller reserved this card (for example a split waiting for it): leave it free.
+            self.logger.info(
+                f"TASKS_RESERVED: skip claiming queued work while GPU is reserved by claim "
+                f"{foreign_claim.get('name')} ({foreign_claim.get('owner') or foreign_claim.get('by') or 'unknown'})"
             )
             return []
 
@@ -1098,6 +1135,10 @@ class GPUTaskMixin:
                         continue
 
                     task_class = task.get("task_class", "cpu")
+                    # A task pinned to one worker (scripts/assign_task.py, or the brain) goes only there.
+                    pinned = str(task.get("target_worker") or task.get("target_gpu") or "").strip()
+                    if task_class != "meta" and pinned and pinned != self.name:
+                        continue
                     vram_cost = self._get_task_vram_cost(task)
 
                     # Meta tasks: handle directly, don't spawn worker
@@ -1556,6 +1597,11 @@ class GPUTaskMixin:
                             diagnostic=f"group_id={group_id} reservation_lock_timeout=30s",
                         )
 
+                    # The rig holds the cards for this split while it waits and loads (MANAGER.md,
+                    # "Reservations"), so benchmarks and the gateway cannot take the partner meanwhile.
+                    rig_reserved = rig_reservations.reserve(group_id, members, target_model, self.logger)
+                    rig_renewed_at = time.time()
+
                     split_profile = resolve_llama_runtime_profile(
                         getattr(self, "config", {}) or {},
                         model_id=target_model,
@@ -1576,6 +1622,9 @@ class GPUTaskMixin:
                     while time.time() < deadline:
                         self._touch_meta_task(phase="waiting_split_ready")
                         self._service_split_reservations()
+                        if rig_reserved and time.time() - rig_renewed_at > rig_reservations.RENEW_EVERY_S:
+                            rig_reservations.renew(group_id, self.logger)
+                            rig_renewed_at = time.time()
                         try:
                             with open(reservation_path, "r", encoding="utf-8") as f:
                                 reservation = json.load(f)
@@ -1595,6 +1644,9 @@ class GPUTaskMixin:
                             break
                         time.sleep(2)
 
+                    if rig_reserved:
+                        # Loaded (the runtime now occupies the cards) or given up: the wait's claim goes.
+                        rig_reservations.release(group_id, self.logger)
                     if not success and not failure_reason:
                         failure_reason = "split load timed out waiting for partner readiness"
                         try:
