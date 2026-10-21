@@ -13,8 +13,9 @@ starting it (the double check: a load on a card at the wrong limit is refused). 
 and default limit, not index (indices moved when the risers were re-cabled): GTX 1060s with a 120 W
 default run at 100 W, measured 2026-08-09 to keep about 98% of decode speed for 17% less energy and
 5 C cooler (benchmarking results/runtime_experiments/gtx1060_power_cap_100w_20260809.json,
-gpu4_120w_vs_100w_sustained_decode_20260809.json); the factory-overclocked ones (156 W default) run
-at 120 W (operator, 2026-10-18). The RTX 3090 Ti runs at 350 W (2026-10-21 sweep with qwen3.6:27b: 97% of
+gpu4_120w_vs_100w_sustained_decode_20260809.json). The factory-overclocked ones (156 W default) run at
+100 W too (2026-10-21 sweep: 3.4% below their uncapped decode, 2.3% below 120 W; both board types,
+gtx1060_power_cap_sweep_20261021.json). The RTX 3090 Ti runs at 350 W (2026-10-21 sweep with qwen3.6:27b: 97% of
 decode and 96% of prompt speed at 450 W, least energy per token; 300 W lost 20% of decode; benchmarking
 results/runtime_experiments/rtx3090ti_power_cap_sweep_20261021.json). Cards without a rule keep their
 default. A planned value outside the card's min/max range is clamped.
@@ -41,7 +42,7 @@ LOCAL = Path(__file__).resolve().parents[2]
 _HW = Path(os.getenv("RIG_HW_DIR") or "/home/bryan/llm_orchestration/shared/brain/hw")
 CONFIG_PATH = (_HW if _HW.is_dir() else LOCAL / "brain" / "hw") / "power.json"
 OVERRIDE_PATH = Path(os.getenv("RIG_POWER_OVERRIDE") or "/run/rig/power_override.json")
-DEFAULT_RULES = {"by_model": {"GTX 1060": {"156": 120, "120": 100}, "RTX 3090 Ti": 350}, "by_index": {}}
+DEFAULT_RULES = {"by_model": {"GTX 1060": 100, "RTX 3090 Ti": 350}, "by_index": {}}
 
 
 def load_rules(path: Path = CONFIG_PATH, override: Path | None = None) -> dict:

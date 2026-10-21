@@ -42,12 +42,12 @@ item unloads them, and it keeps going with no controller connected. `rig plan sh
 and utilization, available RAM and swap. The worst reading over 10 s sets `ok` / `warn` / `critical`
 (limits in `hw_guard.py` DEFAULT_LIMITS, overrides in rig-local `brain/hw/guard.json`).
 Total GPU power follows the cards themselves: warn at the sum of their `nvidia-smi` power limits
-(890 W with every card capped), critical 10% above; fixed numbers in `guard.json` replace that.
+(850 W with every card capped), critical 10% above; fixed numbers in `guard.json` replace that.
 
 Power limits: `nvidia-smi -pl` resets at every reboot, so `rig-power.service` (root, oneshot, after
 nvidia-persistenced) runs `hw_power.py apply` at boot. Caps go by card model and default limit, not index: GTX
-1060s at 100 W (2026-08-09 tests: about 2% decode speed for 17% less energy and 5 C cooler), the
-factory-overclocked 1060s (156 W default) at 120 W, the 3090 Ti at 350 W (measured 2026-10-21). `run_runtime.sh` checks the cards of every load (`hw_power.py check`),
+1060s at 100 W, both the 120 W and the factory-overclocked 156 W boards (2026-08-09 and 2026-10-21 tests: 2 to
+3.4% decode speed for 17% less energy and 5 C cooler), the 3090 Ti at 350 W (measured 2026-10-21). `run_runtime.sh` checks the cards of every load (`hw_power.py check`),
 re-applies once if a card is off plan, and refuses the load if it still is. `hw_power.py show` lists
 current and planned limits.
 
