@@ -98,6 +98,8 @@ PLACEMENT_SLOTS: Dict[str, List[str]] = {
     "single": ["gpu_1", "gpu_2", "gpu_3", "gpu_4", "gpu_5"],
     "split_1_3": ["split_1_3"],
     "split_4_5": ["split_4_5"],
+    # One named card, for runs that must not move (for example while lanes claim the other cards)
+    **{f"gpu_{i}": [f"gpu_{i}"] for i in range(1, 6)},
 }
 
 
