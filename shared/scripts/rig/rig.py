@@ -878,7 +878,7 @@ def cmd_lease(args) -> int:
 
 def cmd_claim(args) -> int:
     """Claims take cards out of the shared pool: list | add NAME --gpus [--ttl S --owner O] |
-    renew NAME [--ttl S] | remove NAME. A claim may cover cards that are still leased: that is how a
+    extend NAME --gpus [--owner O] | renew NAME [--ttl S] | remove NAME. A claim may cover cards that are still leased: that is how a
     split reserves its cards while it waits (MANAGER.md, "Reservations"). JSON out."""
     try:
         hs = open_hw_state()
@@ -892,6 +892,12 @@ def cmd_claim(args) -> int:
                 raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {expected_gpu_ids()}")
             return emit({"claim": hs.add_claim(args.name, gpus, args.note, args.by or caller(), owner=args.owner,
                                                ttl_s=args.ttl, purpose=args.purpose, model=args.model)})
+        if args.action == "extend":
+            gpus = [int(g) for g in args.gpus.split(",")]
+            unknown = sorted(set(gpus) - set(expected_gpu_ids()))
+            if unknown:
+                raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {expected_gpu_ids()}")
+            return emit({"claim": hs.extend_claim(args.name, gpus, args.owner)})
         if args.action == "renew":
             return emit({"claim": hs.renew_claim(args.name, args.owner, args.ttl)})
         return emit({"released": hs.remove_claim(args.name)})
@@ -1216,6 +1222,11 @@ def main() -> int:
     x.add_argument("--ttl", type=int, default=None, help="seconds until it lapses unless renewed (default: never)")
     x.add_argument("--purpose", default="")
     x.add_argument("--model", default="")
+    x.add_argument("--controller", help=ctl_help)
+    x = ca.add_parser("extend", help="add cards to a claim (a wait collecting cards as they free)")
+    x.add_argument("name")
+    x.add_argument("--gpus", required=True)
+    x.add_argument("--owner", default="")
     x.add_argument("--controller", help=ctl_help)
     x = ca.add_parser("renew")
     x.add_argument("name")

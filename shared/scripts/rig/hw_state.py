@@ -160,6 +160,32 @@ class HardwareState:
         self.mirror()
         return claim
 
+    def extend_claim(self, name: str, gpu_ids: list[int], owner: str = "") -> dict[str, Any]:
+        """Add cards to a live claim in one write (a wait that collects cards as they free). Refuses cards
+        another live claim holds; the cards may still be leased, like any claimed card."""
+        ids = sorted({int(g) for g in gpu_ids})
+        if not ids:
+            raise StateError("invalid", "extend needs at least one GPU")
+        with self.claims_lock:
+            claims = self._read_claims()
+            now = datetime.now(timezone.utc)
+            match = next((c for c in claims if c["name"] == name and not self._expired(c, now)), None)
+            if match is None:
+                raise StateError("not_found", f"no claim {name} (expired or removed)")
+            if owner and match.get("owner") and match["owner"] != owner:
+                raise StateError("ownership", f"claim {name} is owned by {match['owner']}, not {owner}")
+            for c in claims:
+                if c is match or self._expired(c, now):
+                    continue
+                overlap = sorted(set(ids) & set(c["gpu_ids"]))
+                if overlap:
+                    raise StateError("conflict", f"GPU {overlap} already claimed by {c['name']}")
+            match["gpu_ids"] = sorted(set(match["gpu_ids"]) | set(ids))
+            match["extended_at"] = _now()
+            self._write_claims(claims)
+        self.mirror()
+        return match
+
     def renew_claim(self, name: str, owner: str = "", ttl_s: int | None = None) -> dict[str, Any]:
         """Push a claim's expiry out by ttl_s (default: its own ttl_s). An expired claim is gone."""
         with self.claims_lock:

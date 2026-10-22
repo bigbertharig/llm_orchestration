@@ -66,6 +66,23 @@ class HardwareStateTests(unittest.TestCase):
         lease = hs.acquire(spec([1, 2], metadata={"claim": "split-1-2"}))
         self.assertEqual(lease["gpu_ids"], [1, 2])
 
+    def test_a_claim_grows_as_a_collecting_wait_takes_cards(self):
+        hs = self.make()
+        hs.add_claim("wait-m", [2], owner="llm-gateway", ttl_s=60)
+        hs.add_claim("other", [4])
+        grown = hs.extend_claim("wait-m", [1], owner="llm-gateway")
+        self.assertEqual(grown["gpu_ids"], [1, 2])
+        self.assertEqual(self.mirrored("claims.json")["claims"][0]["gpu_ids"], [1, 2])
+        with self.assertRaises(hw_state.StateError) as ctx:   # a card another claim holds
+            hs.extend_claim("wait-m", [4], owner="llm-gateway")
+        self.assertEqual(ctx.exception.kind, "conflict")
+        with self.assertRaises(hw_state.StateError) as ctx:   # a claim with a different owner
+            hs.extend_claim("wait-m", [3], owner="lane-1-2")
+        self.assertEqual(ctx.exception.kind, "ownership")
+        with self.assertRaises(hw_state.StateError) as ctx:
+            hs.extend_claim("gone", [3])
+        self.assertEqual(ctx.exception.kind, "not_found")
+
     def test_claims_with_a_ttl_lapse_unless_renewed(self):
         hs = self.make()
         claim = hs.add_claim("wait", [3], owner="campaign-x", ttl_s=60)
