@@ -952,8 +952,25 @@ def cmd_controller(args) -> int:
         return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
 
 
+def start_job(item: dict) -> tuple[bool, str]:
+    """A `job` item: start the run as its own unit and record it in the plan's runs; the item is done once the
+    unit started (the run's own state follows the unit, `hw_plan.refresh_runs`)."""
+    a = item["args"]
+    unit = hw_jobs.unit_name(str(a["run"]), hw_jobs.RUN_PREFIX)
+    st = hw_jobs.launch(str(a["run"]), [str(x) for x in a["argv"]], f"plan:{item.get('added_by')}",
+                        f"rig run {a['run']}" + (f" ({a['note']})" if a.get("note") else ""),
+                        prefix=hw_jobs.RUN_PREFIX, cwd=a.get("cwd") or str(Path.home()),
+                        env={str(k): str(v) for k, v in (a.get("env") or {}).items()})
+    if st.get("already_running"):
+        return False, f"run {a['run']} is already running as {unit}"
+    open_plan().start_run(a, unit)
+    return True, f"started run {a['run']} as {unit} ({st.get('active_state')})"
+
+
 def run_plan_item(item: dict) -> tuple[bool, str]:
     """Carry out one plan item with the existing rig commands. Blocking; the executor runs one at a time."""
+    if item["kind"] == "job":
+        return start_job(item)
     a = item["args"]
     pid = str(a["profile"])
     me = [sys.executable, str(Path(__file__).resolve())]
@@ -988,6 +1005,11 @@ def cmd_plan(args) -> int:
         say("plan executor: waiting for queued items")
         held_said = False
         while True:
+            try:
+                for r in plan.refresh_runs(hw_jobs.state):
+                    say(f"plan: run {r['run']} {r['state']} ({r['result']})")
+            except Exception as exc:  # a run check never stops the executor
+                say(f"plan: run check failed: {exc}")
             item = plan.take_next()
             if item is None:
                 held = (plan.report().get("hold") or {}).get("reason")
@@ -1029,6 +1051,28 @@ def cmd_plan(args) -> int:
                 raise hw_plan.PlanError("invalid", f"--doc is not JSON: {exc}") from exc
             return emit({"plan": plan.restore(args.controller, doc)})
         return emit({"item": plan.cancel(args.controller, args.item_id)})
+    except hw_plan.PlanError as exc:
+        return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
+
+
+def cmd_run(args) -> int:
+    """Runs (long jobs from `job` plan items): list | stop RUN --controller ID | dismiss RUN --controller ID.
+    stop ends the run's unit and marks it stopped; dismiss marks an ended run as not to be resumed. JSON out."""
+    plan = open_plan()
+    try:
+        if args.action == "list":
+            return emit({"runs": plan.runs()})
+        if args.action == "stop":
+            plan.require_active(args.controller)
+            rec = next((r for r in plan.runs() if r["run"] == args.run), None)
+            if rec is None:
+                raise hw_plan.PlanError("not_found", f"no run {args.run}")
+            if rec["state"] == "running":
+                run(["sudo", "-n", "systemctl", "stop", rec["unit"]], check=False, timeout=120)
+            return emit({"run": plan.set_run(args.controller, args.run, "stopped",
+                                             f"stopped by {caller()}" + (f": {args.reason}" if args.reason else ""))})
+        return emit({"run": plan.set_run(args.controller, args.run, "dismissed",
+                                         f"dismissed by {caller()}" + (f": {args.reason}" if args.reason else ""))})
     except hw_plan.PlanError as exc:
         return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
 
@@ -1269,6 +1313,15 @@ def main() -> int:
     x.add_argument("--doc", required=True, help="the plan report the controller kept (JSON)")
     pa.add_parser("run")
     s.set_defaults(fn=cmd_plan)
+    s = sub.add_parser("run", help="long runs started from job plan items: list | stop | dismiss")
+    ra = s.add_subparsers(dest="action", required=True)
+    ra.add_parser("list")
+    for name in ("stop", "dismiss"):
+        x = ra.add_parser(name)
+        x.add_argument("run")
+        x.add_argument("--controller", required=True)
+        x.add_argument("--reason", default="")
+    s.set_defaults(fn=cmd_run)
     s = sub.add_parser("stop")
     s.add_argument("profiles", nargs="*", help="remote profile ids to unload (default: stop everything)")
     s.set_defaults(fn=cmd_stop)

@@ -35,6 +35,37 @@ class PlanTests(unittest.TestCase):
         self.assertEqual((ctl["id"], ctl["took_over_from"]), ("desktop", "pi"))
         self.assertEqual(self.plan.claim("pi", "10.0.0.2", force=True)["id"], "pi")  # explicit handoff
 
+    def test_runs_are_recorded_follow_their_unit_and_are_interrupted_by_a_reboot(self):
+        self.plan.claim("pi", "10.0.0.2")
+        with self.assertRaises(hw_plan.PlanError):
+            self.plan.add("pi", "job", {"run": "c1"})                  # a job needs argv
+        self.plan.add("pi", "job", {"run": "c1", "argv": ["true"]})
+        self.plan.boot("boot-1")
+        self.plan.resume("pi")
+        rec = self.plan.start_run({"run": "c1", "argv": ["python3", "run.py"], "resume_argv": ["python3", "run.py",
+                                   "--run-id", "c1"], "owner": "campaign"}, "rig-run-c1")
+        self.assertEqual((rec["state"], rec["attempts"], rec["boot_id"]), ("running", 1, "boot-1"))
+        self.assertEqual(self.plan.report()["runs"][0]["run"], "c1")
+        units = {"rig-run-c1": {"active_state": "active"}}
+        self.assertEqual(self.plan.refresh_runs(lambda u: units[u]), [])
+        hold = self.plan.boot("boot-2")                                # the unit died with the rig
+        self.assertEqual(hold["runs_interrupted"], ["c1"])
+        self.assertEqual(self.plan.runs()[0]["state"], "interrupted")
+        self.plan.resume("pi")
+        again = self.plan.start_run({"run": "c1", "argv": ["python3", "run.py", "--run-id", "c1"]}, "rig-run-c1")
+        self.assertEqual(again["attempts"], 2)
+        units["rig-run-c1"] = {"active_state": "inactive", "result": "success", "exit_status": "0"}
+        (done,) = self.plan.refresh_runs(lambda u: units[u])
+        self.assertEqual(done["state"], "finished")
+        with self.assertRaises(hw_plan.PlanError):
+            self.plan.set_run("other", "c1", "dismissed", "x")         # only the active controller
+        self.assertEqual(self.plan.set_run("pi", "c1", "dismissed", "done with it")["state"], "dismissed")
+
+    def test_a_failed_unit_marks_its_run_failed(self):
+        self.plan.start_run({"run": "l1", "argv": ["false"]}, "rig-run-l1")
+        (r,) = self.plan.refresh_runs(lambda u: {"active_state": "failed", "result": "exit-code", "exit_status": "1"})
+        self.assertEqual(r["state"], "failed")
+
     def test_only_the_active_controller_edits_the_plan(self):
         self.plan.require_active(None)  # nobody registered: open
         self.plan.claim("pi", "10.0.0.2")

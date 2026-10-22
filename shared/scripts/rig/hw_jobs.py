@@ -15,6 +15,7 @@ import re
 import subprocess
 
 UNIT_PREFIX = "rig-load-"
+RUN_PREFIX = "rig-run-"     # long runs (campaigns, lanes) started from `job` plan items
 LOG_TAIL_LINES = 15
 
 
@@ -22,8 +23,8 @@ def _run(cmd: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
-def unit_name(job_key: str) -> str:
-    return UNIT_PREFIX + re.sub(r"[^A-Za-z0-9_.-]", "-", job_key)
+def unit_name(job_key: str, prefix: str = UNIT_PREFIX) -> str:
+    return prefix + re.sub(r"[^A-Za-z0-9_.-]", "-", job_key)
 
 
 def state(unit: str) -> dict:
@@ -40,9 +41,10 @@ def log_tail(unit: str, lines: int = LOG_TAIL_LINES) -> str:
     return _run(["sudo", "-n", "journalctl", "-u", unit, "-n", str(lines), "--no-pager", "-o", "cat"]).stdout.strip()
 
 
-def launch(job_key: str, argv: list[str], caller: str, description: str) -> dict:
+def launch(job_key: str, argv: list[str], caller: str, description: str, *, prefix: str = UNIT_PREFIX,
+           cwd: str | None = None, env: dict[str, str] | None = None) -> dict:
     """Start argv as a transient unit owned by the calling user. A running job is not started twice."""
-    unit = unit_name(job_key)
+    unit = unit_name(job_key, prefix)
     current = state(unit)
     if current["active_state"] in ("active", "activating"):
         return {**current, "already_running": True}
@@ -50,7 +52,9 @@ def launch(job_key: str, argv: list[str], caller: str, description: str) -> dict
     user = pwd.getpwuid(os.getuid()).pw_name
     proc = _run(["sudo", "-n", "systemd-run", "--quiet", "--unit", unit, "--description", description,
                  "--uid", user, "--gid", user, "--setenv", f"HOME={os.path.expanduser('~')}",
-                 "--setenv", f"RIG_CALLER={caller}", *argv])
+                 "--setenv", f"RIG_CALLER={caller}",
+                 *(["--working-directory", cwd] if cwd else []),
+                 *[a for k, v in (env or {}).items() for a in ("--setenv", f"{k}={v}")], *argv])
     if proc.returncode != 0:
         raise RuntimeError(f"systemd-run {unit} failed: {proc.stderr.strip() or proc.stdout.strip()}")
     return {**state(unit), "already_running": False}

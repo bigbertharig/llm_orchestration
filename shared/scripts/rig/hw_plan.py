@@ -25,6 +25,16 @@ own disk on every heartbeat. If either side crashes it recovers from the other:
 Item: {id, kind, args, state, added_by, added_at, started_at, ended_at, result}. Kinds:
   load    args {profile, gpus, port, lease, cache_ram}   -> `rig start remote` with that placement
   unload  args {profile}                                  -> `rig stop <profile>`
+  job     args {run, argv, owner, cwd, env, resume_argv, auto_resume, needs, note}
+                                                          -> starts the run as its own unit (rig-run-<run>)
+
+Runs (2026-10-22): long work a controller hands the rig (a benchmark campaign, a lane) is a `job`
+item: the executor starts it as its own transient unit and records it in `runs`, in this same file, so
+it is part of the shared report and its two copies. The item is done once the unit started; the run's
+own state follows its unit (running -> finished | failed, or stopped by `rig run stop`). On the first
+start of a new boot a run still marked running is `interrupted` and listed in the hold: the controller
+offers to resume it (from its checkpoint, `resume_argv`) or dismiss it, and resumes it on its own only
+when the run opted in (`auto_resume`). A lost network is not an interruption: the unit keeps running.
 """
 
 from __future__ import annotations
@@ -40,10 +50,14 @@ from filelock import FileLock
 
 SCHEMA_VERSION = 1
 STALE_AFTER_S = 120
-KINDS = ("load", "unload")
+KINDS = ("load", "unload", "job")
 STATES = ("queued", "running", "done", "failed", "cancelled", "interrupted")
 FINISHED = ("done", "failed", "cancelled", "interrupted")
 KEEP_FINISHED = 50  # finished items kept in the file, newest last
+RUN_STATES = ("running", "finished", "failed", "stopped", "interrupted", "dismissed")
+RUN_ENDED = ("finished", "failed", "stopped", "interrupted", "dismissed")
+KEEP_RUNS = 30      # runs kept in the file, newest last
+RUN_ARGS = ("run", "argv")
 
 
 class PlanError(RuntimeError):
@@ -105,7 +119,7 @@ class Plan:
                 "next": [i for i in data["items"] if i["state"] in ("queued", "running")],
                 "version": int(data.get("version") or 0), "updated_at": data.get("updated_at"),
                 "hold": data.get("hold"), "boot_id": data.get("rig_boot_id"), "booted_at": data.get("booted_at"),
-                "resumed": data.get("resumed"), "restored": data.get("restored")}
+                "resumed": data.get("resumed"), "restored": data.get("restored"), "runs": data.get("runs", [])}
 
     # ---------------------------------------------------------------- controller
 
@@ -168,7 +182,11 @@ class Plan:
     def add(self, controller: str, kind: str, args: dict[str, Any]) -> dict[str, Any]:
         if kind not in KINDS:
             raise PlanError("invalid", f"kind must be one of {KINDS}")
-        if not args.get("profile"):
+        if kind == "job":
+            missing = [k for k in RUN_ARGS if not args.get(k)]
+            if missing or not isinstance(args.get("argv"), list):
+                raise PlanError("invalid", f"a job needs {RUN_ARGS} (argv a list); missing {missing}")
+        elif not args.get("profile"):
             raise PlanError("invalid", "args.profile is required")
         with self.lock:
             data = self._read()
@@ -221,6 +239,65 @@ class Plan:
             item.update(state="done" if ok else "failed", ended_at=_iso(_now()), result=result[-2000:])
             self._write(data)
 
+    # ---------------------------------------------------------------- runs
+
+    def runs(self) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._read().get("runs", [])]
+
+    def start_run(self, args: dict[str, Any], unit: str) -> dict[str, Any]:
+        """Record a run the executor just started for a `job` item (a run id seen before counts an attempt)."""
+        with self.lock:
+            data = self._read()
+            runs = data.setdefault("runs", [])
+            old = next((r for r in runs if r["run"] == args["run"]), None)
+            if old is not None:
+                runs.remove(old)
+            rec = {k: args.get(k) for k in ("run", "argv", "owner", "cwd", "env", "resume_argv", "auto_resume",
+                                            "needs", "note")}
+            rec.update(unit=unit, state="running", boot_id=data.get("rig_boot_id"), started_at=_iso(_now()),
+                       ended_at=None, result="", attempts=int((old or {}).get("attempts") or 0) + 1)
+            runs.append(rec)
+            del runs[:-KEEP_RUNS]
+            self._write(data)
+            return dict(rec)
+
+    def refresh_runs(self, unit_state) -> list[dict[str, Any]]:
+        """Runs marked running whose unit has ended: `finished` (exit 0) or `failed`. unit_state(unit) returns
+        hw_jobs.state(): active_state, result, exit_status. Returns the runs that changed."""
+        with self.lock:
+            data = self._read()
+            changed = []
+            for r in data.get("runs", []):
+                if r["state"] != "running":
+                    continue
+                st = unit_state(r["unit"])
+                if st.get("active_state") in ("active", "activating", "deactivating", "reloading"):
+                    continue
+                ok = st.get("result") in ("success", "") and str(st.get("exit_status") or "0") == "0"
+                r.update(state="finished" if ok else "failed", ended_at=_iso(_now()),
+                         result=f"unit {st.get('active_state')} result={st.get('result')} exit={st.get('exit_status')}")
+                changed.append(dict(r))
+            if changed:
+                self._write(data)
+            return changed
+
+    def set_run(self, controller: str | None, run: str, state: str, result: str) -> dict[str, Any]:
+        """A controller marks a run `stopped` (after stopping its unit) or `dismissed` (it will not resume)."""
+        if state not in ("stopped", "dismissed"):
+            raise PlanError("invalid", "a controller can only mark a run stopped or dismissed")
+        with self.lock:
+            data = self._read()
+            if controller is not None:
+                self._require_controller(data, controller)
+            rec = next((r for r in data.get("runs", []) if r["run"] == run), None)
+            if rec is None:
+                raise PlanError("not_found", f"no run {run}")
+            if state == "dismissed" and rec["state"] == "running":
+                raise PlanError("state", f"run {run} is running; stop it first")
+            rec.update(state=state, ended_at=rec.get("ended_at") or _iso(_now()), result=result[-500:])
+            self._write(data)
+            return dict(rec)
+
     def recover(self) -> list[str]:
         """After an executor restart in the same boot: items left running did not finish."""
         with self.lock:
@@ -238,9 +315,10 @@ class Plan:
             if data.get("rig_boot_id") == boot_id:
                 return None
             stuck = _interrupt(data, "the rig restarted while it ran")
+            runs = _interrupt_runs(data, "the rig restarted while it ran")
             now = _iso(_now())
             data.update(rig_boot_id=boot_id, booted_at=now,
-                        hold={"reason": "boot", "since": now, "interrupted": stuck})
+                        hold={"reason": "boot", "since": now, "interrupted": stuck, "runs_interrupted": runs})
             self._write(data)
             return data["hold"]
 
@@ -271,6 +349,7 @@ class Plan:
                 raise PlanError("state", f"the rig's plan is current (version {mine} >= {theirs}); nothing restored")
             restored = {"schema_version": SCHEMA_VERSION, "controller": doc.get("controller") or ctl,
                         "items": [dict(i) for i in doc.get("items") or []], "version": theirs,
+                        "runs": [dict(r) for r in doc.get("runs") or data.get("runs") or []],
                         "rig_boot_id": data.get("rig_boot_id"), "booted_at": data.get("booted_at")}
             for key in ("stale",):
                 (restored["controller"] or {}).pop(key, None)
@@ -283,7 +362,15 @@ class Plan:
     def report_of(self, data: dict[str, Any]) -> dict[str, Any]:
         with_ctl = data.get("controller")
         return {"version": int(data.get("version") or 0), "hold": data.get("hold"),
-                "controller": with_ctl, "items": data.get("items", [])}
+                "controller": with_ctl, "items": data.get("items", []), "runs": data.get("runs", [])}
+
+
+def _interrupt_runs(data: dict[str, Any], why: str) -> list[str]:
+    """Runs still marked running from an earlier boot: their units are gone. Returns their run ids."""
+    stuck = [r for r in data.get("runs", []) if r["state"] == "running"]
+    for r in stuck:
+        r.update(state="interrupted", ended_at=_iso(_now()), result=f"interrupted: {why}")
+    return [r["run"] for r in stuck]
 
 
 def _interrupt(data: dict[str, Any], why: str) -> list[str]:
