@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import re
@@ -43,9 +44,10 @@ BENCHMARKING_SCRIPTS = SHARED_ROOT / "plans" / "shoulders" / "benchmarking"
 LEASE_HELPER = BENCHMARKING_SCRIPTS / "scripts" / "integration" / "harness_lease.sh"
 LEASE_RENEW_EVERY_S = 120
 # A card the manager refuses (claimed or leased elsewhere) is skipped for this long. A `single` block
-# gives up after this many refusals per card it could use (15 over its five cards). A split or pinned
-# block reserves its slot's cards instead (llm-gateway MANAGER.md, "Reservations") and waits for them,
-# up to LEASE_RESERVATION_WAIT_S, so single work cannot starve it.
+# gives up after this many refusals per card it could use (15 over its five cards). A `split` block tries
+# the other free pairs first; once every pair has refused it, it reserves the pair that refused last
+# (llm-gateway MANAGER.md, "Reservations") and waits for it, up to LEASE_RESERVATION_WAIT_S, so single
+# work cannot starve it. A pinned block reserves its own cards and waits the same way.
 LEASE_REFUSED_COOLDOWN_S = 60
 LEASE_REFUSALS_PER_CARD = 3
 LEASE_RESERVATION_WAIT_S = 7200
@@ -87,26 +89,34 @@ class GpuSlot:
         return set(self.gpu_ids)
 
 
-# Static slot definitions matching the rig layout
+# The rig: GPU 0 is the brain card (RTX 3090 Ti); the worker cards are the GTX 1060s, all 6 GB, so any
+# two of them split a model evenly. Every worker card and every pair of them is a slot; a slot serves on
+# the port of its lowest card (11434 + index), so slots that can run together never share a port.
+BRAIN_GPU = 0
+WORKER_GPUS = [1, 2, 3, 4, 5]
+BASE_PORT = 11434
+
+
+def _worker_slot(gpu_ids: List[int]) -> GpuSlot:
+    return GpuSlot(name="gpu_" + "_".join(str(g) for g in gpu_ids), gpu_ids=list(gpu_ids),
+                   port=BASE_PORT + gpu_ids[0], tier="single" if len(gpu_ids) == 1 else "split")
+
+
 SLOTS: Dict[str, GpuSlot] = {
-    "brain": GpuSlot(name="brain", gpu_ids=[0], port=11434, tier="brain"),
-    "gpu_1": GpuSlot(name="gpu_1", gpu_ids=[1], port=11435, tier="single"),
-    "gpu_2": GpuSlot(name="gpu_2", gpu_ids=[2], port=11436, tier="single"),
-    "gpu_3": GpuSlot(name="gpu_3", gpu_ids=[3], port=11437, tier="single"),
-    "gpu_4": GpuSlot(name="gpu_4", gpu_ids=[4], port=11438, tier="single"),
-    "gpu_5": GpuSlot(name="gpu_5", gpu_ids=[5], port=11439, tier="single"),
-    "split_1_3": GpuSlot(name="split_1_3", gpu_ids=[1, 3], port=11435, tier="split"),
-    "split_4_5": GpuSlot(name="split_4_5", gpu_ids=[4, 5], port=11438, tier="split"),
+    "brain": GpuSlot(name="brain", gpu_ids=[BRAIN_GPU], port=BASE_PORT + BRAIN_GPU, tier="brain"),
+    **{s.name: s for s in (_worker_slot([g]) for g in WORKER_GPUS)},
+    **{s.name: s for s in (_worker_slot(list(p)) for p in itertools.combinations(WORKER_GPUS, 2))},
 }
 
-# Placement -> candidate slot names (preference order)
+# Placement -> candidate slot names, in preference order. `single` takes any free worker card, `split`
+# any free pair; a slot name (gpu_3, gpu_1_3) pins the block to those cards, for runs that must not move
+# (for example while lanes claim the other cards).
+FLEXIBLE_PLACEMENTS = ("single", "split")
 PLACEMENT_SLOTS: Dict[str, List[str]] = {
     "brain": ["brain"],
-    "single": ["gpu_1", "gpu_2", "gpu_3", "gpu_4", "gpu_5"],
-    "split_1_3": ["split_1_3"],
-    "split_4_5": ["split_4_5"],
-    # One named card, for runs that must not move (for example while lanes claim the other cards)
-    **{f"gpu_{i}": [f"gpu_{i}"] for i in range(1, 6)},
+    "single": [n for n, s in SLOTS.items() if s.tier == "single"],
+    "split": [n for n, s in SLOTS.items() if s.tier == "split"],
+    **{n: [n] for n in SLOTS if n != "brain"},
 }
 
 
@@ -1050,6 +1060,7 @@ class Scheduler:
         self.refused_at: Dict[str, float] = {}       # slot name -> when the manager last refused it
         self.lease_refusals: Dict[str, int] = {}     # block id -> refusals so far
         self.reserved_since: Dict[str, float] = {}   # block id -> when its split/pinned wait began
+        self.reserved_for: Dict[str, str] = {}       # block id -> slot it reserved while waiting
         self._shutdown = False
 
     def _runtime_group_members(self, group: str) -> List[BlockState]:
@@ -1243,6 +1254,9 @@ class Scheduler:
             else:
                 try:
                     lease = self.leases.ensure(slot, bs.model)
+                    held = self.reserved_for.pop(bid, None)
+                    if held and held != slot.name:  # a split that waited on one pair got another
+                        self.leases.unreserve(held)
                     container_name = start_runtime(bs, slot, lease)
                     bs.runtime_container = container_name
                 except LeaseRefused as e:
@@ -1251,10 +1265,17 @@ class Scheduler:
                     self.occupied.pop(slot.name, None)
                     self.refused_at[slot.name] = time.monotonic()
                     n = self.lease_refusals[bid] = self.lease_refusals.get(bid, 0) + 1
-                    if bs.placement != "single":
-                        # A split or pinned block cannot move: reserve its cards and wait for them.
+                    other_pair = bs.placement == "split" and find_free_slot(
+                        bs.placement, self.occupied, cooling | {slot.name}) is not None
+                    if bs.placement != "single" and not other_pair:
+                        # A pinned block, or a split every pair has refused: reserve these cards and wait.
                         since = self.reserved_since.setdefault(bid, time.monotonic())
                         reserved = self.leases.reserve(slot, bs.model)
+                        if reserved:
+                            held = self.reserved_for.get(bid)
+                            if held and held != slot.name:
+                                self.leases.unreserve(held)
+                            self.reserved_for[bid] = slot.name
                         if time.monotonic() - since < LEASE_RESERVATION_WAIT_S:
                             bs.status = WAITING_GPU
                             bs.assigned_slot = None
@@ -1263,7 +1284,7 @@ class Scheduler:
                                 + ("reserved, " if reserved else "not reserved (claimed elsewhere), ")
                                 + f"waiting up to {LEASE_RESERVATION_WAIT_S} s in all")
                         else:
-                            self.leases.unreserve(slot.name)
+                            self.leases.unreserve(self.reserved_for.pop(bid, slot.name))
                             bs.status = FAILED
                             bs.error = f"cards not free after {LEASE_RESERVATION_WAIT_S} s: {e}"
                             bs.ended_at = now_iso()
