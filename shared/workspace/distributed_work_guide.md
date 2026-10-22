@@ -410,7 +410,7 @@ Four distinct worker architectures, each with different cost/performance tradeof
 | **CPU script workers** | Low-RAM nodes running non-LLM tasks | Orange Pi Prime (2GB) | No — scripts, data prep, file ops only |
 | **CPU LLM workers** | ARM/x86 nodes running models in system RAM | Pi 5 8-16GB, any PC with RAM | Yes — identical quality, 10-15× slower |
 | **GPU workers** | Discrete GPUs running models in VRAM | GTX 1060 6GB, RTX 3060 12GB | Yes — fast inference, VRAM-limited |
-| **Unified memory boxes** | Large shared memory pool, GPU + CPU | DGX Spark (128GB), Mac Studio | Yes — flexible, concurrent models |
+| **Unified memory boxes** | Large shared memory pool, GPU + CPU | DGX Spark (128GB), Mac Studio | Yes — flexible, concurrent models (placement design: llm-gateway `docs/DESIGN_NOTES.md`, "Sharing capacity") |
 
 ### Side-by-side comparison
 

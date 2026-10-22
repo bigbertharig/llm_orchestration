@@ -3,6 +3,10 @@
 *Brainstormed: 2026-03-23*
 *Status: Future planning — no hardware purchased yet*
 
+*Design consolidated 2026-10-22: the placement side of this note (memory pool instead of GPU slots,
+several models per box or card) now lives in llm-gateway `docs/DESIGN_NOTES.md`, "Sharing capacity".
+This file keeps the hardware options and the orchestration-era reasoning.*
+
 ---
 
 ## Summary
