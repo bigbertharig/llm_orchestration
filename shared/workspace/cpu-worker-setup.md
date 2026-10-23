@@ -59,27 +59,18 @@ inference.
 
 ## Network
 
-- subnet: `10.0.0.0/24`
-- control plane: `10.0.0.2` (laptop/operator)
-- GPU rig: `10.0.0.3`
-- CPU workers: `10.0.0.10` through `10.0.0.17`
+- subnet: `<rig-subnet>`
+- control plane: `<pi-ip>` (laptop/operator)
+- GPU rig: `<rig-ip>`
+- CPU workers: one fixed address each (`<worker-ip>`), reserved by MAC on the router
 
-**DHCP reservations are set on the rig router (10.0.0.1).** Each Pi's MAC address
+**DHCP reservations are set on the rig router (<router-ip>).** Each Pi's MAC address
 is mapped to a fixed IP. This is required — without reservations, IPs shuffle on
 reboot and hostnames won't match.
 
-| MAC | Reserved IP | Hostname |
-|---|---|---|
-| `02:01:70:ec:f9:ba` | 10.0.0.10 | worker-10 |
-| `02:01:2f:19:e6:17` | 10.0.0.11 | worker-11 |
-| `02:01:3d:03:b7:54` | 10.0.0.12 | worker-12 |
-| `02:01:fd:c3:2a:35` | 10.0.0.13 | worker-13 |
-| `02:01:26:29:35:6a` | 10.0.0.14 | worker-14 |
-| `02:01:f9:fe:a5:b9` | 10.0.0.15 | worker-15 |
-| `02:01:dc:02:f8:a7` | 10.0.0.16 | worker-16 |
-| `02:01:58:5f:42:44` | 10.0.0.17 | worker-17 |
+Reservations: one per worker, `<mac>` to `<worker-ip>` with hostname `worker-N`. The real addresses, the MAC reservations and the ssh config are in the local site inventory (`shared/workspace/local/inventory.md`, not committed); docs use placeholders such as `<pi-ip>`.
 
-The workers mount shared storage from the GPU rig (`10.0.0.3`) and execute
+The workers mount shared storage from the GPU rig (`<rig-ip>`) and execute
 directly against shared scripts, queues, and outputs.
 
 ---
@@ -93,7 +84,7 @@ agent (`bryan`) cannot write.
 
 - `bryan` - normal login, `restart_cpu_workers.sh`, the systemd service; passwordless sudo from
   `/etc/sudoers.d/90-bryan-nopasswd` (one line: `bryan ALL=(ALL) NOPASSWD:ALL`, mode 440)
-- `root` - fallback only: `ssh root@10.0.0.<octet>`
+- `root` - fallback only: `ssh root@<worker-ip>`
 
 Both have the control plane's public key in `~/.ssh/authorized_keys`.
 The key is baked into the base image via the first-boot script.
@@ -102,25 +93,25 @@ Add the sudo rule to a worker that lacks it (from the control plane, once, needs
 the root fallback):
 
 ```bash
-ssh -t 10.0.0.<octet> "echo 'bryan ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-bryan-nopasswd && sudo chmod 440 /etc/sudoers.d/90-bryan-nopasswd && sudo visudo -c"
+ssh -t <worker-ip> "echo 'bryan ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-bryan-nopasswd && sudo chmod 440 /etc/sudoers.d/90-bryan-nopasswd && sudo visudo -c"
 ```
 
 SSH config on control plane (`~/.ssh/config`):
 
 ```
-Host 10.0.0.10 10.0.0.11 10.0.0.12 10.0.0.13
+Host <worker-ip> ...        # every worker address (local inventory)
     User bryan
     StrictHostKeyChecking accept-new
     UserKnownHostsFile ~/.ssh/known_hosts_workers
 ```
 
-(14-17 have no entry and also log in as `bryan`, the default user.)
+(Workers without an entry also log in as `bryan`, the default user.)
 
 If host keys change (reimaging, first-boot re-run), clear the stale entries:
 
 ```bash
-for i in 10 11 12 13 14 15 16 17; do
-  ssh-keygen -f ~/.ssh/known_hosts_workers -R "10.0.0.$i"
+for ip in <worker-ip> ...; do
+  ssh-keygen -f ~/.ssh/known_hosts_workers -R "$ip"
 done
 ```
 
@@ -150,8 +141,8 @@ Fleet:
 
 ```bash
 # from the Pi
-for i in 10 11 12 14 15 16 17; do ssh 10.0.0.$i bash /media/bryan/shared/scripts/cpu_worker/prepare_worker.sh; done
-for i in 10 11 12 14 15 16 17; do ssh 10.0.0.$i bash /media/bryan/shared/scripts/cpu_worker/check_worker.sh | grep -E "FAIL|failed"; done
+for i in 10 11 12 14 15 16 17; do ssh <worker-ip> bash /media/bryan/shared/scripts/cpu_worker/prepare_worker.sh; done
+for i in 10 11 12 14 15 16 17; do ssh <worker-ip> bash /media/bryan/shared/scripts/cpu_worker/check_worker.sh | grep -E "FAIL|failed"; done
 ```
 
 State 2026-10-20: workers 10-12 and 14-17 pass all checks (1.2-1.3 GB used each); an end-to-end test
@@ -174,7 +165,7 @@ Making a new image (needs the SD card in a Linux card reader, e.g. on the Pi):
 
 1. Pick the worker with the smallest card (worker 17, 8 GB; 14 and 16 have 16 GB, the rest 32 GB). An
    image only fits cards at least its size; first-boot grows the filesystem on larger ones.
-2. `ssh 10.0.0.17 bash /media/bryan/shared/scripts/cpu_worker/make_image_ready.sh` - prepares, checks
+2. `ssh <worker-ip> bash /media/bryan/shared/scripts/cpu_worker/make_image_ready.sh` - prepares, checks
    (stops on any FAIL), removes the first-boot flag, blanks the machine id, empties logs and history,
    then powers off.
 3. Move the card to the reader and find it with `lsblk`. On the Pi the shared drive is `/dev/sda`, so
@@ -186,7 +177,7 @@ Making a new image (needs the SD card in a Linux card reader, e.g. on the Pi):
    sudo dd if=/dev/sdX bs=4M status=progress | xz -T0 -6 > worker-image.img.xz
    ```
 5. Put the card back and boot the worker: first-boot runs again (same IP and name, new SSH host key).
-   Clear the old key on the Pi (`ssh-keygen -f ~/.ssh/known_hosts_workers -R 10.0.0.17`), then run
+   Clear the old key on the Pi (`ssh-keygen -f ~/.ssh/known_hosts_workers -R <worker-ip>`), then run
    `check_worker.sh` on it.
 6. Update "Last updated" above and the image contents below.
 
@@ -211,7 +202,7 @@ xzcat /media/bryan/shared/plans/shoulders/research_assistant/docs/worker-image.i
 Image contents:
 
 - Armbian / Debian minimal (terminal-only), one ext4 partition (`armbi_root`), 1.2 GB used
-- Fleet standard from `prepare_worker.sh`: the Pi share fstab line (`10.0.0.2:/media/bryan/shared`),
+- Fleet standard from `prepare_worker.sh`: the Pi share fstab line (`<pi-ip>:/media/bryan/shared`),
   `/etc/sudoers.d/90-bryan-nopasswd`, `/opt/worker-env` matching `requirements.txt`, unattended
   updates and the other unused timers off
 - First-boot script at `/opt/first-boot.sh`, `first-boot.service` and `cpu-agent.service` enabled
@@ -227,10 +218,10 @@ Expected shared mount on workers:
 - `/media/bryan/shared`
 
 Current required fstab line (normalized across workers 10-17). Since 2026-10-15 the share is served by
-the Pi (`10.0.0.2`), not the rig; workers still on the old `10.0.0.3:/mnt/shared` line need this change:
+the Pi (`<pi-ip>`), not the rig; workers still on the old `<rig-ip>:/mnt/shared` line need this change:
 
 ```fstab
-10.0.0.2:/media/bryan/shared /media/bryan/shared nfs nofail,_netdev,noauto,x-systemd.automount,x-systemd.mount-timeout=10s,nolock 0 0
+<pi-ip>:/media/bryan/shared /media/bryan/shared nfs nofail,_netdev,noauto,x-systemd.automount,x-systemd.mount-timeout=10s,nolock 0 0
 ```
 
 Expected runtime paths:
@@ -290,13 +281,13 @@ Manual control:
 
 ```bash
 # Check status
-ssh 10.0.0.10 'systemctl status cpu-agent.service'
+ssh <worker-ip> 'systemctl status cpu-agent.service'
 
 # Restart
-ssh 10.0.0.10 'sudo systemctl restart cpu-agent.service'
+ssh <worker-ip> 'sudo systemctl restart cpu-agent.service'
 
 # Stop
-ssh 10.0.0.10 'sudo systemctl stop cpu-agent.service'
+ssh <worker-ip> 'sudo systemctl stop cpu-agent.service'
 ```
 
 ---
@@ -314,7 +305,7 @@ Restart all default workers via SSH helper:
 Restart specific workers:
 
 ```bash
-/media/bryan/shared/scripts/restart_cpu_workers.sh 10.0.0.10 10.0.0.11
+/media/bryan/shared/scripts/restart_cpu_workers.sh <worker-ip> <worker-ip>
 ```
 
 Single-run smoke test:
@@ -342,12 +333,12 @@ python3 /media/bryan/shared/scripts/cpu_agent.py --once --name cpu-worker-10
 1. Ensure DHCP reservation exists on router for the Pi's MAC address.
 2. Burn the base image to microSD.
 3. Boot the worker and wait ~60s for first-boot to complete.
-4. Verify: `ssh 10.0.0.<octet> 'hostname'` returns `worker-<octet>`
+4. Verify: `ssh <worker-ip> 'hostname'` returns `worker-<octet>`
 5. Old (2026-03-23) image only, not needed with the 2026-10-20 image: point fstab at the Pi first, because `prepare_worker.sh` lives on the
    share (use `ssh root@...` if bryan's sudo asks for a password):
-   `ssh 10.0.0.<octet> "sudo sed -i 's#^10\.0\.0\.3:/mnt/shared /media/bryan/shared #10.0.0.2:/media/bryan/shared /media/bryan/shared #' /etc/fstab && sudo systemctl daemon-reload && sudo systemctl restart media-bryan-shared.automount"`
-6. `ssh 10.0.0.<octet> bash /media/bryan/shared/scripts/cpu_worker/prepare_worker.sh`
-7. `ssh 10.0.0.<octet> bash /media/bryan/shared/scripts/cpu_worker/check_worker.sh` shows 0 failed
+   `ssh <worker-ip> "sudo sed -i 's#^<rig-ip>:/mnt/shared /media/bryan/shared #<pi-ip>:/media/bryan/shared /media/bryan/shared #' /etc/fstab && sudo systemctl daemon-reload && sudo systemctl restart media-bryan-shared.automount"`
+6. `ssh <worker-ip> bash /media/bryan/shared/scripts/cpu_worker/prepare_worker.sh`
+7. `ssh <worker-ip> bash /media/bryan/shared/scripts/cpu_worker/check_worker.sh` shows 0 failed
 
 Worker 13 was brought up this way on 2026-10-20 (steps 5-7 on its existing card).
 
@@ -358,9 +349,9 @@ Worker 13 was brought up this way on 2026-10-20 (steps 5-7 on its existing card)
 The dashboard drops CPU workers whose heartbeats are older than 10 minutes
 (`HEARTBEAT_MAX_S = 600`). If workers disappear from the dashboard:
 
-1. Check if the Pi is reachable: `ping 10.0.0.<octet>`
-2. Check agent status: `ssh 10.0.0.<octet> 'systemctl status cpu-agent.service'`
-3. Check NFS mount: `ssh 10.0.0.<octet> 'mount | grep shared'` (should be `10.0.0.2:/media/bryan/shared`)
+1. Check if the Pi is reachable: `ping <worker-ip>`
+2. Check agent status: `ssh <worker-ip> 'systemctl status cpu-agent.service'`
+3. Check NFS mount: `ssh <worker-ip> 'mount | grep shared'` (should be `<pi-ip>:/media/bryan/shared`)
 4. Check heartbeat file timestamp on shared drive
 
 ---
@@ -380,7 +371,7 @@ first-boot flag on all Pis (`rm /opt/.first-boot-done`), reboot fleet.
 
 **Fix:** Clear stale keys from `~/.ssh/known_hosts_workers`:
 ```bash
-ssh-keygen -f ~/.ssh/known_hosts_workers -R 10.0.0.<octet>
+ssh-keygen -f ~/.ssh/known_hosts_workers -R <worker-ip>
 ```
 
 ### SSH "Permission denied (publickey,password)"
@@ -390,7 +381,7 @@ base image still has old public key.
 
 **Fix:** Push current key to the Pi (requires password or physical access):
 ```bash
-sshpass -p '<password>' ssh root@10.0.0.<octet> \
+sshpass -p '<password>' ssh root@<worker-ip> \
   "echo '$(cat ~/.ssh/id_ed25519.pub)' >> /root/.ssh/authorized_keys"
 ```
 Then update the base image to include the new key.
@@ -399,12 +390,12 @@ Then update the base image to include the new key.
 
 Check journal:
 ```bash
-ssh 10.0.0.<octet> 'journalctl -u cpu-agent.service -u media-bryan-shared.mount -n 30 --no-pager'
+ssh <worker-ip> 'journalctl -u cpu-agent.service -u media-bryan-shared.mount -n 30 --no-pager'
 ```
 
 Common causes:
-- NFS mount not available (check fstab points at the Pi `10.0.0.2:/media/bryan/shared`, not the old
-  `10.0.0.3:/mnt/shared`; check the Pi NFS server). Seen 2026-10-20: every worker still on the rig
+- NFS mount not available (check fstab points at the Pi `<pi-ip>:/media/bryan/shared`, not the old
+  `<rig-ip>:/mnt/shared`; check the Pi NFS server). Seen 2026-10-20: every worker still on the rig
   line, the mount timed out at boot and `cpu-agent.service` failed with result 'dependency'.
 - Permission error writing heartbeat (check file ownership on shared drive)
 - Python not available
@@ -413,7 +404,7 @@ Common causes:
 
 **Cause:** Stale root-owned heartbeat files from older runs.
 
-**Fix:** On NFS server (`10.0.0.3`), reset owner/mode:
+**Fix:** On NFS server (`<rig-ip>`), reset owner/mode:
 ```bash
 chown bryan:bryan /mnt/shared/cpus/cpu-worker-<id>/heartbeat.json
 chmod 664 /mnt/shared/cpus/cpu-worker-<id>/heartbeat.json

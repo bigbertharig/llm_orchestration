@@ -1,5 +1,7 @@
 # LLM Orchestration — Context (Short)
 
+Addresses: these docs use role placeholders (`<pi-ip>`, `<rig-ip>`, `<router-ip>`, `<worker-ip>`, `<desktop-ip>`, `<rig-subnet>`) instead of our real ones. The real addresses, the MAC reservations and the ssh config are in the local site inventory (`shared/workspace/local/inventory.md`, not committed). Scripts carry the real values.
+
 Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 
 ## Read First
@@ -45,8 +47,8 @@ Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 
 ## Shared Storage Topology (Current)
 
-- The shared drive (4TB WD, later a NAS) is attached to the Pi at `10.0.0.2` and exported over NFS
-  (`/media/bryan/shared`, `root_squash,anonuid=1000,anongid=1000` to `10.0.0.0/24`). The Pi is the network
+- The shared drive (4TB WD, later a NAS) is attached to the Pi at `<pi-ip>` and exported over NFS
+  (`/media/bryan/shared`, `root_squash,anonuid=1000,anongid=1000` to `<rig-subnet>`). The Pi is the network
   leader: storage and time (chrony serves the LAN; the rig syncs only from the Pi).
 - The rig mounts it at `/mnt/shared` (NFS automount, soft, 10 min idle timeout). The rig itself is
   self-contained for idle/remote mode: code, config, model library and the model hotset are rig-local
@@ -59,12 +61,12 @@ Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 
 Path rule:
 - if a command executes on the rig itself, prefer `/mnt/shared/...`
-- if a command executes on the Pi at `10.0.0.2`, prefer `/media/bryan/shared/...`
+- if a command executes on the Pi at `<pi-ip>`, prefer `/media/bryan/shared/...`
 - if a wrapper proxies work to the rig, pass shared paths that can be normalized to rig-visible paths
 
 Operational rule:
 - Scripts that run on CPU workers must resolve shared root dynamically (`/media/bryan/shared` vs `/mnt/shared`) instead of hardcoding one path.
-- If CPU workers disappear from dashboard, first verify worker shared mount points resolve to rig `10.0.0.3` and are actually mounted.
+- If CPU workers disappear from dashboard, first verify worker shared mount points resolve to rig `<rig-ip>` and are actually mounted.
 
 ## Architecture — Who Does What
 - **Brain**: Sequences work. Promotes private→public tasks when dependencies resolve. Handles retries (max 3 attempts). Manages model lifecycle via meta tasks.
@@ -89,7 +91,7 @@ Important execution boundary:
 - If you are on the laptop, SSH to the rig first:
 
 ```bash
-ssh 10.0.0.3
+ssh <rig-ip>
 ```
 
 Use the rig side for:
@@ -105,7 +107,7 @@ The laptop side is still fine for:
 - editing repo code/docs
 
 Rule of thumb:
-- If the command controls live runtime state, do it on `10.0.0.3`.
+- If the command controls live runtime state, do it on `<rig-ip>`.
 - If the command only reads shared artifacts or edits code, either side is fine.
 - Worker runtime ports (`11435+`, split ports, and similar) are rig-local operator ports.
 - If a benchmark/custom harness talks directly to a worker port, run that harness on the rig side or use an explicit proxy/tunnel.
@@ -116,12 +118,12 @@ The rig boots **idle**: nothing running, no model on any GPU (`rig-boot.service`
 Pick one mode at a time with the `rig` mode selector, from any machine:
 
 ```bash
-ssh 10.0.0.3 rig status
-ssh 10.0.0.3 rig start orchestration   # brain (27B on GPU0) + 5 cold workers, plans admitted
-ssh 10.0.0.3 rig start bench           # same stack, config.benchmark.json, benchmarks admitted
-ssh 10.0.0.3 rig start remote [profile ...]  # published remote_profiles, no orchestrator
-ssh 10.0.0.3 rig start <mode> --force  # replace whatever mode is running
-ssh 10.0.0.3 rig stop                  # back to idle
+ssh <rig-ip> rig status
+ssh <rig-ip> rig start orchestration   # brain (27B on GPU0) + 5 cold workers, plans admitted
+ssh <rig-ip> rig start bench           # same stack, config.benchmark.json, benchmarks admitted
+ssh <rig-ip> rig start remote [profile ...]  # published remote_profiles, no orchestrator
+ssh <rig-ip> rig start <mode> --force  # replace whatever mode is running
+ssh <rig-ip> rig stop                  # back to idle
 ```
 
 - `start` refuses (exit 2) if another mode is running and reports who started it and when.
@@ -237,7 +239,7 @@ heartbeats, but local runtime port probes and GPU telemetry will be degraded.
 
 ```bash
 # preferred:
-#   ssh 10.0.0.3
+#   ssh <rig-ip>
 #   python3 /mnt/shared/scripts/batch_runtime_diag.py --batch-id <batch_id> --shared-path /mnt/shared
 #
 # laptop-side fallback:
@@ -316,7 +318,7 @@ Do not treat internal `reset_gpu_runtime` meta tasks as the normal operator tool
 ### Stop The System
 
 ```bash
-ssh 10.0.0.3 rig stop
+ssh <rig-ip> rig stop
 ```
 
 ## Dashboard Actions

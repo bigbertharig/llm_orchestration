@@ -1,7 +1,7 @@
 # Ollama Pre-Update Snapshot
 
 Captured: 2026-03-05 17:48 PST
-Host: `bryan-GPU-Rig`
+Host: `<rig-hostname>`
 
 ## Version
 

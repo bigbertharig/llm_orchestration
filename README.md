@@ -4,9 +4,9 @@ Distributed task orchestration system for running local LLM workloads across GPU
 
 ## Architecture
 
-- **Operator host** (10.0.0.2): Repo checkout, plan authoring, dashboard, and operator wrappers
-- **GPU rig** (10.0.0.3): NFS source, brain GPU, worker GPUs, and `llama-server` runtimes
-- **CPU workers** (10.0.0.10+): Orange Pi Prime cluster (ARM64, 2GB RAM), claim CPU tasks over NFS
+- **Operator host** (<pi-ip>): Repo checkout, plan authoring, dashboard, and operator wrappers
+- **GPU rig** (<rig-ip>): NFS source, brain GPU, worker GPUs, and `llama-server` runtimes
+- **CPU workers** (<worker-ip>+): Orange Pi Prime cluster (ARM64, 2GB RAM), claim CPU tasks over NFS
 - **Brain**: Config-selected coordinator model that interprets plans, creates tasks, monitors workers, and validates results
 - **GPU workers**: Config-selected worker models that execute LLM and script tasks
 - **Shared drive**: 4TB ext4 storage attached to the GPU rig and NFS-mounted by the other nodes
@@ -16,8 +16,8 @@ See [shared/workspace/architecture.md](shared/workspace/architecture.md) for det
 
 ## Hardware
 
-- **Operator host**: Control plane at 10.0.0.2
-- **GPU rig**: RTX 3090-class brain GPU plus five 6GB worker GPUs at 10.0.0.3
+- **Operator host**: Control plane at <pi-ip>
+- **GPU rig**: RTX 3090-class brain GPU plus five 6GB worker GPUs at <rig-ip>
 - **CPU workers**: Orange Pi Prime (Allwinner H5, 4-core ARM64, 2GB RAM) running Armbian
 - **Network**: 10.0.0.x subnet, gigabit switch, NFS-mounted shared drive on all nodes
 
@@ -60,7 +60,7 @@ by default; only the client-facing gateway needs a LAN listener.
 ORCHESTRATOR_API_KEY=replace-me \
 python3 scripts/model_access_api.py \
   --shared-root /media/bryan/shared \
-  --rig-host 10.0.0.3
+  --rig-host <rig-ip>
 ```
 
 See

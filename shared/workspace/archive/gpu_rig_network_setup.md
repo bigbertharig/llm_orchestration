@@ -13,7 +13,7 @@ Establish the direct ethernet link between RPi 5 (control plane) and GPU rig so 
 ```
 ┌─────────────────┐         ethernet         ┌─────────────────┐
 │     GPU Rig     │◄───────────────────────►│       Pi        │
-│   10.0.0.2      │        1 Gbps            │    10.0.0.1     │
+│   <pi-ip>      │        1 Gbps            │    <router-ip>     │
 └─────────────────┘                          └─────────────────┘
 ```
 
@@ -28,7 +28,7 @@ GPU Rig                              Pi
 ────────                             ──────
 /mnt/shared  ◄── NFS client ───  /media/bryan/shared (local drive)
                                      │
-                                 NFS server exports to 10.0.0.0/24
+                                 NFS server exports to <rig-subnet>
 ```
 
 ### Pi Side (has the drive)
@@ -37,7 +37,7 @@ GPU Rig                              Pi
 2. NFS server exports it:
    ```bash
    sudo apt install nfs-kernel-server
-   echo '/media/bryan/shared 10.0.0.0/24(rw,sync,no_subtree_check,no_root_squash)' | sudo tee -a /etc/exports
+   echo '/media/bryan/shared <rig-subnet>(rw,sync,no_subtree_check,no_root_squash)' | sudo tee -a /etc/exports
    sudo exportfs -ra
    sudo systemctl enable --now nfs-kernel-server
    ```
@@ -47,12 +47,12 @@ GPU Rig                              Pi
 1. Apply static IP (once ethernet connected):
    ```bash
    sudo netplan apply
-   # Verify: ip addr show enp0s31f6 should show 10.0.0.2/24
+   # Verify: ip addr show <ethernet-nic> should show <pi-ip>/24
    ```
 
 2. fstab entry (already configured):
    ```
-   10.0.0.1:/media/bryan/shared  /mnt/shared  nfs  defaults,noatime,nofail  0  0
+   <router-ip>:/media/bryan/shared  /mnt/shared  nfs  defaults,noatime,nofail  0  0
    ```
 
 3. Mount:
@@ -70,14 +70,14 @@ GPU Rig                              Pi
 ────────                             ──────
 /mnt/shared (local drive)  ───►  /mnt/gpu-share (NFS client)
     │
-NFS server exports to 10.0.0.0/24
+NFS server exports to <rig-subnet>
 ```
 
 ### GPU Rig Side (has the drive)
 
 Already configured:
 - Drive: `/dev/sdb1` (UUID: `be91c4c6-bb29-467d-85c2-d39f2358b156`, label: `shared`)
-- NFS server installed, export configured: `/mnt/shared 10.0.0.0/24(...)`
+- NFS server installed, export configured: `/mnt/shared <rig-subnet>(...)`
 - Netplan config at `/etc/netplan/99-pi-link.yaml`
 
 To activate:
@@ -97,37 +97,37 @@ sudo systemctl restart nfs-server
 ```bash
 sudo apt install nfs-common
 sudo mkdir -p /mnt/gpu-share
-sudo mount -t nfs 10.0.0.2:/mnt/shared /mnt/gpu-share
+sudo mount -t nfs <pi-ip>:/mnt/shared /mnt/gpu-share
 
 # For persistence, add to fstab:
-echo '10.0.0.2:/mnt/shared  /mnt/gpu-share  nfs  defaults,noatime,nofail  0  0' | sudo tee -a /etc/fstab
+echo '<pi-ip>:/mnt/shared  /mnt/gpu-share  nfs  defaults,noatime,nofail  0  0' | sudo tee -a /etc/fstab
 ```
 
 ---
 
 ## Current Machine Configurations
 
-### GPU Rig (10.0.0.2)
+### GPU Rig (<pi-ip>)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Interface | `enp0s31f6` | Only ethernet port |
-| Netplan config | `/etc/netplan/99-pi-link.yaml` | Static IP 10.0.0.2/24 |
-| SSH server | Installed, running | `ssh bryan@10.0.0.2` |
+| Interface | `<ethernet-nic>` | Only ethernet port |
+| Netplan config | `/etc/netplan/99-pi-link.yaml` | Static IP <pi-ip>/24 |
+| SSH server | Installed, running | `ssh bryan@<pi-ip>` |
 | NFS server | Installed | Export: `/mnt/shared` |
 | NFS client | Installed | For Option A |
-| fstab (Option A) | `10.0.0.1:/media/bryan/shared → /mnt/shared` | NFS from Pi |
+| fstab (Option A) | `<router-ip>:/media/bryan/shared → /mnt/shared` | NFS from Pi |
 
 **To switch fstab between options:**
 ```bash
 # For Option A (drive on Pi):
-sudo sed -i 's|^/dev/disk/by-uuid/be91c4c6.*|10.0.0.1:/media/bryan/shared  /mnt/shared  nfs  defaults,noatime,nofail  0  0|' /etc/fstab
+sudo sed -i 's|^/dev/disk/by-uuid/be91c4c6.*|<router-ip>:/media/bryan/shared  /mnt/shared  nfs  defaults,noatime,nofail  0  0|' /etc/fstab
 
 # For Option B (drive on Rig):
-sudo sed -i 's|^10.0.0.1:/media/bryan/shared.*|/dev/disk/by-uuid/be91c4c6-bb29-467d-85c2-d39f2358b156 /mnt/shared ext4 defaults,noatime 0 2|' /etc/fstab
+sudo sed -i 's|^<router-ip>:/media/bryan/shared.*|/dev/disk/by-uuid/be91c4c6-bb29-467d-85c2-d39f2358b156 /mnt/shared ext4 defaults,noatime 0 2|' /etc/fstab
 ```
 
-### Pi (10.0.0.1)
+### Pi (<router-ip>)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
@@ -197,15 +197,15 @@ Then delete the key file from the shared drive (no need to keep it there):
 rm /mnt/shared/pi_ssh_key.pub
 ```
 
-Test from Pi side: `ssh bryan@10.0.0.2 hostname`
+Test from Pi side: `ssh bryan@<pi-ip> hostname`
 
 ---
 
 ## Verification Checklist
 
 - [ ] Ethernet connected between Pi and GPU rig
-- [ ] `ping 10.0.0.1` works from GPU rig
-- [ ] `ping 10.0.0.2` works from Pi
+- [ ] `ping <router-ip>` works from GPU rig
+- [ ] `ping <pi-ip>` works from Pi
 - [ ] Drive mounted on whichever machine has it
 - [ ] NFS export active on machine with drive
 - [ ] NFS mount works on other machine

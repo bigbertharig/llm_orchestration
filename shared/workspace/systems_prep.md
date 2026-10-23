@@ -1,6 +1,6 @@
 # System Preparation For The GPU Rig
 
-How the GPU rig host (bryan-GPU-Rig, 10.0.0.3) is built, and how to rebuild it. Machine prep only:
+How the GPU rig host (<rig-hostname>, <rig-ip>) is built, and how to rebuild it. Machine prep only:
 daily operation is the rig hardware layer (`shared/scripts/rig/README.md`) driven by the controller
 on the Pi (llm-gateway `docs/MANAGER.md`). CPU workers have their own standard:
 [cpu-worker-setup.md](cpu-worker-setup.md).
@@ -27,7 +27,7 @@ Tools (in `shared/scripts/rig/`, same pattern as the CPU worker kit):
 | Boot disk | SATA SSD 109 GB (`/`), ext4; holds `~/model-hotset` (SATA hot-set) |
 | NVMe | 469 GB at `/data` (fstab by UUID, `noatime,nofail`); holds `/data/model-hotset` |
 | Shared drive | the Pi's 4 TB drive over NFS at `/mnt/shared` (models archive, logs, results) |
-| Network | onboard `enp0s31f6`, DHCP from the Archer C20 (10.0.0.3); a saved Wi-Fi profile exists for `wlp2s0` in netplan (not used; the operator handles the airgap) |
+| Network | onboard `<ethernet-nic>`, DHCP from the rig router (<rig-ip>); a saved Wi-Fi profile exists for `<wifi-nic>` in netplan (not used; the operator handles the airgap) |
 | PSUs | 1250 W + 1000 W, rearranged and stress-tested 2026-10-19 |
 
 GPUs (PCIe slot order is the CUDA index order):
@@ -90,7 +90,7 @@ Then run the runtime smoke (`shared/scripts/llama_runtime/README.md`) before ben
 
 ## Rebuild From Scratch
 
-For a replacement rig at 10.0.0.3. A second rig next to this one is not supported by the gateway yet
+For a replacement rig at <rig-ip>. A second rig next to this one is not supported by the gateway yet
 (llm-gateway `docs/DESIGN_NOTES.md`, "More than one rig").
 
 1. **BIOS:** PCIe speed Gen2 (item 8), boot from the SATA SSD.
@@ -104,7 +104,7 @@ For a replacement rig at 10.0.0.3. A second rig next to this one is not supporte
    (`https://nvidia.github.io/libnvidia-container/stable/deb/`) and
    `sudo apt install -y nvidia-container-toolkit`.
 6. **Pi access:** put the Pi's public key in `~/.ssh/authorized_keys`, create a rig key and add it to
-   the Pi's `authorized_keys`, and add `Host pi / HostName 10.0.0.2` to `~/.ssh/config`. The
+   the Pi's `authorized_keys`, and add `Host pi / HostName <pi-ip>` to `~/.ssh/config`. The
    controller and the benchmark lanes both need ssh in each direction without a prompt.
 7. **Repos:** clone from the Pi hubs (`RIG_PROJECT.md` section 3):
    `git clone pi:llm_orchestration ~/llm_orchestration`, then benchmarking into
@@ -150,8 +150,8 @@ GPU path depends on them.
 
 ### 3. Time From The Pi Only
 
-The Pi runs chrony and serves `10.0.0.0/24` (since 2026-10-15). The rig syncs only from it:
-`/etc/chrony/sources.d/pi.sources` = `server 10.0.0.2 iburst`; the Ubuntu pool file is renamed
+The Pi runs chrony and serves `<rig-subnet>` (since 2026-10-15). The rig syncs only from it:
+`/etc/chrony/sources.d/pi.sources` = `server <pi-ip> iburst`; the Ubuntu pool file is renamed
 `.disabled`. The pool lines in `/etc/chrony/chrony.conf` remain and fail quietly without internet.
 
 ### 4. Passwordless Sudo For bryan

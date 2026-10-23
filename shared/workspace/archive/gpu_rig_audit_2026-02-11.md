@@ -1,7 +1,7 @@
 # GPU Rig Audit Report
 
 Date: 2026-02-11 (PST) / 2026-02-12 (UTC)
-Host: `bryan-GPU-Rig` (`10.0.0.2`)
+Host: `<rig-hostname>` (`<pi-ip>`)
 Auditor: Codex via SSH
 
 ## Scope
@@ -45,9 +45,9 @@ The rig is reachable and generally healthy, but not yet optimized for sustained 
 
 ### Network / Shared Storage
 
-- NFS mount active: `10.0.0.1:/media/bryan/shared -> /mnt/shared`
-- Ethernet (`enp0s31f6`) at `1000Mb/s full duplex`
-- Wi-Fi (`wlp2s0`) connected, and default route currently goes via Wi-Fi
+- NFS mount active: `<router-ip>:/media/bryan/shared -> /mnt/shared`
+- Ethernet (`<ethernet-nic>`) at `1000Mb/s full duplex`
+- Wi-Fi (`<wifi-nic>`) connected, and default route currently goes via Wi-Fi
 - Boot logs show at least one transient mount failure for `/mnt/shared` during startup
 
 ### Ollama / Orchestration Runtime
@@ -152,7 +152,7 @@ The rig is reachable and generally healthy, but not yet optimized for sustained 
 
 5. Harden network intent
 - Temporary state: Wi-Fi card is installed now but planned for removal.
-- After removal, keep only direct ethernet path (`10.0.0.0/24`) for control-plane file exchange.
+- After removal, keep only direct ethernet path (`<rig-subnet>`) for control-plane file exchange.
 
 6. Fix NFS boot race
 - Use explicit mount dependencies and network-wait strategy.

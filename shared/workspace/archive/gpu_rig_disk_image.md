@@ -68,7 +68,7 @@ Save as `/mnt/shared/scripts/gpu_rig_prep_for_image.sh` on the rig.
 - Python 3 + pip + venv setup
 - NFS client + server packages
 - SSH server + config
-- Netplan config (`/etc/netplan/99-pi-link.yaml` — static IP 10.0.0.2/24)
+- Netplan config (`/etc/netplan/99-pi-link.yaml` — static IP <pi-ip>/24)
 - fstab entries (NFS mount to /mnt/shared)
 - User account (bryan)
 

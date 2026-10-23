@@ -205,7 +205,7 @@ See [NETWORK_SETUP.md](NETWORK_SETUP.md) and [systems_prep.md](systems_prep.md) 
 ```
 ┌──────────────────────────────────┐     ethernet     ┌──────────────────────────────────┐
 │       Control Plane              │                  │           GPU Rig                │
-│  • Laptop at 10.0.0.2            │◄────────────────►│  • Rig at 10.0.0.3              │
+│  • Laptop at <pi-ip>            │◄────────────────►│  • Rig at <rig-ip>              │
 │  • Internet access               │                  │  • NVIDIA GPUs (per config.json) │
 │  • Runs cloud LLM / Codex        │                  │  • Runs brain + workers          │
 │  • Prepares plans and code       │                  │  • Executes plans                │

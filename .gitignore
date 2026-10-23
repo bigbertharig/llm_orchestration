@@ -90,6 +90,8 @@ shared/logs/
 # SYNC: Workspace (docs, ideas, human escalations)
 !shared/workspace/
 shared/workspace/google.md
+# Site inventory: our real addresses and host details behind the docs placeholders (local only)
+shared/workspace/local/
 
 # NO SYNC: Runtime state
 # shared/brain/         - runtime state, private tasks

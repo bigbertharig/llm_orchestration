@@ -21,7 +21,7 @@ Purpose:
 ## Connect shared drive (NFS)
 
 Expected mount:
-- Server: `10.0.0.1:/media/bryan/shared`
+- Server: `<router-ip>:/media/bryan/shared`
 - Mountpoint: `/mnt/shared`
 
 Check fstab line:
@@ -50,7 +50,7 @@ ip route
 ```
 
 Expected:
-- Ethernet interface up on control subnet (example `10.0.0.0/24`).
+- Ethernet interface up on control subnet (example `<rig-subnet>`).
 - Default/control route uses ethernet, not Wi-Fi.
 
 If needed, disable Wi-Fi stack:

@@ -1,12 +1,12 @@
 # Desktop worker (Windows 10 + WSL2)
 
 Turns a Windows desktop with an NVIDIA card into a second rig the Pi can reach over ssh. First set up
-2026-10-19 on the GTX 1070 desktop (10.0.0.4). Background and test results: llm-gateway
+2026-10-19 on the GTX 1070 desktop (<desktop-ip>). Background and test results: llm-gateway
 `docs/DESIGN_NOTES.md`, "More than one rig"; host notes: `shared/workspace/systems_prep.md` item 9.
 
 | File | Runs on | Does |
 |---|---|---|
-| `setup_desktop_rig_ssh.ps1` | Windows, elevated | OpenSSH server, `bash.exe` default shell (lands in WSL), key-only, firewall open to 10.0.0.0/24 on the Ethernet adapter only |
+| `setup_desktop_rig_ssh.ps1` | Windows, elevated | OpenSSH server, `bash.exe` default shell (lands in WSL), key-only, firewall open to <rig-subnet> on the Ethernet adapter only |
 | `teardown_desktop_rig_ssh.ps1` | Windows, elevated | `-Level pause` / `remove` / `uninstall` (removes the OpenSSH server) |
 | `wsl_docker_setup.sh` | WSL, as root | native `docker-ce` + `nvidia-container-toolkit`, GPU check |
 | `worker_mode.ps1` | Windows | `on` / `off` / `status`; `worker_on.cmd`, `worker_off.cmd` for double-click |
@@ -21,7 +21,7 @@ Turns a Windows desktop with an NVIDIA card into a second rig the Pi can reach o
    `wsl.exe -d Ubuntu -u root -e bash wsl_docker_setup.sh`.
 4. Runtime image from the rig: `ssh rig 'docker save llama-runtime:b11669' | wsl.exe -d Ubuntu -u root -e docker load`.
 5. Models on the WSL disk (for example `~/models/<family>/`); reading over NFS on gigabit is about 110 MB/s.
-6. On the Pi: a `desktop-rig` entry in `~/.ssh/config` (HostName 10.0.0.4, User bryan). Check with
+6. On the Pi: a `desktop-rig` entry in `~/.ssh/config` (HostName <desktop-ip>, User bryan). Check with
    `ssh desktop-rig nvidia-smi -L`.
 
 ## Worker mode

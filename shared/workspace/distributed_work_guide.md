@@ -111,7 +111,7 @@ replace review or make fix decisions.
 
 ### Current hardware
 
-**GPU rig (10.0.0.3) — ASUS B250 Mining Expert**
+**GPU rig (<rig-ip>) — ASUS B250 Mining Expert**
 
 | Component | Spec |
 |-----------|------|
@@ -129,7 +129,7 @@ replace review or make fix decisions.
 Strengths: 19 PCIe slots, dual/triple PSU, proven stable, can hold many worker GPUs.
 Limits: x1 risers for workers (fine for decode, slower loads), 32GB RAM (2 slots maxed), 2017 platform.
 
-**CPU workers (10.0.0.10–17) — Orange Pi Prime fleet**
+**CPU workers (<worker-ip>–17) — Orange Pi Prime fleet**
 
 | Spec | Value |
 |------|-------|
@@ -145,7 +145,7 @@ Too constrained for LLM inference. Current viable uses:
 - **Agent tool execution** — sandboxed environments for code/command execution
 - **Classification with sub-1B models** — TinyLlama-1.1B, Qwen2-0.5B for yes/no routing
 
-**Pi 5 (10.0.0.2) — Operator / control plane**
+**Pi 5 (<pi-ip>) — Operator / control plane**
 
 | Spec | Value |
 |------|-------|
@@ -230,7 +230,7 @@ Run benchmarks from the rig against the Pi:
 ```bash
 docker run --rm --network host ... bench-pipeline \
   --model <model-id> \
-  --runtime-base http://10.0.0.2:8080 \
+  --runtime-base http://<pi-ip>:8080 \
   --run-name <run_name>
 ```
 

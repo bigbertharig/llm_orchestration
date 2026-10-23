@@ -46,7 +46,7 @@ Notes:
 - there is no supported shared `status.py` helper under `/mnt/shared` right now
 - on the rig, prefer `/mnt/shared/...`; on the laptop, prefer `/media/bryan/shared/...`
 - when a wrapper proxies to the rig, pass shared paths that normalize cleanly to rig-visible paths
-- worker runtime ports such as `11435+` are rig-local; run direct-to-port benchmark/custom harnesses on `10.0.0.3` or through an explicit proxy/tunnel
+- worker runtime ports such as `11435+` are rig-local; run direct-to-port benchmark/custom harnesses on `<rig-ip>` or through an explicit proxy/tunnel
 
 What to expect:
 - `brain.py` and GPU agents are running
@@ -318,7 +318,7 @@ state, but localhost runtime probes and `nvidia-smi` will usually be wrong or mi
 
 ```bash
 # preferred:
-#   ssh 10.0.0.3
+#   ssh <rig-ip>
 #   python3 /mnt/shared/scripts/batch_runtime_diag.py --batch-id <batch_id> --shared-path /mnt/shared
 #
 # laptop-side fallback:

@@ -62,7 +62,7 @@ python3 scripts/model_access_api.py \
   --host 127.0.0.1 \
   --port 8790 \
   --shared-root /media/bryan/shared \
-  --rig-host 10.0.0.3
+  --rig-host <rig-ip>
 ```
 
 The first integration validation should use a worker model already known to

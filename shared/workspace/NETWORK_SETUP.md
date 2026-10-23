@@ -13,11 +13,11 @@ operations, use [quickstart.md](quickstart.md) and [CONTEXT.md](CONTEXT.md).
 ```text
 Internet
   -> home router
-  -> dedicated rig router (10.0.0.1)
+  -> dedicated rig router (<router-ip>)
   -> switch(es)
-     -> control plane / Raspberry Pi (10.0.0.2)
-     -> GPU rig (10.0.0.3)
-     -> optional CPU workers (10.0.0.10+)
+     -> control plane / Raspberry Pi (<pi-ip>)
+     -> GPU rig (<rig-ip>)
+     -> optional CPU workers (<worker-ip>+)
 ```
 
 The rig is local-network-first. Shared storage and local SSH are the normal
@@ -29,12 +29,12 @@ control channels.
 
 | Device | Address | Notes |
 |--------|---------|-------|
-| Router | `10.0.0.1` | dedicated rig router |
-| Control plane | `10.0.0.2` | repo checkout, shared drive, operator entrypoints |
-| GPU rig | `10.0.0.3` | brain + GPU workers |
-| CPU workers | `10.0.0.10+` | optional worker pool |
+| Router | `<router-ip>` | dedicated rig router |
+| Control plane | `<pi-ip>` | repo checkout, shared drive, operator entrypoints |
+| GPU rig | `<rig-ip>` | brain + GPU workers |
+| CPU workers | `<worker-ip>+` | optional worker pool |
 
-DHCP pool is on the `10.0.0.0/24` subnet.
+DHCP pool is on the `<rig-subnet>` subnet.
 
 ---
 
@@ -186,10 +186,10 @@ When the network/storage layer is suspect, check:
 Useful checks:
 
 ```bash
-ping 10.0.0.2
-ping 10.0.0.3
+ping <pi-ip>
+ping <rig-ip>
 mount | grep /mnt/shared
-nc -zw2 10.0.0.2 2049
+nc -zw2 <pi-ip> 2049
 ssh gpu hostname
 ssh pi hostname
 ```

@@ -75,8 +75,8 @@ Conclusion:
 5. Keep direct runtime commands debug-only and clearly documented.
 6. Add preflight/cleanup handling for unmanaged runtime containers.
 7. Normalize path handling and docs around:
-   - rig `10.0.0.3` -> `/mnt/shared/...`
-   - laptop `10.0.0.2` -> `/media/bryan/shared/...`
+   - rig `<rig-ip>` -> `/mnt/shared/...`
+   - laptop `<pi-ip>` -> `/media/bryan/shared/...`
 8. Run a system certification sweep after cleanup.
 
 ## Immediate Implementation Steps
