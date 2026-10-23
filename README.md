@@ -1,156 +1,108 @@
 # LLM Orchestration Engine
 
-Distributed task orchestration system for running local LLM workloads across GPU and CPU workers. A local brain coordinates plans while GPU and CPU workers execute tasks through a shared filesystem control plane.
+Parallel batch work on the local rig: a brain model reads a plan, creates tasks, and GPU and CPU workers
+claim and run them through a shared filesystem (no message broker). This repo also holds the rig-side
+hardware layer that every mode runs under.
 
-## Architecture
+## Start here
 
-- **Operator host** (<pi-ip>): Repo checkout, plan authoring, dashboard, and operator wrappers
-- **GPU rig** (<rig-ip>): NFS source, brain GPU, worker GPUs, and `llama-server` runtimes
-- **CPU workers** (<worker-ip>+): Orange Pi Prime cluster (ARM64, 2GB RAM), claim CPU tasks over NFS
-- **Brain**: Config-selected coordinator model that interprets plans, creates tasks, monitors workers, and validates results
-- **GPU workers**: Config-selected worker models that execute LLM and script tasks
-- **Shared drive**: 4TB ext4 storage attached to the GPU rig and NFS-mounted by the other nodes
-- **File-based coordination**: Tasks, state, and signals managed via shared filesystem — no message broker needed
+[shared/workspace/CONTEXT.md](shared/workspace/CONTEXT.md) is the entry point: what runs where, the modes,
+which doc owns what. Then, by topic:
 
-See [shared/workspace/architecture.md](shared/workspace/architecture.md) for detailed system design.
+| Doc | For |
+|---|---|
+| [shared/workspace/quickstart.md](shared/workspace/quickstart.md) | submit, monitor and kill a plan |
+| [shared/workspace/PLAN_FORMAT.md](shared/workspace/PLAN_FORMAT.md) | how plans are written (including goal-driven plans) |
+| [shared/workspace/architecture.md](shared/workspace/architecture.md) | system design |
+| [shared/workspace/brain-behavior.md](shared/workspace/brain-behavior.md) | the brain loop, task handling, work recovery and its time limits |
+| [shared/scripts/rig/README.md](shared/scripts/rig/README.md) | the rig hardware layer: guard, power caps, the plan executor and runs, `rig observe` |
+| [shared/workspace/systems_prep.md](shared/workspace/systems_prep.md), [cpu-worker-setup.md](shared/workspace/cpu-worker-setup.md), [NETWORK_SETUP.md](shared/workspace/NETWORK_SETUP.md) | building the rig host, the CPU workers and the network |
 
-## Hardware
+Docs use role placeholders for addresses (`<pi-ip>`, `<rig-ip>`, `<worker-ip>`, ...); the real values are
+in a local, uncommitted inventory (`shared/workspace/local/inventory.md`). Scripts carry the real values.
 
-- **Operator host**: Control plane at <pi-ip>
-- **GPU rig**: RTX 3090-class brain GPU plus five 6GB worker GPUs at <rig-ip>
-- **CPU workers**: Orange Pi Prime (Allwinner H5, 4-core ARM64, 2GB RAM) running Armbian
-- **Network**: 10.0.0.x subnet, gigabit switch, NFS-mounted shared drive on all nodes
+## The four repos
 
-## Quick Start
+| Repo | Owns | Start at |
+|---|---|---|
+| [llm-gateway](https://github.com/bigbertharig/llm-gateway) | the machines and the API: rig manager (leases, placement, model loads, runs), the OpenAI-compatible gateway, the dashboard, `rigctl` | `docs/MANAGER.md` |
+| **llm_orchestration** (this one) | parallel batch work (brain, workers, plans), the rig hardware scripts, CPU workers | `shared/workspace/CONTEXT.md` |
+| [benchmarking](https://github.com/bigbertharig/benchmarking) | which models are good: model registry and roles, suites, campaigns, results | `NEW_MODEL_INTEGRATION.md`, `MODEL_LIBRARY.md` |
+| [llm-harness](https://github.com/bigbertharig/llm-harness) | one model in an interactive loop (no code yet) | `README.md` |
 
-See [shared/workspace/quickstart.md](shared/workspace/quickstart.md) for full setup instructions.
+The model each role uses comes from benchmarking's registry and roles; GPU allocation is the rig manager's
+(llm-gateway). This repo's brain and workers run as one rig mode among others.
 
-### Installation
+## Machines
+
+- **Pi** (`<pi-ip>`): control plane. Repo checkout, plan submission, llm-gateway, the dashboard; the 4 TB
+  shared drive is attached here and exported over NFS.
+- **GPU rig** (`<rig-ip>`): an RTX 3090 Ti (brain) and GTX 1060 6 GB worker cards, running `llama-server`
+  runtimes. It mounts the shared drive at `/mnt/shared` and keeps its own checkout of this repo.
+- **CPU workers** (`<worker-ip>`): Orange Pi Prime boards (ARM64, 2 GB) that claim `task_class: cpu` work.
+
+## Running it
 
 ```bash
-# On the operator host: activate the orchestration venv and install dependencies
-source ~/llm-orchestration-venv/bin/activate
-pip install -r requirements.txt
-```
-
-### Running the System
-
-```bash
-# Start the full system (on GPU rig via shared drive)
-cd ~/llm_orchestration/shared/agents
-source ~/llm-orchestration-venv/bin/activate
-python3 startup.py
-
-# Submit a plan (from control plane)
+# On the Pi: submit a plan
 cd ~/llm_orchestration
 python3 scripts/submit.py ~/llm_orchestration/shared/plans/<plan_name> --config '{"VAR":"value"}'
 
-# Monitor via web dashboard
-cd ~/llm_orchestration/scripts
-python3 -m dashboard --port 8787
+# Watch it: the dashboard (served by llm-gateway on the Pi)
+#   http://127.0.0.1:8080/dashboard/      (from elsewhere: ssh -N -L 8080:127.0.0.1:8080 pi)
 ```
 
-### Interactive Model Access
-
-The optional Pi-side model access API gives LAN gateways a narrow session
-contract over the existing runtime loader and GPU leases. It binds to localhost
-by default; only the client-facing gateway needs a LAN listener.
-
-```bash
-ORCHESTRATOR_API_KEY=replace-me \
-python3 scripts/model_access_api.py \
-  --shared-root /media/bryan/shared \
-  --rig-host <rig-ip>
-```
-
-See
-[`shared/workspace/implement/interactive_model_access.md`](shared/workspace/implement/interactive_model_access.md)
-for the API contract and current model allowlist.
+Starting and stopping the orchestration mode on the rig, and its startup order: `shared/workspace/CONTEXT.md`
+and `shared/workspace/quickstart.md`.
 
 ## Plans
 
-Plans define workflows as markdown files. Each plan contains:
-- `plan.md` — Task definitions with dependencies
-- `scripts/` — Executable scripts for task processing
-- `history/` — Batch execution runs
+Plans define workflows as markdown files: `plan.md` (tasks with dependencies), `scripts/` (what tasks run)
+and `history/` (batch runs). See [PLAN_FORMAT.md](shared/workspace/PLAN_FORMAT.md).
 
-See [shared/workspace/PLAN_FORMAT.md](shared/workspace/PLAN_FORMAT.md) for plan specifications.
+- Dependency-based task execution; goal-driven plans that launch candidates, validate them and spawn
+  replacements until a target count is met
+- Mixed GPU and CPU workers; hot and cold worker states (models loaded by demand)
+- Retries with model rotation; work recovery for lost workers and stuck tasks
+- File-based coordination across machines over NFS
 
-## Key Features
+## Source and live deployment
 
-- **Dependency-based task execution**: Tasks run when dependencies complete (Gantt-chart style)
-- **Goal-driven plans**: Dynamic task generation — brain launches candidates, validates results, spawns replacements until target count is met
-- **Mixed GPU/CPU workers**: GPU workers handle LLM and script tasks; CPU workers (Orange Pi cluster) handle file I/O, scraping, data transforms
-- **Hot/cold worker states**: Dynamic LLM model loading based on workload pressure
-- **Automatic retries**: Brain retries failed tasks with model rotation and dependency-aware re-queuing
-- **Web dashboard**: Real-time monitoring with worker tabs, task lanes, batch progress, and goal tracking
-- **File-based coordination**: Works across heterogeneous machines via NFS — no message broker or database
-- **Security layers**: Protected core/ (root-owned), executor command filtering, git pre-commit hooks
-- **Headless worker provisioning**: Burn SD image, plug in, worker auto-configures hostname and joins cluster
+The Git checkout is the canonical source tree. Its `shared/` directory is a versioned deployment image of
+the shared drive, not the live mount, except on the Pi:
 
-## Project Structure
+- source: `~/llm_orchestration/shared`
+- live on the Pi: `/media/bryan/shared` (on the Pi, `~/llm_orchestration/shared` is a bind mount of the
+  drive, so edits there are live at once)
+- live on the GPU rig: `/mnt/shared`; the rig's own checkout is a separate copy on local disk, and its
+  brain and GPU agents run from it (`git pull --ff-only pi main` there to update)
 
-```
-
-## Source And Live Deployment
-
-The Git checkout is the canonical source tree. Its `shared/` directory is a
-versioned deployment image; it is not the live NFS mount.
-
-- source: `/home/bryan/llm_orchestration/shared`
-- live on the Pi: `/media/bryan/shared`
-- live on the GPU rig: `/mnt/shared`
-
-Exception, the Pi (checked 2026-10-20): there `~/llm_orchestration/shared` is a bind mount of the
-shared drive, the same files as `/media/bryan/shared`. Edits in the Pi checkout are live at once (CPU
-workers read them on their next start), and the compare below always reports "synchronized" there.
-The rig checkout is a separate copy on local disk; its brain and GPU agents run from it.
-
-Compare source with the live Pi mount without changing anything:
+Compare source with the live drive, and deploy changed tracked files without deleting runtime files:
 
 ```bash
-python3 scripts/sync_shared_source.py --live-root /media/bryan/shared
+python3 scripts/sync_shared_source.py --live-root /media/bryan/shared            # compare
+python3 scripts/sync_shared_source.py --live-root /media/bryan/shared --apply    # deploy
 ```
 
-Deploy only changed or missing tracked source files, without deleting runtime
-or untracked files:
+The sync always excludes `shared/core/**` and `shared/agents/permissions/**`. Machine-specific configs and
+runtime state are not tracked.
 
-```bash
-python3 scripts/sync_shared_source.py \
-  --live-root /media/bryan/shared \
-  --apply
+## Project structure
+
 ```
-
-The sync command always excludes `shared/core/**` and
-`shared/agents/permissions/**`. Machine-specific configs and runtime state are
-not tracked and are never removed by the command.
 llm_orchestration/
-├── scripts/              # RPi utilities (submit.py, dashboard.py, watch.py)
-└── shared/               # 4TB ext4 USB, NFS-shared to all nodes
-    ├── agents/           # Brain, GPU agent, CPU agent code (synced to git)
-    ├── core/             # Protected agent instructions (root-owned, NOT in git)
-    ├── workspace/        # Docs, plan format spec, human escalations (synced to git)
-    ├── plans/            # Plan definitions and scripts (synced to git)
-    ├── logs/             # System logs (synced to git)
-    ├── tasks/            # Runtime task queue/processing/complete/failed (not in git)
-    ├── brain/            # Brain state and private tasks (not in git)
-    ├── gpus/             # GPU agent heartbeats (not in git)
-    ├── cpus/             # CPU worker heartbeats (not in git)
-    └── signals/          # GPU agent control signals (not in git)
++-- scripts/              # Pi utilities: submit, kill, assign, chat, sync
++-- shared/               # the shared drive's tracked part
+    +-- agents/           # brain, GPU agent, CPU agent code
+    +-- scripts/rig/      # rig hardware layer (guard, power, plan executor, runs)
+    +-- scripts/          # runtime, benchmark and worker scripts used from the drive
+    +-- workspace/        # docs, plan format, human escalations
+    +-- plans/            # plan definitions (benchmarking lives at plans/shoulders/benchmarking,
+    |                     #   a separate repo, moving beside the others)
+    +-- core/             # protected agent instructions (root-owned, not in git)
+    +-- tasks/ brain/ gpus/ cpus/ signals/ logs/   # runtime state (not in git)
 ```
-
-## Documentation
-
-- [CONTEXT.md](shared/workspace/CONTEXT.md) — Project overview and orientation
-- [PLAN_FORMAT.md](shared/workspace/PLAN_FORMAT.md) — Plan specifications (including goal-driven plans)
-- [architecture.md](shared/workspace/architecture.md) — System architecture and design
-- [brain-behavior.md](shared/workspace/brain-behavior.md) — Brain loop and task handling
-- [quickstart.md](shared/workspace/quickstart.md) — Setup and usage guide
 
 ## License
 
 MIT
-
-## Contributing
-
-This is a personal project for orchestrating local LLM workloads. Plans (workflows) are maintained as separate repos.
