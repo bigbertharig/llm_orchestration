@@ -55,7 +55,7 @@ no automatic swapping or cross-mode coordination. Upgrade later if usage changes
 | Mode | What runs | Models allowed |
 |---|---|---|
 | `orchestration` | brain (with its model on the 3090) + cold workers. Equals today's neutral/plan boot. | published profiles |
-| `bench` | brain + workers in benchmark config, `benchmarks` admitted | full catalog |
+| `bench` | manager loads with use `benchmark` (lanes, campaigns); ends when the last is unloaded. Until 2026-10-23 a brain + workers stack in benchmark config (`llm-bench.service`, retired) | full catalog |
 | `remote` | worker runtimes on request, `interactive` admitted, no brain model; may use **all GPUs** | published profiles |
 
 ### Mode selector: `rig` command on the rig, called over SSH

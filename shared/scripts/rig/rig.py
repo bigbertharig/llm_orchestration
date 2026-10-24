@@ -2,15 +2,18 @@
 """Rig mode selector. Runs on the GPU rig; other machines call it over SSH.
 
     ssh rig rig status [--json]
-    ssh rig rig start <orchestration|bench> [--force]
+    ssh rig rig start orchestration [--force]
     ssh rig rig start remote [profile ...] [--force]
     ssh rig rig start remote <id> --spec JSON --gpus G --port P   any model, placed by the rig manager
     ssh rig rig stop [profile ...]
 
 One mode at a time. Boot leaves the rig idle (nothing running, no model on any GPU).
 `start` refuses while a different mode is active unless --force is given.
-Remote mode is additive: `start remote <id>` loads that profile onto free GPUs that match
-its requirements, alongside profiles already loaded. `stop <id>` unloads one profile.
+Load modes are additive: `start remote <id>` loads that profile onto free GPUs that match
+its requirements, alongside profiles already loaded. `stop <id>` unloads one profile; the last one
+returns the rig to idle. A manager load spec's use picks the load mode: `benchmark` runs in `bench`,
+anything else (chat, worker, published profiles) in `remote` (isolated modes, 2026-10-23: each mode owns
+every card while active; benchmarking/docker/CAMPAIGN_RUNNER_REFACTOR.md).
 Design: shared/workspace/implement/rig_boot_modes.md
 """
 
@@ -53,15 +56,15 @@ HW_STATE_ROOT = LOCAL / "brain" / "hw"
 # Stack modes run startup.py under these systemd units (installed from ./systemd/).
 STACK_UNITS = {
     "orchestration": "llm-orchestration.service",
-    "bench": "llm-bench.service",
 }
 # control_policy profile written once a mode is ready.
 MODE_POLICY = {
     "orchestration": "plan_ready",
-    "bench": "benchmark_ready",
+    "bench": "custom",
     "remote": "custom",
 }
 MODES = ("orchestration", "bench", "remote")
+LOAD_MODES = ("bench", "remote")  # modes made of manager or published profile loads (additive)
 BRAIN_PORT = 11434
 # Remote profiles get the lowest free port in this range (all inside the desktop rig-llm tunnel).
 REMOTE_PORTS = range(11434, 11442)
@@ -545,6 +548,16 @@ def launch_profile(p: dict, gpus: list[int], port: int, lease: str | None = None
     return name
 
 
+def load_mode(profile: dict) -> str:
+    """The mode a load runs in: a manager spec for a benchmark runs in bench, everything else in remote."""
+    return "bench" if profile.get("use") == "benchmark" else "remote"
+
+
+def mode_blocks(active: str, wanted: str, force: bool) -> bool:
+    """True when the active mode must be stopped (force) or refused (busy) before a `wanted` load."""
+    return active not in ("idle", wanted) or (force and active != "idle")
+
+
 def remote_loaded_summary(state: dict) -> str:
     profiles = state.get("profiles", {})
     if not profiles:
@@ -554,7 +567,7 @@ def remote_loaded_summary(state: dict) -> str:
 
 def claim_remote(requested: list[str], force: bool, placement: dict | None = None,
                  spec: dict | None = None) -> tuple[list[str], int | None]:
-    """Under the lock: enter remote mode if needed, place and launch new profiles.
+    """Under the lock: enter the load's mode (bench or remote) if needed, place and launch new profiles.
 
     placement ({"gpus": [...], "port": N, "lease": id}, one profile only) comes from the rig manager
     (llm-gateway): launch exactly there instead of choosing, after checking the GPUs are free.
@@ -571,11 +584,15 @@ def claim_remote(requested: list[str], force: bool, placement: dict | None = Non
     if unknown:
         raise RigError(f"unknown remote profile(s) {unknown}; published: {sorted(profiles)}")
     wanted = requested or [pid for pid, p in profiles.items() if p.get("default")]
+    modes = {load_mode(profiles[pid]) for pid in wanted} or {"remote"}
+    if len(modes) > 1:
+        raise RigError(f"one load mode at a time: {sorted(modes)} requested together")
+    mode = modes.pop()
 
     st = read_state()
-    if st["mode"] not in ("idle", "remote") or (force and st["mode"] != "idle"):
+    if mode_blocks(st["mode"], mode, force):
         if not force:
-            return [], report_busy(st, "remote")
+            return [], report_busy(st, mode)
         say(f"stopping {st['mode']} (forced by {caller()})...")
         stop_everything()
         st = read_state()
@@ -585,7 +602,7 @@ def claim_remote(requested: list[str], force: bool, placement: dict | None = Non
     if entering:
         if not g["ok"]:
             raise RigError(f"GPU check failed: missing {g['missing']} {g['errors']}; power-cycle the rig")
-        st = {"mode": "remote", "status": "loading", "since": now_iso(), "from": caller(), "profiles": {}}
+        st = {"mode": mode, "status": "loading", "since": now_iso(), "from": caller(), "profiles": {}}
 
     loaded = st.setdefault("profiles", {})
     # One load at a time: concurrent loads share disk and PCIe bandwidth and all finish slower.
@@ -636,7 +653,7 @@ def claim_remote(requested: list[str], force: bool, placement: dict | None = Non
         if level == "unknown":
             say(f"  warning: {why}; loading without the guard")
     if entering:
-        write_policy(MODE_POLICY["remote"], "rig_start_remote")
+        write_policy(MODE_POLICY[mode], f"rig_start_{mode}")
     for pid, gpus, port in plan:
         p = profiles[pid]
         say(f"  loading {pid} ({p['model']}) on GPU {gpus} -> :{port}")
@@ -1146,6 +1163,10 @@ def cmd_why(args) -> int:
 def cmd_start(args) -> int:
     if args.mode == "remote":
         return cmd_start_remote(args)
+    if args.mode == "bench":
+        raise RigError("bench mode starts with a benchmark load through the rig manager "
+                       "(rigctl load-model MODEL --use benchmark, or a lane or campaign); it ends when the last "
+                       "profile is unloaded")
     if args.profiles:
         raise RigError("profiles are only valid for remote mode")
     return cmd_start_stack(args)
@@ -1155,8 +1176,8 @@ def cmd_stop(args) -> int:
     with Lock():
         st = read_state()
         if args.profiles:
-            if st["mode"] != "remote":
-                raise RigError(f"profile stop only applies in remote mode (mode is {st['mode']})")
+            if st["mode"] not in LOAD_MODES:
+                raise RigError(f"profile stop only applies in a load mode {LOAD_MODES} (mode is {st['mode']})")
             missing = [p for p in args.profiles if p not in st.get("profiles", {})]
             if missing:
                 raise RigError(f"not loaded: {missing}; loaded: {remote_loaded_summary(st)}")
