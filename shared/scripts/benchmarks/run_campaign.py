@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Unified benchmark campaign runner.
 
-Reads a declarative manifest (model + suite + settings per block),
-auto-schedules across all available GPUs in parallel, and manages the
-full lifecycle: load model -> run suite -> reap -> advance.
+Reads a declarative manifest (model + suite + settings per block) and manages the full lifecycle:
+load model -> run suite -> reap -> advance. Models are placed and loaded by the rig manager
+(llm-gateway `rigctl load-model --use benchmark`, which puts the rig in bench mode): a block names
+no cards (the manager picks the fewest that hold the model at its registry profile's context) or pins
+them (`gpus: [0, 1, 2, 3]`, `placement: brain` or `gpu_1_3`). See
+plans/shoulders/benchmarking/docker/CAMPAIGN_RUNNER_REFACTOR.md.
 
 Usage:
     python3 /mnt/shared/scripts/benchmarks/run_campaign.py \\
@@ -14,15 +17,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -34,28 +37,19 @@ from typing import Any, Dict, List, Optional, Set
 
 TICK_INTERVAL = 3  # seconds between scheduler ticks
 SHARED_ROOT = Path(os.environ.get("CAMPAIGN_SHARED_ROOT", "/mnt/shared"))
-RUNTIME_SCRIPT = SHARED_ROOT / "scripts" / "llama_runtime" / "run_runtime.sh"
 TUNING_PROFILES_PATH = SHARED_ROOT / "plans" / "shoulders" / "benchmarking" / "model_tuning_profiles.json"
 SUITE_CONTRACTS_PATH = SHARED_ROOT / "plans" / "shoulders" / "benchmarking" / "docker" / "suite_contracts.json"
 MODELS_CATALOG_PATH = SHARED_ROOT / "agents" / "models.catalog.json"
 HISTORY_ROOT = SHARED_ROOT / "logs" / "benchmarks" / "campaigns" / "history"
 BENCHMARKING_SCRIPTS = SHARED_ROOT / "plans" / "shoulders" / "benchmarking"
-# GPU leases from the rig manager (llm-gateway docs/MANAGER.md), one per occupied slot.
-LEASE_HELPER = BENCHMARKING_SCRIPTS / "scripts" / "integration" / "harness_lease.sh"
-LEASE_RENEW_EVERY_S = 120
-# A card the manager refuses (claimed or leased elsewhere) is skipped for this long. A `single` block
-# gives up after this many refusals per card it could use (15 over its five cards). A `split` block tries
-# the other free pairs first; once every pair has refused it, it reserves the pair that refused last
-# (llm-gateway MANAGER.md, "Reservations") and waits for it, up to LEASE_RESERVATION_WAIT_S, so single
-# work cannot starve it. A pinned block reserves its own cards and waits the same way.
-LEASE_REFUSED_COOLDOWN_S = 60
-LEASE_REFUSALS_PER_CARD = 3
-LEASE_RESERVATION_WAIT_S = 7200
+# The rig manager (llm-gateway docs/MANAGER.md) on the Pi, reached with rigctl over ssh like the lanes.
+MANAGER_HOST = os.environ.get("HARNESS_HOST", "pi")
+RIGCTL = os.environ.get("HARNESS_RIGCTL", "~/llm-gateway/tools/rigctl.py")
+# How long a load may wait for its cards to free (the manager collects them meanwhile); a block's
+# `wait_s` overrides it, -1 waits forever.
+LOAD_WAIT_S = 7200
+RIG_CONTAINER_PREFIX = "rig-remote-"  # the rig names a manager load's container after its profile
 BENCHMARK_CACHE_ROOT = SHARED_ROOT / "cache" / "benchmarks"
-# The checkout this runner lives in (<tree>/scripts/benchmarks/run_campaign.py); its
-# agents/config.json holds this machine's facts, including the model hot-set roots.
-TREE = Path(__file__).resolve().parents[2]
-
 SUITE_CONTRACT_LABEL = "daedalmap.benchmark.contract"
 SUITE_CONTRACT_VERSION = "campaign-v1"
 SUITE_SPECS: Dict[str, Dict[str, Any]] = {}
@@ -74,79 +68,114 @@ FAILED = "failed"
 
 
 # ---------------------------------------------------------------------------
-# GPU Slot Model
+# Runtimes: what the rig manager loaded for a runtime group
 # ---------------------------------------------------------------------------
 
 @dataclass
-class GpuSlot:
-    name: str
-    gpu_ids: List[int]
+class Runtime:
+    """A model the rig manager loaded: its profile id, the port it serves on, its cards and context."""
+    profile: str
     port: int
-    tier: str  # brain, single, split
+    gpu_ids: List[int]
+    ctx: Optional[int] = None
 
     @property
-    def gpu_set(self) -> Set[int]:
-        return set(self.gpu_ids)
+    def name(self) -> str:
+        """The cards as the old slot names (brain, gpu_2, gpu_1_3): status and hardware ids read the same."""
+        if not self.gpu_ids:
+            return "manager-picked"  # a dry-run stand-in before the manager has chosen cards
+        return "brain" if self.gpu_ids == [0] else "gpu_" + "_".join(str(g) for g in self.gpu_ids)
+
+    @property
+    def container(self) -> str:
+        return RIG_CONTAINER_PREFIX + self.profile
 
 
-# The rig: GPU 0 is the brain card (RTX 3090 Ti); the worker cards are the GTX 1060s, all 6 GB, so any
-# two of them split a model evenly. Every worker card and every pair of them is a slot; a slot serves on
-# the port of its lowest card (11434 + index), so slots that can run together never share a port.
-BRAIN_GPU = 0
-WORKER_GPUS = [1, 2, 3, 4, 5]
-BASE_PORT = 11434
+def block_gpus(block: Dict[str, Any]) -> Optional[List[int]]:
+    """The cards a block pins, or None when the manager picks them.
 
-
-def _worker_slot(gpu_ids: List[int]) -> GpuSlot:
-    return GpuSlot(name="gpu_" + "_".join(str(g) for g in gpu_ids), gpu_ids=list(gpu_ids),
-                   port=BASE_PORT + gpu_ids[0], tier="single" if len(gpu_ids) == 1 else "split")
-
-
-SLOTS: Dict[str, GpuSlot] = {
-    "brain": GpuSlot(name="brain", gpu_ids=[BRAIN_GPU], port=BASE_PORT + BRAIN_GPU, tier="brain"),
-    **{s.name: s for s in (_worker_slot([g]) for g in WORKER_GPUS)},
-    **{s.name: s for s in (_worker_slot(list(p)) for p in itertools.combinations(WORKER_GPUS, 2))},
-}
-
-# Placement -> candidate slot names, in preference order. `single` takes any free worker card, `split`
-# any free pair; a slot name (gpu_3, gpu_1_3) pins the block to those cards, for runs that must not move
-# (for example while lanes claim the other cards).
-FLEXIBLE_PLACEMENTS = ("single", "split")
-PLACEMENT_SLOTS: Dict[str, List[str]] = {
-    "brain": ["brain"],
-    "single": [n for n, s in SLOTS.items() if s.tier == "single"],
-    "split": [n for n, s in SLOTS.items() if s.tier == "split"],
-    **{n: [n] for n in SLOTS if n != "brain"},
-}
-
-
-def slots_conflict(a: GpuSlot, b: GpuSlot) -> bool:
-    """Two slots conflict if their GPU sets overlap."""
-    return bool(a.gpu_set & b.gpu_set)
-
-
-def find_free_slot(
-    placement: str, occupied: Dict[str, str], skip: Set[str] = frozenset()
-) -> Optional[GpuSlot]:
-    """Find a free slot for the given placement.
-
-    occupied: slot_name -> block_id currently using it. skip: slot names to pass over (cards the
-    rig manager just refused). Returns the first non-conflicting slot, or None.
+    `gpus: [0, 1]` pins those cards; `placement: brain` is GPU 0 and `placement: gpu_1_3` GPUs 1 and 3 (the
+    old slot names). `single` and `split` are gone: one card or several is the manager's answer.
     """
-    candidates = PLACEMENT_SLOTS.get(placement)
-    if not candidates:
+    if block.get("gpus") is not None:
+        return sorted({int(g) for g in block["gpus"]})
+    placement = block.get("placement")
+    if placement in (None, ""):
         return None
+    if placement == "brain":
+        return [0]
+    match = re.fullmatch(r"gpu((?:_\d+)+)", str(placement))
+    if match:
+        return sorted({int(g) for g in match.group(1).strip("_").split("_")})
+    if placement in ("single", "split"):
+        raise ValueError(f"placement '{placement}' is gone: omit placement and the rig manager picks the cards")
+    raise ValueError(f"invalid placement '{placement}': omit it, or use gpus: [..], brain or gpu_<ids>")
 
-    occupied_slots = [SLOTS[name] for name in occupied if name in SLOTS]
 
-    for slot_name in candidates:
-        if slot_name in skip:
-            continue
-        slot = SLOTS[slot_name]
-        conflict = any(slots_conflict(slot, occ) for occ in occupied_slots)
-        if not conflict:
-            return slot
-    return None
+def rigctl_cmd(*args: str) -> List[str]:
+    """rigctl on the Pi over ssh; ssh re-splits the remote line, so every argument is quoted for it."""
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", MANAGER_HOST, "python3", RIGCTL,
+            *[shlex.quote(str(a)) for a in args]]
+
+
+def load_cmd(block: "BlockState", owner: str) -> List[str]:
+    """`rigctl load-model` for a block: use benchmark (bench mode, the registry profile's context), the
+    block's cards if it pins them, and only the settings the block overrides."""
+    cfg = block.config
+    wait = cfg.get("wait_s", LOAD_WAIT_S)
+    args = ["load-model", cfg["model"], "--use", "benchmark", "--json", "--owner", owner,
+            "--wait", "forever" if int(wait) < 0 else str(int(wait))]
+    if block.gpus:
+        args += ["--gpus", ",".join(str(g) for g in block.gpus)]
+    if cfg.get("ctx_size"):
+        args += ["--ctx", str(int(cfg["ctx_size"]))]
+    if cfg.get("profile"):
+        args += ["--profile", str(cfg["profile"])]
+    if cfg.get("runtime_args"):
+        args += ["--args", shlex.join(str(a) for a in cfg["runtime_args"])]
+    return rigctl_cmd(*args)
+
+
+def start_load(block: "BlockState", owner: str) -> subprocess.Popen:
+    """Ask the manager to load a block's model; the answer comes when the model serves (or it fails)."""
+    cmd = load_cmd(block, owner)
+    log(f"  Load: {' '.join(cmd)}", verbose_only=True)
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def finish_load(proc: subprocess.Popen) -> tuple[Runtime, str]:
+    """(runtime, GGUF file name the manager loaded) from a finished load. RuntimeError with the manager's
+    reason when it refused or failed (won't fit, the rig busy in another mode, cards never freed)."""
+    out, err = proc.communicate()
+    try:
+        answer = json.loads(out or "{}")
+    except ValueError:
+        answer = {}
+    if proc.returncode != 0 or answer.get("state") != "ready":
+        message = (answer.get("error") or {}).get("message") or (err or out or "").strip()[-500:]
+        raise RuntimeError(f"rig manager did not load it (exit {proc.returncode}): {message}")
+    gguf = Path(str((answer.get("estimate") or {}).get("gguf_path", ""))).name
+    return Runtime(profile=answer["profile"], port=int(answer["port"]), gpu_ids=[int(g) for g in answer["gpus"]],
+                   ctx=answer.get("ctx")), gguf
+
+
+def unload_runtime(runtime: Optional[Runtime]) -> None:
+    """Unload a runtime through the manager (it releases the lease; the rig goes idle with the last one)."""
+    if runtime is None or runtime.port == 0:  # port 0: a dry-run stand-in
+        return
+    log(f"  Unloading {runtime.profile}")
+    result = subprocess.run(rigctl_cmd("unload", runtime.profile), capture_output=True, text=True,
+                            timeout=900, check=False)
+    if result.returncode != 0:
+        log(f"  WARNING: unload of {runtime.profile} failed: {(result.stderr or result.stdout).strip()[-300:]}")
+
+
+def cancel_owner(owner: str, reason: str) -> None:
+    """Everything the run still owns in the manager: waits, loads, leases, claims (MANAGER.md)."""
+    result = subprocess.run(rigctl_cmd("cancel-owner", owner, "--reason", reason), capture_output=True,
+                            text=True, timeout=900, check=False)
+    if result.returncode != 0:
+        log(f"  WARNING: cancel-owner {owner} failed: {(result.stderr or result.stdout).strip()[-300:]}")
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +187,7 @@ class BlockState:
     block_id: str
     config: Dict[str, Any]
     status: str = PENDING
-    assigned_slot: Optional[GpuSlot] = None
-    runtime_container: Optional[str] = None
+    runtime: Optional[Runtime] = None
     suite_process: Optional[subprocess.Popen] = None
     suite_log_path: Optional[Path] = None
     started_at: Optional[str] = None
@@ -171,8 +199,13 @@ class BlockState:
     identity: Optional[Dict[str, Any]] = None  # verified runtime identity evidence
 
     @property
+    def gpus(self) -> Optional[List[int]]:
+        """Pinned cards, or None when the manager picks them."""
+        return block_gpus(self.config)
+
+    @property
     def placement(self) -> str:
-        return self.config.get("placement", "single")
+        return ",".join(str(g) for g in self.gpus) if self.gpus else "manager"
 
     @property
     def suite(self) -> str:
@@ -223,7 +256,7 @@ def write_json_atomic(path: Path, data: Any) -> None:
 
 
 def docker_stop(container_name: str) -> None:
-    """Stop and remove a Docker container by name."""
+    """Stop and remove a suite container by name (models are the manager's: unload_runtime)."""
     subprocess.run(
         ["docker", "stop", container_name],
         capture_output=True, text=True, check=False,
@@ -323,11 +356,6 @@ def served_model_id(port: int, timeout: int = 5) -> Optional[str]:
         return None
 
 
-def probe_health(port: int, timeout: int = 5) -> bool:
-    """Check if a llama-server is responding on the given port."""
-    return served_model_id(port, timeout) is not None
-
-
 def container_info(container_name: Optional[str]) -> Optional[Dict[str, str]]:
     """Running state, id and image of a container, or None if it does not exist."""
     if not container_name:
@@ -342,7 +370,7 @@ def container_info(container_name: Optional[str]) -> Optional[Dict[str, str]]:
     return {"running": running, "id": container_id[:12], "image": image}
 
 
-def runtime_identity_error(block: "BlockState", slot: GpuSlot, observed: Optional[str]) -> Optional[str]:
+def runtime_identity_error(block: "BlockState", runtime: Runtime, observed: Optional[str]) -> Optional[str]:
     """Why the served runtime is not the one this block requested, or None when it is.
 
     Health alone is not readiness: a stale server on the same port answers too
@@ -351,17 +379,17 @@ def runtime_identity_error(block: "BlockState", slot: GpuSlot, observed: Optiona
     """
     expected = Path(str(block.config["gguf"])).name
     if observed is None:
-        return f"no runtime answers on port {slot.port}"
+        return f"no runtime answers on port {runtime.port}"
     if observed != expected:
-        return f"port {slot.port} serves {observed}, expected {expected}"
-    info = container_info(block.runtime_container)
+        return f"port {runtime.port} serves {observed}, expected {expected}"
+    info = container_info(runtime.container)
     if not info or info["running"] != "true":
-        return (f"port {slot.port} serves {observed} but owned runtime "
-                f"{block.runtime_container} is not running")
+        return (f"port {runtime.port} serves {observed} but owned runtime "
+                f"{runtime.container} is not running")
     block.identity = {
-        "requested": expected, "observed": observed, "port": slot.port,
-        "container": block.runtime_container, "container_id": info["id"],
-        "image": info["image"], "verified_at": now_iso(),
+        "requested": expected, "observed": observed, "port": runtime.port, "profile": runtime.profile,
+        "gpus": runtime.gpu_ids, "ctx": runtime.ctx, "container": runtime.container,
+        "container_id": info["id"], "image": info["image"], "verified_at": now_iso(),
     }
     return None
 
@@ -414,63 +442,44 @@ def _lookup_tuning(model_id: str) -> Optional[Dict]:
     return resolved[1] if resolved else None
 
 
-RUNTIME_IMAGE_OVERRIDE: Optional[str] = None
-
-
-def library_runtime_image() -> str:
-    """The one llama-server image from the benchmarking model library (model_registry.json)."""
+def registry_gguf(model_id: str, profile: Optional[str] = None) -> str:
+    """The archive GGUF the model library names for a model (the manager loads the same file)."""
     library_dir = BENCHMARKING_SCRIPTS / "scripts" / "active"
     if str(library_dir) not in sys.path:
         sys.path.insert(0, str(library_dir))
     import model_library
 
-    return model_library.runtime_image(model_library.load_registry(BENCHMARKING_SCRIPTS / "model_registry.json"))
+    registry = model_library.load_registry(BENCHMARKING_SCRIPTS / "model_registry.json")
+    return str(model_library.resolve(model_id, profile or "default", registry)["gguf_path"])
 
 
 def resolve_block_config(block: Dict, defaults: Dict) -> Dict:
-    """Merge block config with campaign defaults and tuning profile lookups."""
-    model_id = block["model"]
-    tuning = _lookup_tuning(model_id) or {}
-    tuning_runtime = tuning.get("runtime", {})
+    """Merge block config with campaign defaults. Runtime settings (context, batch, image, registry extra
+    args) are the manager's from the registry profile; a block carries only what it overrides."""
+    # gguf: the registry's. A manifest gguf is kept only as a cross-check (validate_resolved_blocks).
+    try:
+        registry_path = registry_gguf(block["model"], block.get("profile"))
+    except KeyError as exc:
+        raise SystemExit(f"ERROR: block '{block['id']}': {exc.args[0] if exc.args else exc}")
+    if block.get("gguf") and Path(str(block["gguf"])).name != Path(registry_path).name:
+        block["_gguf_mismatch"] = f"manifest gguf {block['gguf']} is not the registry's {registry_path}"
+    block["gguf"] = registry_path
+    for gone in ("runtime_image", "batch_size", "load_timeout_s"):
+        if block.pop(gone, None) is not None:
+            log(f"  {block['id']}: manifest {gone} ignored (the manager uses the registry profile)", verbose_only=True)
 
-    # ctx_size: block > tuning profile > 2048
-    if "ctx_size" not in block:
-        block["ctx_size"] = tuning_runtime.get("ctx_size", 2048)
-
-    # batch_size: block > tuning profile > 128
-    if "batch_size" not in block:
-        block["batch_size"] = tuning_runtime.get("batch_size", 128)
-
-    # runtime_image: every model runs on the model library's one image (or the --runtime-image
-    # override, used to certify an upgrade candidate). Old manifests pinned per-block images.
-    image = RUNTIME_IMAGE_OVERRIDE or library_runtime_image()
-    pinned = block.get("runtime_image") or defaults.get("runtime_image")
-    if pinned and pinned != image:
-        log(f"  {block['id']}: manifest runtime_image {pinned} ignored; using {image}")
-    block["runtime_image"] = image
-
-    # load_timeout_s: block > defaults > 300
-    if "load_timeout_s" not in block:
-        block["load_timeout_s"] = defaults.get("load_timeout_s", 300)
-
-    # runtime_args: block list + tuning extra_args merged
-    block_rt_args = list(block.get("runtime_args", []))
-    tuning_extra = tuning.get("extra_args", [])
-    if isinstance(tuning_extra, list):
-        # Only add tuning extras not already present in block args
-        existing = set(block_rt_args)
-        for arg in tuning_extra:
-            if arg not in existing:
-                block_rt_args.append(arg)
-    block["runtime_args"] = block_rt_args
+    # runtime_args: only the block's own; the manager adds the registry profile's extra_args first
+    block["runtime_args"] = list(block.get("runtime_args", []))
 
     # depends_on: default empty
     if "depends_on" not in block:
         block["depends_on"] = []
 
-    # placement: default single
-    if "placement" not in block:
-        block["placement"] = "single"
+    # placement: pinned cards (gpus, brain, gpu_<ids>) or none, so the manager picks them
+    try:
+        block_gpus(block)
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: block '{block['id']}': {exc}")
 
     # suite_args: default empty
     if "suite_args" not in block:
@@ -529,6 +538,8 @@ def validate_resolved_blocks(blocks: Dict[str, BlockState]) -> None:
         gguf = Path(str(cfg.get("gguf", "")))
         if not gguf.is_file():
             errors.append(f"{bid}: GGUF not found: {gguf}")
+        if cfg.get("_gguf_mismatch"):
+            errors.append(f"{bid}: {cfg['_gguf_mismatch']}")
         run_class = str(cfg.get("run_class", ""))
         if run_class not in run_classes:
             errors.append(f"{bid}: invalid run_class '{run_class}'")
@@ -554,17 +565,18 @@ def validate_resolved_blocks(blocks: Dict[str, BlockState]) -> None:
         group = str(block.config.get("runtime_group", "")).strip()
         if group:
             groups.setdefault(group, []).append(block)
-    runtime_keys = (
-        "model", "gguf", "placement", "runtime_image", "ctx_size",
-        "batch_size", "runtime_args",
-    )
+    runtime_keys = ("model", "gguf", "profile", "ctx_size", "runtime_args", "wait_s")
+
+    def runtime_settings(block: BlockState) -> Dict[str, Any]:
+        return {**{key: block.config.get(key) for key in runtime_keys}, "gpus": block.gpus}
+
     for group, members in groups.items():
         if len(members) < 2:
             errors.append(f"runtime_group '{group}' must contain at least two blocks")
             continue
-        expected = {key: members[0].config.get(key) for key in runtime_keys}
+        expected = runtime_settings(members[0])
         for member in members[1:]:
-            actual = {key: member.config.get(key) for key in runtime_keys}
+            actual = runtime_settings(member)
             if actual != expected:
                 errors.append(
                     f"{member.block_id}: runtime_group '{group}' changes runtime settings"
@@ -574,135 +586,17 @@ def validate_resolved_blocks(blocks: Dict[str, BlockState]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Runtime Layer (wraps run_runtime.sh)
-# ---------------------------------------------------------------------------
-
-def local_gguf(gguf: str) -> str:
-    """Prefer this machine's hot-set copy of an archive GGUF over the network archive.
-
-    Same rule as rig mode and the runtime smoke test (brain_core.resolve_hotset_gguf).
-    Without a machine config the archive path is used unchanged.
-    """
-    config_path = TREE / "agents" / "config.json"
-    if not config_path.is_file():
-        return gguf
-    agents_dir = str(TREE / "agents")
-    if agents_dir not in sys.path:
-        sys.path.insert(0, agents_dir)
-    from brain_core import resolve_hotset_gguf
-
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    return str(resolve_hotset_gguf(gguf, config))
-
-
-def build_runtime_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
-    """Build the shell command to start a llama-server container."""
-    cfg = block.config
-    container_name = f"llama-campaign-{block.block_id}"
-
-    gpu_spec = ",".join(str(g) for g in slot.gpu_ids)
-
-    cmd = [
-        "bash", str(RUNTIME_SCRIPT),
-        "--name", container_name,
-        "--model", local_gguf(cfg["gguf"]),
-        "--port", str(slot.port),
-        "--gpus", f"device={gpu_spec}",
-        "--image", cfg["runtime_image"],
-        "--ctx-size", str(cfg["ctx_size"]),
-        "--batch-size", str(cfg.get("batch_size", 128)),
-    ]
-
-    # Memory limits based on tier
-    # With mmap (default in run_runtime.sh), GGUF file pages are reclaimable
-    # under cgroup pressure. Anonymous memory scales with ctx_size (KV cache
-    # scratch buffers), not model size:
-    #   single (ctx 4096-8192): observed up to 6.3 GB anon depending on workload
-    #   brain  (ctx 16384): peaks ~8-9 GB anon
-    #   split:              similar to brain (large ctx for 14B models)
-    if slot.tier == "brain":
-        cmd.extend(["--memory-limit", "10g", "--memory-swap", "12g"])
-    elif slot.tier == "split":
-        cmd.extend(["--memory-limit", "10g", "--memory-swap", "12g"])
-    else:
-        cmd.extend(["--memory-limit", "8g", "--memory-swap", "10g"])
-
-    # Tensor split for multi-GPU
-    if len(slot.gpu_ids) > 1:
-        # Even split across GPUs
-        ts = ",".join(["1"] * len(slot.gpu_ids))
-        cmd.extend(["--tensor-split", ts])
-
-    # Extra runtime args (e.g., --reasoning-budget 0)
-    for arg in cfg.get("runtime_args", []):
-        cmd.extend(["--extra-arg", str(arg)])
-
-    return cmd
-
-
-def start_runtime(block: BlockState, slot: GpuSlot, lease: Optional[str] = None) -> str:
-    """Start the runtime container. Returns container name."""
-    container_name = f"llama-campaign-{block.block_id}"
-
-    # Stop any leftover container with the same name
-    docker_stop(container_name)
-    time.sleep(1)
-
-    # Only this campaign's own runtime may be reclaimed. Anything still serving the
-    # port belongs to someone else, and its answers would be recorded as ours.
-    stale = served_model_id(slot.port)
-    if stale is not None:
-        raise RuntimeError(
-            f"port {slot.port} already serves {stale} from a runtime this campaign "
-            f"does not own; stop it first (for example `rig stop`)"
-        )
-
-    cmd = build_runtime_cmd(block, slot)
-    if lease:
-        cmd.extend(["--lease", lease])
-    log(f"  Loading runtime: {container_name}")
-    log(f"  Command: {' '.join(cmd)}", verbose_only=True)
-
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        raise RuntimeError(
-            f"Failed to start runtime for {block.block_id}: "
-            f"exit {result.returncode}, stderr: {stderr}"
-        )
-
-    return container_name
-
-
-def wait_for_runtime(port: int, timeout_s: int = 300) -> bool:
-    """Poll until the runtime responds on the given port, or timeout."""
-    start = time.monotonic()
-    while time.monotonic() - start < timeout_s:
-        if probe_health(port):
-            return True
-        time.sleep(5)
-    return False
-
-
-def stop_runtime(container_name: Optional[str]) -> None:
-    """Stop a runtime container."""
-    if container_name:
-        log(f"  Stopping runtime: {container_name}")
-        docker_stop(container_name)
-
-
-# ---------------------------------------------------------------------------
 # Suite Layer (wraps docker run bench-*)
 # ---------------------------------------------------------------------------
 
-def build_suite_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
-    """Build the docker run command for a benchmark suite."""
+def build_suite_cmd(block: BlockState, runtime: Runtime) -> List[str]:
+    """Build the docker run command for a benchmark suite against the runtime the manager loaded."""
     cfg = block.config
     suite = cfg["suite"]
     spec = SUITE_SPECS[suite]
     container_name = f"bench-{suite.replace('bench-', '')}-campaign-{block.block_id}"
     model_id = cfg["model"]
-    port = slot.port
+    port = runtime.port
     run_id = cfg.get("_run_id", "unknown")
     run_name = f"campaign_{block.block_id}_{run_id}"
     suite_log_root = suite_results_root(suite)
@@ -711,10 +605,10 @@ def build_suite_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
     extra_limit_args = resolve_limit(cfg)
     suite_args = list(cfg.get("suite_args", [])) + extra_limit_args
     run_class = str(cfg["run_class"])
-    gpu_spec = ",".join(str(g) for g in slot.gpu_ids)
+    gpu_spec = ",".join(str(g) for g in runtime.gpu_ids)
     hardware_id = str(
         cfg.get("hardware_id")
-        or f"rig-{slot.name}-gpu{'-'.join(str(g) for g in slot.gpu_ids)}"
+        or f"rig-{runtime.name}-gpu{'-'.join(str(g) for g in runtime.gpu_ids)}"
     )
 
     if suite in WORKER_SUITES:
@@ -737,7 +631,7 @@ def build_suite_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
             "-e", "BENCH_EVAL_LOCK=/host-lock/bench-evalplus.lock",
         ]
         if spec.get("container_gpu_access"):
-            docker_gpu_spec = f'"device={gpu_spec}"' if len(slot.gpu_ids) > 1 else f"device={gpu_spec}"
+            docker_gpu_spec = f'"device={gpu_spec}"' if len(runtime.gpu_ids) > 1 else f"device={gpu_spec}"
             cmd.extend(["--gpus", docker_gpu_spec])
         if spec.get("env_file_supported") and cfg.get("env_file"):
             cmd.extend(["--env-file", str(cfg["env_file"])])
@@ -760,7 +654,7 @@ def build_suite_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
             # NVIDIA_VISIBLE_DEVICES is renumbered from zero inside the suite
             # container. Preserve host IDs in hardware_id, but query telemetry
             # using the container-local namespace.
-            local_gpu_spec = ",".join(str(i) for i in range(len(slot.gpu_ids)))
+            local_gpu_spec = ",".join(str(i) for i in range(len(runtime.gpu_ids)))
             cmd.extend(["--gpu-ids", local_gpu_spec])
         cmd.extend(suite_args)
 
@@ -770,9 +664,9 @@ def build_suite_cmd(block: BlockState, slot: GpuSlot) -> List[str]:
     return cmd
 
 
-def start_suite(block: BlockState, slot: GpuSlot) -> subprocess.Popen:
+def start_suite(block: BlockState, runtime: Runtime) -> subprocess.Popen:
     """Launch the suite container as a subprocess."""
-    cmd = build_suite_cmd(block, slot)
+    cmd = build_suite_cmd(block, runtime)
     container_name = f"bench-{block.suite.replace('bench-', '')}-campaign-{block.block_id}"
 
     # Stop any leftover suite container
@@ -811,9 +705,10 @@ def build_status_dict(state: CampaignState) -> Dict[str, Any]:
     blocks_status = {}
     for bid, bs in state.blocks.items():
         entry: Dict[str, Any] = {"status": bs.status}
-        if bs.assigned_slot:
-            entry["gpu_slot"] = bs.assigned_slot.name
-            entry["port"] = bs.assigned_slot.port
+        if bs.runtime:
+            entry["gpu_slot"] = bs.runtime.name
+            entry["port"] = bs.runtime.port
+            entry["profile"] = bs.runtime.profile
         entry["suite"] = bs.suite
         if bs.started_at:
             entry["started_at"] = bs.started_at
@@ -830,19 +725,11 @@ def build_status_dict(state: CampaignState) -> Dict[str, Any]:
 
         # Provide waiting_for info
         if bs.status == WAITING_GPU:
-            # Find who's using the needed slot
-            for obid, obs in state.blocks.items():
-                if obid == bid:
-                    continue
-                if obs.assigned_slot and obs.status in (LOADING, RUNNING_SUITE):
-                    slot_needed = PLACEMENT_SLOTS.get(bs.placement, [])
-                    if obs.assigned_slot.name in slot_needed or any(
-                        slots_conflict(SLOTS[sn], obs.assigned_slot)
-                        for sn in slot_needed
-                        if sn in SLOTS
-                    ):
-                        entry["waiting_for"] = f"{obs.assigned_slot.name} ({obid} {obs.status})"
-                        break
+            loading = [obid for obid, obs in state.blocks.items() if obs.status == LOADING]
+            if loading:
+                entry["waiting_for"] = f"manager load in flight ({', '.join(loading)})"
+        if bs.status == LOADING:
+            entry["waiting_for"] = "the rig manager: placing and loading (it waits for busy cards)"
         if bs.status == WAITING_DEPS:
             pending_deps = [
                 d for d in bs.depends_on
@@ -877,8 +764,8 @@ def write_checkpoint(state: CampaignState) -> None:
     for bid, bs in state.blocks.items():
         blocks_data[bid] = {
             "status": bs.status,
-            "slot": bs.assigned_slot.name if bs.assigned_slot else None,
-            "runtime_container": bs.runtime_container,
+            "slot": bs.runtime.name if bs.runtime else None,
+            "profile": bs.runtime.profile if bs.runtime else None,
             "started_at": bs.started_at,
             "ended_at": bs.ended_at,
             "exit_code": bs.exit_code,
@@ -922,10 +809,10 @@ def load_checkpoint(state: CampaignState) -> bool:
         elif saved_status in (LOADING, RUNNING_SUITE):
             # Was mid-flight — restart from beginning
             log(f"  Checkpoint: block {bid} was {saved_status}, will restart")
-            # Clean up orphan container
-            orphan = saved.get("runtime_container")
+            # Unload the orphan runtime the interrupted run left (the manager knows it by profile).
+            orphan = saved.get("profile")
             if orphan:
-                docker_stop(orphan)
+                unload_runtime(Runtime(profile=orphan, port=-1, gpu_ids=[]))
 
     return True
 
@@ -934,114 +821,11 @@ def load_checkpoint(state: CampaignState) -> bool:
 # Scheduler
 # ---------------------------------------------------------------------------
 
-class LeaseRefused(RuntimeError):
-    """The rig manager refused a card (claimed or leased by other work)."""
-
-
-class CampaignLeases:
-    """`benchmarks` leases from the rig manager, one per occupied slot.
-
-    Taken when a slot's runtime starts, renewed while held, released when the slot is freed. A
-    refused card is retried by the scheduler; a split or pinned block reserves its slot's cards
-    meanwhile (`reserve`, a claim with a TTL renewed here), so single work cannot take them as they
-    free (llm-gateway MANAGER.md, "Reservations"). An unreachable manager runs without a lease (the
-    rig audits the load as no-lease). A release the manager refuses (runtime still on the card) is
-    retried.
-    """
-
-    def __init__(self, run_id: str):
-        self.run_id = run_id
-        self.held: Dict[str, str] = {}      # slot name -> lease id
-        self.pending: Dict[str, str] = {}   # slot name -> lease id whose release must be retried
-        self.reserved: Dict[str, str] = {}  # slot name -> claim name holding its cards while it waits
-        self.last_renew = time.monotonic()
-
-    def _call(self, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["bash", str(LEASE_HELPER), *args], capture_output=True, text=True,
-                              timeout=60, check=False)
-
-    def _claim_name(self, slot: "GpuSlot") -> str:
-        return re.sub(r"[^a-z0-9_-]+", "-", f"campaign-{self.run_id}-{slot.name}".lower())[:64]
-
-    def ensure(self, slot: "GpuSlot", model: str) -> Optional[str]:
-        if slot.name in self.held:
-            return self.held[slot.name]
-        args = ["acquire", ",".join(str(g) for g in slot.gpu_ids), f"campaign-{slot.name}", self.run_id, model]
-        if slot.name in self.reserved:
-            args.append(self.reserved[slot.name])
-        proc = self._call(*args)
-        if proc.returncode != 0:
-            raise LeaseRefused(f"rig manager did not lease {slot.name} (GPU {slot.gpu_ids}): "
-                               f"{proc.stderr.strip()[-300:]}")
-        lease = proc.stdout.strip() or None
-        if lease:
-            self.held[slot.name] = lease
-            log(f"  Lease {lease} for {slot.name} (GPU {slot.gpu_ids})")
-        else:
-            log(f"  Rig manager unreachable: {slot.name} runs without a lease")
-        self.unreserve(slot.name)  # the lease holds the cards now
-        return lease
-
-    def reserve(self, slot: "GpuSlot", model: str) -> bool:
-        """Reserve a slot's cards while they are busy. False if another claim already covers them."""
-        if slot.name in self.reserved:
-            return True
-        name = self._claim_name(slot)
-        proc = self._call("reserve", ",".join(str(g) for g in slot.gpu_ids), name, f"campaign-{self.run_id}", model)
-        if proc.returncode != 0:
-            log(f"  Could not reserve {slot.name} (GPU {slot.gpu_ids}): {proc.stderr.strip()[-200:]}")
-            return False
-        self.reserved[slot.name] = name
-        log(f"  Reserved {slot.name} (GPU {slot.gpu_ids}) as {name} while it waits")
-        return True
-
-    def unreserve(self, slot_name: str) -> None:
-        name = self.reserved.pop(slot_name, None)
-        if name:
-            self._call("unreserve", name)
-
-    def release(self, slot_name: str) -> None:
-        lease = self.held.pop(slot_name, None) or self.pending.pop(slot_name, None)
-        if not lease:
-            return
-        proc = self._call("release", lease, f"campaign-{slot_name}")
-        if proc.returncode != 0 or "failed" in proc.stderr:
-            self.pending[slot_name] = lease
-
-    def tick(self) -> None:
-        if time.monotonic() - self.last_renew < LEASE_RENEW_EVERY_S:
-            return
-        self.last_renew = time.monotonic()
-        for name, lease in list(self.held.items()):
-            self._call("renew", lease, f"campaign-{name}")
-        for slot_name, claim in list(self.reserved.items()):
-            if self._call("renew-reservation", claim, f"campaign-{self.run_id}").returncode != 0:
-                self.reserved.pop(slot_name, None)  # lapsed or removed by an operator: re-reserved on refusal
-        for name in list(self.pending):
-            self.release(name)
-
-    def release_all(self) -> None:
-        for name in list(self.reserved):
-            self.unreserve(name)
-        for name in list(self.held) + list(self.pending):
-            self.release(name)
-        if self.pending:
-            log(f"WARNING: leases not released (runtime still on the card?): {self.pending}")
-
-
-class OccupiedSlots(dict):
-    """slot name -> block id. Freeing a slot releases its lease."""
-
-    def __init__(self, leases: CampaignLeases):
-        super().__init__()
-        self.leases = leases
-
-    def pop(self, key, *default):
-        self.leases.release(key)
-        return super().pop(key, *default)
-
-
 class Scheduler:
+    """Runs the blocks: one manager load request at a time (the rig loads one model at a time anyway, and
+    two multi-card loads collecting cards at once could each hold cards the other needs), any number of
+    loaded runtime groups side by side, suites against the ports the manager returned."""
+
     def __init__(
         self,
         state: CampaignState,
@@ -1053,14 +837,9 @@ class Scheduler:
         self.on_failure = on_failure
         self.dry_run = dry_run
         self.max_active_models = max_active_models
-        self.load_lock = False  # only one model loads at a time
+        self.owner = re.sub(r"[^A-Za-z0-9._-]+", "-", f"campaign-{state.run_id}")[:64]
         self.loading_block: Optional[str] = None
-        self.leases = CampaignLeases(state.run_id)
-        self.occupied: Dict[str, str] = OccupiedSlots(self.leases)  # slot_name -> block_id
-        self.refused_at: Dict[str, float] = {}       # slot name -> when the manager last refused it
-        self.lease_refusals: Dict[str, int] = {}     # block id -> refusals so far
-        self.reserved_since: Dict[str, float] = {}   # block id -> when its split/pinned wait began
-        self.reserved_for: Dict[str, str] = {}       # block id -> slot it reserved while waiting
+        self.load_proc: Optional[subprocess.Popen] = None
         self._shutdown = False
 
     def _runtime_group_members(self, group: str) -> List[BlockState]:
@@ -1090,19 +869,24 @@ class Scheduler:
 
     def _active_model_groups(self) -> Set[str]:
         groups = set()
-        for block_id in self.occupied.values():
-            block = self.state.blocks.get(block_id)
-            if block is None:
+        for block in self.state.blocks.values():
+            if block.status not in (LOADING, RUNNING_SUITE):
                 continue
             group = str(block.config.get("runtime_group", "")).strip()
             groups.add(group or block.block_id)
         return groups
 
+    def _end_runtime(self, block: BlockState) -> None:
+        """Unload the block's runtime (the end of its group, or a failure)."""
+        if not self.dry_run:
+            unload_runtime(block.runtime)
+        block.runtime = None
+
     def handoff_runtime(self, block: BlockState) -> bool:
         """Start the next suite in a runtime group without reloading its model."""
         successor = self._runtime_group_successor(block)
-        slot = block.assigned_slot
-        if successor is None or slot is None:
+        runtime = block.runtime
+        if successor is None or runtime is None:
             return False
         if successor.status not in (PENDING, WAITING_DEPS, WAITING_GPU):
             return False
@@ -1114,44 +898,36 @@ class Scheduler:
             return False
         if not self.dry_run:
             # The successor inherits the runtime, so it must pass the same identity check.
-            successor.runtime_container = block.runtime_container
-            problem = runtime_identity_error(successor, slot, served_model_id(slot.port))
+            problem = runtime_identity_error(successor, runtime, served_model_id(runtime.port))
             if problem:
                 log(f"Block {block.block_id}: not reusing runtime ({problem}); successor will reload it")
-                stop_runtime(block.runtime_container)
-                block.runtime_container = None
-                successor.runtime_container = None
-                self.occupied.pop(slot.name, None)
+                self._end_runtime(block)
                 return False
 
-        successor.assigned_slot = slot
-        successor.runtime_container = block.runtime_container
+        successor.runtime = runtime
         successor.started_at = now_iso()
         successor.suite_started_at = now_iso()
         successor.status = RUNNING_SUITE
-        block.runtime_container = None
-        self.occupied[slot.name] = successor.block_id
+        block.runtime = None
         group = str(successor.config["runtime_group"])
         log(
-            f"Block {successor.block_id} -> {slot.name} "
+            f"Block {successor.block_id} -> {runtime.name} "
             f"[reusing runtime group {group}]"
         )
         if self.dry_run:
             log(
-                f"  Suite command: {' '.join(build_suite_cmd(successor, slot))}",
+                f"  Suite command: {' '.join(build_suite_cmd(successor, runtime))}",
                 verbose_only=True,
             )
             return True
         try:
-            successor.suite_process = start_suite(successor, slot)
+            successor.suite_process = start_suite(successor, runtime)
             return True
         except Exception as exc:
             successor.status = FAILED
             successor.error = f"suite start failed: {exc}"
             successor.ended_at = now_iso()
-            stop_runtime(successor.runtime_container)
-            successor.runtime_container = None
-            self.occupied.pop(slot.name, None)
+            self._end_runtime(successor)
             log(f"Block {successor.block_id}: FAILED to start suite: {exc}")
             return False
 
@@ -1197,8 +973,8 @@ class Scheduler:
                     bs.status = WAITING_GPU
 
     def try_start_load(self) -> None:
-        """Pick a ready block and start loading its model (if load_lock is free)."""
-        if self.load_lock:
+        """Ask the manager to load the next ready block's model (one request in flight at a time)."""
+        if self.loading_block:
             return
 
         for bid, bs in self.state.blocks.items():
@@ -1211,189 +987,85 @@ class Scheduler:
                 if group not in active_groups and len(active_groups) >= self.max_active_models:
                     continue
 
-            now = time.monotonic()
-            cooling = {name for name, t in self.refused_at.items() if now - t < LEASE_REFUSED_COOLDOWN_S}
-            slot = find_free_slot(bs.placement, self.occupied, cooling)
-            if slot is None:
-                continue
-
-            # Check if this suite is standalone (bench-knowledge) — no runtime needed
-            if bs.suite in STANDALONE_SUITES:
-                # No load phase — go straight to suite
-                bs.assigned_slot = slot
-                bs.status = RUNNING_SUITE
-                bs.started_at = now_iso()
-                bs.suite_started_at = now_iso()
-                self.occupied[slot.name] = bid
-                log(f"Block {bid} -> {slot.name} (port {slot.port}) [standalone suite, no runtime load]")
-
-                if not self.dry_run:
-                    try:
-                        proc = start_suite(bs, slot)
-                        bs.suite_process = proc
-                    except Exception as e:
-                        bs.status = FAILED
-                        bs.error = str(e)
-                        bs.ended_at = now_iso()
-                        self.occupied.pop(slot.name, None)
-                        log(f"Block {bid}: FAILED to start suite: {e}")
-                return
-
-            # Worker suite — need to load runtime first
-            bs.assigned_slot = slot
             bs.status = LOADING
             bs.started_at = now_iso()
             bs.load_started_at = now_iso()
-            self.occupied[slot.name] = bid
-            self.load_lock = True
             self.loading_block = bid
-            log(f"Block {bid} -> {slot.name} (port {slot.port}) [loading model]")
+            log(f"Block {bid}: asking the rig manager to load {bs.model} (cards: {bs.placement})")
 
             if self.dry_run:
-                log(f"  Runtime command: {' '.join(build_runtime_cmd(bs, slot))}", verbose_only=True)
-            else:
-                try:
-                    lease = self.leases.ensure(slot, bs.model)
-                    held = self.reserved_for.pop(bid, None)
-                    if held and held != slot.name:  # a split that waited on one pair got another
-                        self.leases.unreserve(held)
-                    container_name = start_runtime(bs, slot, lease)
-                    bs.runtime_container = container_name
-                except LeaseRefused as e:
-                    self.load_lock = False
-                    self.loading_block = None
-                    self.occupied.pop(slot.name, None)
-                    self.refused_at[slot.name] = time.monotonic()
-                    n = self.lease_refusals[bid] = self.lease_refusals.get(bid, 0) + 1
-                    other_pair = bs.placement == "split" and find_free_slot(
-                        bs.placement, self.occupied, cooling | {slot.name}) is not None
-                    if bs.placement != "single" and not other_pair:
-                        # A pinned block, or a split every pair has refused: reserve these cards and wait.
-                        since = self.reserved_since.setdefault(bid, time.monotonic())
-                        reserved = self.leases.reserve(slot, bs.model)
-                        if reserved:
-                            held = self.reserved_for.get(bid)
-                            if held and held != slot.name:
-                                self.leases.unreserve(held)
-                            self.reserved_for[bid] = slot.name
-                        if time.monotonic() - since < LEASE_RESERVATION_WAIT_S:
-                            bs.status = WAITING_GPU
-                            bs.assigned_slot = None
-                            bs.started_at = bs.load_started_at = None
-                            log(f"Block {bid}: {slot.name} busy (try {n}); "
-                                + ("reserved, " if reserved else "not reserved (claimed elsewhere), ")
-                                + f"waiting up to {LEASE_RESERVATION_WAIT_S} s in all")
-                        else:
-                            self.leases.unreserve(self.reserved_for.pop(bid, slot.name))
-                            bs.status = FAILED
-                            bs.error = f"cards not free after {LEASE_RESERVATION_WAIT_S} s: {e}"
-                            bs.ended_at = now_iso()
-                            log(f"Block {bid}: FAILED, {bs.error}")
-                        return
-                    limit = LEASE_REFUSALS_PER_CARD * max(1, len(PLACEMENT_SLOTS.get(bs.placement, [])))
-                    if n < limit:
-                        bs.status = WAITING_GPU
-                        bs.assigned_slot = None
-                        bs.started_at = bs.load_started_at = None
-                        log(f"Block {bid}: {slot.name} refused ({n} of {limit}); trying another card "
-                            f"or this one again in {LEASE_REFUSED_COOLDOWN_S} s")
-                    else:
-                        bs.status = FAILED
-                        bs.error = f"no card leased after {n} refusals: {e}"
-                        bs.ended_at = now_iso()
-                        log(f"Block {bid}: FAILED, {bs.error}")
-                except Exception as e:
-                    bs.status = FAILED
-                    bs.error = f"runtime start failed: {e}"
-                    bs.ended_at = now_iso()
-                    self.load_lock = False
-                    self.loading_block = None
-                    self.occupied.pop(slot.name, None)
-                    log(f"Block {bid}: FAILED to start runtime: {e}")
-            return  # only start one load per tick
+                log(f"  Load command: {' '.join(load_cmd(bs, self.owner))}", verbose_only=True)
+                return
+            try:
+                self.load_proc = start_load(bs, self.owner)
+            except Exception as exc:
+                bs.status = FAILED
+                bs.error = f"load request failed: {exc}"
+                bs.ended_at = now_iso()
+                self.loading_block = None
+                log(f"Block {bid}: FAILED to ask for a load: {exc}")
+            return  # only one load request per tick
 
     def check_load_complete(self) -> None:
-        """Check if the currently loading block's runtime is ready."""
-        if not self.load_lock or not self.loading_block:
+        """When the manager answers the load in flight: verify the runtime and start the block's suite."""
+        if not self.loading_block:
             return
 
         bs = self.state.blocks[self.loading_block]
         if bs.status != LOADING:
             # Something else changed the status (e.g., shutdown)
-            self.load_lock = False
             self.loading_block = None
+            self.load_proc = None
             return
 
         if self.dry_run:
-            # In dry-run, instantly "complete" the load
+            # In dry-run, instantly "complete" the load on a stand-in runtime
+            bs.runtime = Runtime(profile=f"dry-run-{bs.block_id}", port=0, gpu_ids=bs.gpus or [])
             bs.status = RUNNING_SUITE
             bs.suite_started_at = now_iso()
-            self.load_lock = False
             self.loading_block = None
             log(f"Block {bs.block_id}: [dry-run] model loaded, starting suite")
-            if bs.assigned_slot:
-                log(
-                    f"  Suite command: {' '.join(build_suite_cmd(bs, bs.assigned_slot))}",
-                    verbose_only=True,
-                )
+            log(f"  Suite command: {' '.join(build_suite_cmd(bs, bs.runtime))}", verbose_only=True)
             return
 
-        slot = bs.assigned_slot
-        if not slot:
-            return
-
-        timeout_s = bs.config.get("load_timeout_s", 300)
-        load_start = bs.load_started_at or bs.started_at or now_iso()
-        # Parse the ISO timestamp
+        if self.load_proc is None or self.load_proc.poll() is None:
+            return  # the manager is still placing, waiting for cards, or loading
+        proc, self.load_proc, self.loading_block = self.load_proc, None, None
         try:
-            start_dt = datetime.fromisoformat(load_start)
-            if start_dt.tzinfo is None:
-                start_dt = start_dt.replace(tzinfo=timezone.utc)
-            elapsed = (datetime.now(timezone.utc) - start_dt).total_seconds()
-        except (ValueError, TypeError):
-            elapsed = 0
+            runtime, served_gguf = finish_load(proc)
+        except RuntimeError as exc:
+            bs.status = FAILED
+            bs.error = str(exc)
+            bs.ended_at = now_iso()
+            log(f"Block {bs.block_id}: FAILED, {exc}")
+            return
+        bs.runtime = runtime
 
-        observed = served_model_id(slot.port)
-        mismatch = runtime_identity_error(bs, slot, observed) if observed is not None else None
+        observed = served_model_id(runtime.port)
+        mismatch = runtime_identity_error(bs, runtime, observed)
+        if not mismatch and served_gguf and served_gguf != Path(str(bs.config["gguf"])).name:
+            mismatch = f"the manager loaded {served_gguf}, expected {Path(str(bs.config['gguf'])).name}"
         if mismatch:
             log(f"Block {bs.block_id}: IDENTITY MISMATCH, suite not started: {mismatch}")
             bs.status = FAILED
             bs.error = f"runtime identity mismatch: {mismatch}"
             bs.ended_at = now_iso()
-            stop_runtime(bs.runtime_container)
-            bs.runtime_container = None
-            self.load_lock = False
-            self.loading_block = None
-            self.occupied.pop(slot.name, None)
+            self._end_runtime(bs)
+            return
 
-        elif observed is not None:
-            log(f"Block {bs.block_id}: model ready on port {slot.port} ({elapsed:.0f}s), "
-                f"identity verified {observed} in {bs.identity['container_id']}")
-            bs.status = RUNNING_SUITE
-            bs.suite_started_at = now_iso()
-            self.load_lock = False
-            self.loading_block = None
-
-            try:
-                proc = start_suite(bs, slot)
-                bs.suite_process = proc
-            except Exception as e:
-                bs.status = FAILED
-                bs.error = f"suite start failed: {e}"
-                bs.ended_at = now_iso()
-                stop_runtime(bs.runtime_container)
-                self.occupied.pop(slot.name, None)
-                log(f"Block {bs.block_id}: FAILED to start suite: {e}")
-
-        elif elapsed > timeout_s:
-            log(f"Block {bs.block_id}: TIMEOUT loading model after {elapsed:.0f}s")
+        log(f"Block {bs.block_id}: model ready as {runtime.profile} on port {runtime.port} "
+            f"(GPU {runtime.gpu_ids}, ctx {runtime.ctx}), identity verified {observed} "
+            f"in {bs.identity['container_id']}")
+        bs.status = RUNNING_SUITE
+        bs.suite_started_at = now_iso()
+        try:
+            bs.suite_process = start_suite(bs, runtime)
+        except Exception as e:
             bs.status = FAILED
-            bs.error = f"load timeout ({timeout_s}s)"
+            bs.error = f"suite start failed: {e}"
             bs.ended_at = now_iso()
-            stop_runtime(bs.runtime_container)
-            self.load_lock = False
-            self.loading_block = None
-            self.occupied.pop(slot.name, None)
+            self._end_runtime(bs)
+            log(f"Block {bs.block_id}: FAILED to start suite: {e}")
 
     def reap_finished(self) -> None:
         """Poll running suite processes for completion."""
@@ -1409,9 +1081,7 @@ class Scheduler:
                     log(f"Block {bid}: [dry-run] COMPLETED")
                     if self.handoff_runtime(bs):
                         continue
-                    stop_runtime(bs.runtime_container)
-                    if bs.assigned_slot:
-                        self.occupied.pop(bs.assigned_slot.name, None)
+                    self._end_runtime(bs)
                 continue
 
             rc = bs.suite_process.poll()
@@ -1432,10 +1102,10 @@ class Scheduler:
             # The runtime must still be the verified one when the suite ends; if it was
             # replaced mid-suite, the recorded rows are not this model's.
             changed = None
-            if bs.identity and bs.assigned_slot:
-                still = served_model_id(bs.assigned_slot.port)
+            if bs.identity and bs.runtime:
+                still = served_model_id(bs.runtime.port)
                 if still != bs.identity["requested"]:
-                    changed = f"port {bs.assigned_slot.port} now serves {still}"
+                    changed = f"port {bs.runtime.port} now serves {still}"
 
             if changed:
                 bs.status = FAILED
@@ -1452,19 +1122,11 @@ class Scheduler:
             if (rc == 0 or self.on_failure == "continue") and self.handoff_runtime(bs):
                 continue
 
-            # Release slot and stop runtime after the final suite in a group.
-            stop_runtime(bs.runtime_container)
-            if bs.assigned_slot:
-                self.occupied.pop(bs.assigned_slot.name, None)
-
-    def release_slot(self, block_id: str) -> None:
-        """Force-release a slot."""
-        bs = self.state.blocks.get(block_id)
-        if bs and bs.assigned_slot:
-            self.occupied.pop(bs.assigned_slot.name, None)
+            # Unload after the final suite in a group.
+            self._end_runtime(bs)
 
     def shutdown(self) -> None:
-        """Stop all running containers and write final state."""
+        """Stop suites, unload runtimes, cancel what the run still owns in the manager, write final state."""
         self._shutdown = True
         log("Shutting down campaign...")
         for bid, bs in self.state.blocks.items():
@@ -1478,8 +1140,7 @@ class Scheduler:
                 except subprocess.TimeoutExpired:
                     bs.suite_process.kill()
 
-            if bs.runtime_container:
-                stop_runtime(bs.runtime_container)
+            self._end_runtime(bs)
 
             # Close log files
             log_file = bs.config.get("_log_file")
@@ -1494,6 +1155,11 @@ class Scheduler:
                 bs.error = "campaign shutdown"
                 bs.ended_at = now_iso()
 
+        if self.load_proc is not None and self.load_proc.poll() is None:
+            self.load_proc.terminate()  # the request only; the manager's own wait is cancelled below
+        self.load_proc = self.loading_block = None
+        if not self.dry_run:
+            cancel_owner(self.owner, "campaign shutdown")
         self.state.status = "interrupted"
         self.state.ended_at = now_iso()
         write_status(self.state)
@@ -1504,8 +1170,9 @@ class Scheduler:
         log(f"Campaign: {self.state.name}")
         log(f"Run ID: {self.state.run_id}")
         log(f"Blocks: {len(self.state.blocks)}")
+        log(f"Manager owner: {self.owner}")
         if self.dry_run:
-            log("MODE: dry-run (no containers will be started)")
+            log("MODE: dry-run (no models loaded, no containers started)")
         log("")
 
         # Print schedule summary
@@ -1513,7 +1180,7 @@ class Scheduler:
             if bs.status == COMPLETED:
                 log(f"  [{bid}] {bs.model} / {bs.suite} -> ALREADY COMPLETED (checkpoint)")
             else:
-                log(f"  [{bid}] {bs.model} / {bs.suite} (placement={bs.placement})")
+                log(f"  [{bid}] {bs.model} / {bs.suite} (cards: {bs.placement})")
         log("")
 
         while not self._shutdown:
@@ -1530,8 +1197,6 @@ class Scheduler:
             self.advance_deps()
             self.check_load_complete()
             self.try_start_load()
-            if not self.dry_run:
-                self.leases.tick()
 
             if not self.dry_run:
                 write_status(self.state)
@@ -1543,8 +1208,8 @@ class Scheduler:
             if not self.dry_run:
                 time.sleep(TICK_INTERVAL)
 
-        if not self.dry_run:
-            self.leases.release_all()
+        if not self.dry_run and not self._shutdown:
+            cancel_owner(self.owner, "campaign finished")  # nothing should remain; this makes sure
 
         # Final status
         completed = sum(1 for bs in self.state.blocks.values() if bs.status == COMPLETED)
@@ -1616,18 +1281,15 @@ def parse_manifest(path: Path) -> tuple[str, Dict, List[Dict]]:
                 f"Supported: {sorted(SUPPORTED_SUITES)}"
             )
 
-        # Worker suites need a gguf path
-        if block["suite"] in WORKER_SUITES and "gguf" not in block:
-            raise SystemExit(f"ERROR: block '{block_id}' (worker suite) missing 'gguf' field")
-        if block["suite"] in STANDALONE_SUITES and "gguf" not in block:
-            raise SystemExit(f"ERROR: block '{block_id}' (standalone suite) missing 'gguf' field")
-
-        placement = block.get("placement", "single")
-        if placement not in PLACEMENT_SLOTS:
+        # Every suite runs against a model the manager loads; the registry names its GGUF.
+        if block["suite"] in STANDALONE_SUITES:
             raise SystemExit(
-                f"ERROR: block '{block_id}' has invalid placement '{placement}'. "
-                f"Valid: {sorted(PLACEMENT_SLOTS.keys())}"
-            )
+                f"ERROR: block '{block_id}': standalone suite {block['suite']} would need cards without a "
+                f"manager load, which the runner no longer takes")
+        try:
+            block_gpus(block)
+        except ValueError as exc:
+            raise SystemExit(f"ERROR: block '{block_id}': {exc}")
 
         # Validate depends_on references
         for dep in block.get("depends_on", []):
@@ -1696,11 +1358,6 @@ def main() -> None:
         help="Override limit for a specific block (repeatable, e.g. --limit e4b_reasoning=50 --limit e2b_reasoning=50)",
     )
     parser.add_argument(
-        "--runtime-image",
-        default=None,
-        help="Run every block on this llama-runtime image instead of the model library's (upgrade certification)",
-    )
-    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Print detailed commands and debug info",
@@ -1709,8 +1366,6 @@ def main() -> None:
     if args.max_active_models is not None and args.max_active_models < 1:
         parser.error("--max-active-models must be at least 1")
     _VERBOSE = args.verbose
-    global RUNTIME_IMAGE_OVERRIDE
-    RUNTIME_IMAGE_OVERRIDE = args.runtime_image
 
     manifest_path = args.manifest.resolve()
     if not manifest_path.exists():
