@@ -120,7 +120,7 @@ Pick one mode at a time with the `rig` mode selector, from any machine:
 ```bash
 ssh <rig-ip> rig status
 ssh <rig-ip> rig start orchestration   # brain (27B on GPU0) + 5 cold workers, plans admitted
-ssh <rig-ip> rig start bench           # same stack, config.benchmark.json, benchmarks admitted
+# bench mode: entered by a benchmark load through the rig manager (rigctl load-model --use benchmark, lanes, campaigns)
 ssh <rig-ip> rig start remote [profile ...]  # published remote_profiles, no orchestrator
 ssh <rig-ip> rig start <mode> --force  # replace whatever mode is running
 ssh <rig-ip> rig stop                  # back to idle
@@ -132,7 +132,7 @@ ssh <rig-ip> rig stop                  # back to idle
 - llm-gateway (Pi `~/llm-gateway`, `pi-gateway.service` on Pi 127.0.0.1:8080) serves `gpu-rig/<profile>` over
   the OpenAI API and loads profiles on first request (`rig start remote` over ssh; rig ports reach the Pi
   through `pi-rig-tunnel.service`). Deploy: `~/llm-gateway/deploy/deploy_pi.sh` on the Pi.
-- Stack modes run under systemd (`llm-orchestration.service` / `llm-bench.service`).
+- Orchestration runs under systemd (`llm-orchestration.service`).
   Never start `startup.py` by hand.
 - Remote profiles: llm-gateway owns the offer (`OFFER` in `~/llm-gateway/tools/generate_profiles.py`),
   resolved against `model_registry.json` into `~/llm-gateway/remote_profiles.json`, which `rig` reads via
@@ -143,9 +143,10 @@ ssh <rig-ip> rig stop                  # back to idle
   rig-local `brain/hw/gpus/`, mirrored to `/mnt/shared/gpus/`), runs loads as detached jobs, and enforces the
   hardware rules: `rig-guard.service` (power/thermal/RAM; gates every load in `run_runtime.sh`, frees RAM at
   critical), one load at a time, host prompt cache off unless the caller sets `--cache-ram`, lease audit.
-- Loading benchmark models while in bench mode: `start_custom_mode.py --models ... --skip-benchmark-start`.
-  Without `--skip-benchmark-start` the old wrapper restarts the stack outside systemd.
-  `start_plan_mode.py` / `start_benchmark_mode.py` are superseded by `rig start`.
+- Benchmark models load through the rig manager (`rigctl load-model MODEL --use benchmark`, or a lane or
+  campaign: benchmarking `NEW_MODEL_INTEGRATION.md`); that puts the rig in bench mode, and the last unload
+  returns it to idle. One mode at a time: a load for another mode is refused as busy. `start_plan_mode.py`
+  is superseded by `rig start orchestration`.
 
 ### Check The Rig
 
@@ -272,23 +273,15 @@ Useful options:
 
 ### Load Models Onto GPUs
 
-Use `start_custom_mode.py` to load specific models onto workers. It starts
-benchmark mode (cold workers), then calls `prepare_llm_runtimes.py` on the rig
-which queues one `load_llm` meta task at a time, waits for completion, then
-queues the next.
+Outside orchestration, a model loads through the rig manager on the Pi: `rigctl load-model MODEL [--gpus
+..] [--use benchmark|chat|worker]` (llm-gateway `docs/MANAGER.md`, "Model loads"). The manager checks the
+fit, picks the cards and the context, and the rig loads it in the matching mode.
 
-```bash
-python3 ~/llm_orchestration/scripts/benchmarks/start_custom_mode.py \
-  --models qwen3.5:4b qwen2.5-coder:7b qwen3.5:9b-q3km mistral:7b-instruct deepseek-r1:7b \
-  --force-unload-first
-```
-
-Model IDs come from the model registry (`models.catalog.json` is generated from it). One model per
-available cold worker. The brain and workers handle sequencing, retry, and
-placement — do not try to replicate this manually.
+In orchestration mode the brain loads worker models with `load_llm` meta tasks
+(`prepare_llm_runtimes.py` queues them one at a time). Model IDs come from the model registry
+(`models.catalog.json` is generated from it).
 
 Key scripts in the chain:
-- `~/llm_orchestration/scripts/benchmarks/start_custom_mode.py` — laptop-side entry point
 - `~/llm_orchestration/scripts/runtime_preflight.py` — operator preflight entry point
 - `shared/scripts/prepare_llm_runtimes.py` — rig-side, sequential meta task submission
 - `shared/scripts/runtime_preflight.py` — rig-side cleanup/preflight checks

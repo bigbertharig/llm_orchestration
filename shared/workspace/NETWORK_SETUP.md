@@ -154,8 +154,6 @@ Relevant startup entrypoints:
 
 - `/home/bryan/llm_orchestration/shared/agents/startup.py`
 - `/home/bryan/llm_orchestration/scripts/start_plan_mode.py`
-- `/home/bryan/llm_orchestration/scripts/benchmarks/start_benchmark_mode.py`
-- `/home/bryan/llm_orchestration/scripts/benchmarks/start_custom_mode.py`
 
 ---
 

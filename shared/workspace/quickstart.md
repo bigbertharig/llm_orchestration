@@ -93,15 +93,12 @@ Use wrapper mode scripts only when you intentionally want that mode's startup be
 
 ```bash
 python3 ~/llm_orchestration/scripts/start_plan_mode.py
-python3 ~/llm_orchestration/scripts/benchmarks/start_benchmark_mode.py
-python3 ~/llm_orchestration/scripts/benchmarks/start_custom_mode.py --models qwen3.5:4b qwen2.5-coder:7b ...
 ```
 
 Boot-profile intent:
 - `startup.py`: `neutral`, brain up, workers cold, no workload controller admitted.
 - `start_plan_mode.py`: `plan_ready`, admits Plans, warms gpu-2 with `qwen2.5-coder:7b`, and enables auto-default repair.
-- `start_benchmark_mode.py`: `benchmark_ready`, admits benchmark runtime-prep work with cold workers and auto-default disabled.
-- `start_custom_mode.py`: benchmark-ready startup followed by explicit model loads.
+- Benchmark models load through the rig manager instead (bench mode; benchmarking `NEW_MODEL_INTEGRATION.md`).
 
 Boot profile and controller admission live in
 `shared/brain/control_policy.json`. Actual GPU ownership lives separately in
