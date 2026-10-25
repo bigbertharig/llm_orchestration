@@ -1204,7 +1204,10 @@ def cmd_observe(_args) -> int:
     print(json.dumps({
         **record,
         "observed_at": now_iso(),
-        "gpu_scan": {"ids": g["ids"], "ok": g["ok"], "errors": g["errors"], "notes": gpu_notes(g)},
+        "gpu_scan": {"ids": g["ids"], "ok": g["ok"], "errors": g["errors"], "notes": gpu_notes(g),
+                     # which physical card each index is now, and its path: what the manager records per load
+                     "cards": [{k: x.get(k) for k in ("index", "uuid", "name", "total_mb", "bus", "link_gen",
+                                                      "link_width", "root_port", "via")} for x in g["visible"]]},
         "gpus": gpu_telemetry(),
         "containers": containers,
         "ports": {str(p): m for p, m in live_ports().items()},
