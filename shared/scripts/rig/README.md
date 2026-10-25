@@ -1,5 +1,7 @@
 # Rig hardware layer
 
+How fast the rig runs models on which cards (card vs bus, splits, PCIe links, context capacity) and the tools that measure it: benchmarking `RIG_PERFORMANCE.md`.
+
 Rig-side code for the GPU rig. It carries out commands from a controller (llm-gateway's rig
 manager on the Pi, `docs/MANAGER.md` there) and enforces the physical rules itself, close to the
 hardware. It keeps working when the controller or the network is gone.

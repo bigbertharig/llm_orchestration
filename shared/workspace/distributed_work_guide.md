@@ -309,6 +309,8 @@ This is the orchestrator's existing routing model extended to CPU workers. The p
 
 ## Split GPU Inference Benchmarks (April 2026)
 
+This section is the April 2026 snapshot used for upgrade planning. Current measurements and findings (card vs bus, splits, context capacity, PCIe) are in benchmarking `RIG_PERFORMANCE.md` and the generated `results/RUNTIME_REFERENCE.md`.
+
 Measured tok/s for multi-GPU tensor-parallel splits on the current rig. All tests
 used llama-server in Docker, `--split-mode layer`, `--ctx-size 4096`,
 `--flash-attn on`, 512-token generation, best-of-two warm runs.
