@@ -52,6 +52,8 @@ CONFIG_PATH = LOCAL / "agents" / "config.json"
 RUN_RUNTIME = LOCAL / "scripts" / "llama_runtime" / "run_runtime.sh"
 # GPU leases and claims, rig-local (hw_state.py); mirrored to SHARED/gpus/ for orchestration workers.
 HW_STATE_ROOT = LOCAL / "brain" / "hw"
+# The cards seen at the last boot (index, UUID, bus), so a scan can say what changed; never a requirement.
+LAYOUT_PATH = HW_STATE_ROOT / "gpu_layout.json"
 
 # Stack modes run startup.py under these systemd units (installed from ./systemd/).
 STACK_UNITS = {
@@ -193,30 +195,82 @@ def run(cmd: list[str], check: bool = True, timeout: int | None = 60) -> subproc
     return proc
 
 
-def expected_gpu_ids() -> list[int]:
+def config_gpu_ids() -> list[int]:
+    """Cards the orchestration stack's config names (brain + workers). Only that stack needs them."""
     cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     ids = [int(g) for g in cfg["brain"]["gpus"]]
     ids += [int(g["id"]) for g in cfg.get("gpus", [])]
     return sorted(ids)
 
 
+def read_layout() -> dict:
+    try:
+        return json.loads(LAYOUT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def layout_changes(before: list[dict], now: list[dict]) -> list[str]:
+    """What differs between two scans, by card UUID: cards gone, new cards, cards with a new index or bus."""
+    old = {g["uuid"]: g for g in before if g.get("uuid")}
+    if not old:
+        return []  # nothing recorded yet (first boot with a layout): nothing to compare against
+    new = {g["uuid"]: g for g in now if g.get("uuid")}
+    out = [f"gone: GPU{g['index']} {g['name']} ({g.get('bus', '?')})" for u, g in old.items() if u not in new]
+    out += [f"new: GPU{g['index']} {g['name']} ({g.get('bus', '?')})" for u, g in new.items() if u not in old]
+    for u in old.keys() & new.keys():
+        a, b = old[u], new[u]
+        if (a["index"], a.get("bus")) != (b["index"], b.get("bus")):
+            out.append(f"moved: {b['name']} GPU{a['index']} ({a.get('bus', '?')}) -> GPU{b['index']} ({b.get('bus', '?')})")
+    return out
+
+
 def gpu_check() -> dict:
+    """Scan what the rig has now. Not ok only when the driver reports a fault (a card off the bus, nvidia-smi
+    failing) or sees no card: a different layout from last time, or cards the config names but this rig does
+    not have, are notes, not faults. Changes are against the layout recorded at boot (`cmd_boot`)."""
     proc = run(
-        ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used",
+        ["nvidia-smi", "--query-gpu=index,uuid,name,pci.bus_id,memory.total,memory.used",
          "--format=csv,noheader,nounits"],
         check=False,
     )
     visible = []
     for line in proc.stdout.splitlines():
         parts = [p.strip() for p in line.split(",")]
-        if len(parts) == 4 and parts[0].isdigit():
-            visible.append({"index": int(parts[0]), "name": parts[1],
-                            "total_mb": int(parts[2]), "used_mb": int(parts[3])})
-    expected = expected_gpu_ids()
-    missing = sorted(set(expected) - {g["index"] for g in visible})
+        if len(parts) == 6 and parts[0].isdigit():
+            visible.append({"index": int(parts[0]), "uuid": parts[1], "name": parts[2],
+                            "bus": parts[3].removeprefix("00000000:"),
+                            "total_mb": int(parts[4]), "used_mb": int(parts[5])})
     errors = [l.strip() for l in proc.stderr.splitlines() if l.strip()]
-    return {"ok": not missing, "expected": len(expected), "visible": visible,
-            "missing": missing, "errors": errors[:5]}
+    if proc.returncode != 0 and not errors:
+        errors = [f"nvidia-smi exited {proc.returncode}"]
+    if not visible and not errors:
+        errors = ["no GPU visible"]
+    ids = {g["index"] for g in visible}
+    try:
+        not_present = sorted(set(config_gpu_ids()) - ids)
+    except (OSError, ValueError, KeyError):
+        not_present = []
+    layout = read_layout()
+    return {"ok": not errors, "visible": visible, "ids": sorted(ids), "errors": errors[:5],
+            "changes": layout_changes(layout.get("gpus", []), visible),
+            "since_boot": layout.get("changes_at_boot", []), "config_not_present": not_present}
+
+
+def gpu_notes(g: dict) -> list[str]:
+    notes = [f"changed since boot: {c}" for c in g["changes"]]
+    notes += [f"changed at boot from the last layout: {c}" for c in g["since_boot"]]
+    if g["config_not_present"]:
+        notes.append(f"orchestration config names GPU {g['config_not_present']}, not present on this rig")
+    return notes
+
+
+def check_gpu_ids(gpus, g: dict | None = None) -> None:
+    """Refuse cards this rig does not have now (by index)."""
+    g = g or gpu_check()
+    unknown = sorted({int(x) for x in gpus} - set(g["ids"]))
+    if unknown:
+        raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {g['ids']}")
 
 
 def http_get(url: str, timeout: float = 2.0) -> tuple[int, str]:
@@ -436,7 +490,11 @@ def cmd_start_stack(args) -> int:
             raise RigError(f"{args.mode} needs network storage at {SHARED}, which is not available")
         g = gpu_check()
         if not g["ok"]:
-            raise RigError(f"GPU check failed: missing {g['missing']} {g['errors']}; power-cycle the rig")
+            raise RigError(f"GPU fault: {g['errors']}; power-cycle the rig")
+        # The stack runs a worker per configured card, so here the config's cards are a requirement.
+        if g["config_not_present"]:
+            raise RigError(f"{args.mode} config names GPU {g['config_not_present']}, not present (rig has "
+                           f"{g['ids']}); update {CONFIG_PATH} for this layout")
         say(f"starting {args.mode}...")
         write_state(mode=args.mode, status="starting")
         try:
@@ -601,7 +659,9 @@ def claim_remote(requested: list[str], force: bool, placement: dict | None = Non
     entering = st["mode"] == "idle"
     if entering:
         if not g["ok"]:
-            raise RigError(f"GPU check failed: missing {g['missing']} {g['errors']}; power-cycle the rig")
+            raise RigError(f"GPU fault: {g['errors']}; power-cycle the rig")
+        for note in gpu_notes(g):
+            say(f"  note: {note}")
         st = {"mode": mode, "status": "loading", "since": now_iso(), "from": caller(), "profiles": {}}
 
     loaded = st.setdefault("profiles", {})
@@ -818,7 +878,8 @@ def status_payload() -> dict:
     return {
         "mode": st["mode"], "status": st["status"], "since": st.get("since"), "from": st.get("from"),
         "last_error": st.get("error"), "profiles": profiles, "detail": st.get("detail"),
-        "gpus": {"visible": len(g["visible"]), "expected": g["expected"], "missing": g["missing"]},
+        "gpus": {"visible": len(g["visible"]), "ids": g["ids"], "ok": g["ok"], "errors": g["errors"],
+                 "notes": gpu_notes(g)},
     }
 
 
@@ -835,7 +896,9 @@ def cmd_status(args) -> int:
     if s["last_error"]:
         say(f"last error: {s['last_error']}")
     g = s["gpus"]
-    say(f"gpus: {g['visible']}/{g['expected']} visible" + (f"  MISSING {g['missing']}" if g["missing"] else ""))
+    say(f"gpus: {g['visible']} visible {g['ids']}" + (f"  FAULT {g['errors']}" if g["errors"] else ""))
+    for note in g["notes"]:
+        say(f"  note: {note}")
     gs = guard_summary()
     say(f"guard: {gs['level']} (loads {'admitted' if gs['loads_admitted'] else 'held'}) {gs['why']}")
     ports = live_ports()
@@ -880,9 +943,7 @@ def cmd_lease(args) -> int:
                 spec = json.loads(args.spec or "")
             except ValueError as exc:
                 raise hw_state.StateError("invalid", f"--spec is not JSON: {exc}") from exc
-            unknown = sorted(set(int(g) for g in spec.get("gpu_ids", [])) - set(expected_gpu_ids()))
-            if unknown:
-                raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {expected_gpu_ids()}")
+            check_gpu_ids(spec.get("gpu_ids", []))
             spec.setdefault("metadata", {})["controller_host"] = caller()
             return emit({"lease": hs.acquire(spec)})
         if args.action == "renew":
@@ -904,16 +965,12 @@ def cmd_claim(args) -> int:
         open_plan().require_active(args.controller)
         if args.action == "add":
             gpus = [int(g) for g in args.gpus.split(",")]
-            unknown = sorted(set(gpus) - set(expected_gpu_ids()))
-            if unknown:
-                raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {expected_gpu_ids()}")
+            check_gpu_ids(gpus)
             return emit({"claim": hs.add_claim(args.name, gpus, args.note, args.by or caller(), owner=args.owner,
                                                ttl_s=args.ttl, purpose=args.purpose, model=args.model)})
         if args.action == "extend":
             gpus = [int(g) for g in args.gpus.split(",")]
-            unknown = sorted(set(gpus) - set(expected_gpu_ids()))
-            if unknown:
-                raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {expected_gpu_ids()}")
+            check_gpu_ids(gpus)
             return emit({"claim": hs.extend_claim(args.name, gpus, args.owner)})
         if args.action == "renew":
             return emit({"claim": hs.renew_claim(args.name, args.owner, args.ttl)})
@@ -929,16 +986,21 @@ def cmd_kill(args) -> int:
     still queued or running in the plan for these cards is not cancelled here (rigctl cancel ITEM)."""
     try:
         gpus = sorted({int(g) for g in args.gpus.split(",")})
-        unknown = sorted(set(gpus) - set(expected_gpu_ids()))
+        hs = open_hw_state()
+        containers = llama_containers()
+        # A card that dropped off the bus is still killable while something holds it.
+        held = {int(i) for c in containers for i in c["gpus"]}
+        held |= {int(i) for x in hs.leases() + hs.claims() for i in x.get("gpu_ids", [])}
+        known = set(gpu_check()["ids"]) | held
+        unknown = sorted(set(gpus) - known)
         if unknown:
-            raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {expected_gpu_ids()}")
+            raise hw_state.StateError("invalid", f"unknown GPU(s) {unknown}; rig has {sorted(known)}")
         open_plan().require_active(args.controller)
         stopped = []
-        for c in llama_containers():
+        for c in containers:
             if set(c["gpus"]) & set(gpus):
                 run(["docker", "rm", "-f", c["name"]], check=False, timeout=60)
                 stopped.append(c["name"])
-        hs = open_hw_state()
         released = []
         for lease in hs.leases():
             if set(int(g) for g in lease.get("gpu_ids", [])) & set(gpus):
@@ -1110,10 +1172,11 @@ def cmd_observe(_args) -> int:
         record = {"leases": [], "claims": [], "state_error": str(exc)}
     containers = llama_containers()
     running = {c["name"] for c in containers}
+    g = gpu_check()
     print(json.dumps({
         **record,
         "observed_at": now_iso(),
-        "expected_gpus": expected_gpu_ids(),
+        "gpu_scan": {"ids": g["ids"], "ok": g["ok"], "errors": g["errors"], "notes": gpu_notes(g)},
         "gpus": gpu_telemetry(),
         "containers": containers,
         "ports": {str(p): m for p, m in live_ports().items()},
@@ -1213,14 +1276,25 @@ def hold_plan_for_boot() -> None:
 
 
 def cmd_boot(_args) -> int:
-    """Called by rig-boot.service at power-on: record idle + GPU health, hold the plan for the controller."""
+    """Called by rig-boot.service at power-on: record idle + GPU health, hold the plan for the controller.
+    The cards seen now become the layout later scans compare against; what changed from the previous boot's
+    layout is kept with it as a note (a card may have dropped out, or been moved on purpose)."""
     with Lock():
         g = gpu_check()
         write_policy("neutral", "rig_idle")
-        err = None if g["ok"] else f"boot GPU check: missing {g['missing']}"
+        err = None if g["ok"] else f"boot GPU fault: {g['errors']}"
         write_state(mode="idle", status="idle", **({"error": err} if err else {}), **{"from": "boot"})
+        if g["visible"]:
+            write_atomic(LAYOUT_PATH, json.dumps({
+                "recorded_at": now_iso(), "boot_id": boot_id(), "changes_at_boot": g["changes"],
+                "gpus": [{k: x[k] for k in ("index", "uuid", "name", "bus", "total_mb")} for x in g["visible"]],
+            }, indent=2) + "\n")
     hold_plan_for_boot()
-    say(f"rig idle; gpus {len(g['visible'])}/{g['expected']}" + (f" MISSING {g['missing']}" if g["missing"] else ""))
+    say(f"rig idle; gpus {len(g['visible'])} {g['ids']}" + (f" FAULT {g['errors']}" if g["errors"] else ""))
+    for c in g["changes"]:
+        say(f"  note: changed from the last layout: {c}")
+    if g["config_not_present"]:
+        say(f"  note: orchestration config names GPU {g['config_not_present']}, not present on this rig")
     return 0 if g["ok"] else EXIT_FAIL
 
 

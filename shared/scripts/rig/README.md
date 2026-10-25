@@ -93,3 +93,15 @@ executor's start, whichever runs first in the new boot): the item that was runni
 resumed it (`rig plan resume --controller ID`). The controller keeps a copy of the report; if the
 rig's plan is behind it (lost file), the controller writes it back (`rig plan restore`). Details:
 llm-gateway `docs/MANAGER.md` rule 1c.
+
+## The cards are whatever the scan finds (2026-10-25)
+
+The rig works with the cards `nvidia-smi` lists now, on any layout. A GPU fault blocks loads (nvidia-smi
+failing or reporting a card it cannot reach, which is a card off the bus: power-cycle), and so does seeing no
+card at all. A different layout does not block. `rig boot` records the cards it sees (index, UUID, PCI bus) in
+rig-local `brain/hw/gpu_layout.json`, along with what changed from the previous boot's layout (cards gone, new,
+or moved to another index or bus). `rig status`, `rig observe` (`gpu_scan`) and the start of a load report those
+changes as notes. Leases, claims and placements are checked against the cards present now. `kill` also takes a
+card that is no longer visible while a runtime, lease or claim still holds it. Only the orchestration stack
+needs the cards its `agents/config.json` names, so `rig start orchestration` refuses when any of them is absent.
+GPU numbers follow PCI bus order: after moving cards, check which index each card has before pinning one.
