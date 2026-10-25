@@ -230,17 +230,20 @@ def gpu_check() -> dict:
     failing) or sees no card: a different layout from last time, or cards the config names but this rig does
     not have, are notes, not faults. Changes are against the layout recorded at boot (`cmd_boot`)."""
     proc = run(
-        ["nvidia-smi", "--query-gpu=index,uuid,name,pci.bus_id,memory.total,memory.used",
-         "--format=csv,noheader,nounits"],
+        ["nvidia-smi", "--query-gpu=index,uuid,name,pci.bus_id,memory.total,memory.used,"
+         "pcie.link.gen.max,pcie.link.width.current", "--format=csv,noheader,nounits"],
         check=False,
     )
     visible = []
     for line in proc.stdout.splitlines():
         parts = [p.strip() for p in line.split(",")]
-        if len(parts) == 6 and parts[0].isdigit():
-            visible.append({"index": int(parts[0]), "uuid": parts[1], "name": parts[2],
-                            "bus": parts[3].removeprefix("00000000:"),
-                            "total_mb": int(parts[4]), "used_mb": int(parts[5])})
+        if len(parts) == 8 and parts[0].isdigit():
+            bus = parts[3].removeprefix("00000000:")
+            visible.append({"index": int(parts[0]), "uuid": parts[1], "name": parts[2], "bus": bus,
+                            "total_mb": int(parts[4]), "used_mb": int(parts[5]),
+                            "link_gen": int(parts[6]) if parts[6].isdigit() else None,
+                            "link_width": int(parts[7]) if parts[7].isdigit() else None,
+                            **pci_route(bus)})
     errors = [l.strip() for l in proc.stderr.splitlines() if l.strip()]
     if proc.returncode != 0 and not errors:
         errors = [f"nvidia-smi exited {proc.returncode}"]
@@ -257,8 +260,33 @@ def gpu_check() -> dict:
             "since_boot": layout.get("changes_at_boot", []), "config_not_present": not_present}
 
 
+def pci_route(bus: str) -> dict:
+    """The card's way to the CPU from sysfs: its root port, and the bridges in between (a PCIe switch on the
+    board shares one uplink between its slots; on the B250 Mining Expert, slots C17/C18 sit behind a gen 1 one)."""
+    try:
+        parts = Path(f"/sys/bus/pci/devices/0000:{bus.lower()}").resolve().parts
+    except OSError:
+        return {"root_port": None, "via": []}
+    hops = [p.removeprefix("0000:") for p in parts if len(p) == 12 and p.startswith("0000:") and p[7] == ":"]
+    return {"root_port": hops[0] if len(hops) > 1 else None, "via": hops[1:-1]}
+
+
+def link_notes(visible: list[dict]) -> list[str]:
+    """Cards on a slower path than the rest: behind a switch, or trained below the best gen any card reached."""
+    best = max((g["link_gen"] for g in visible if g.get("link_gen")), default=None)
+    out = []
+    for g in visible:
+        slow = g.get("link_gen") and best and g["link_gen"] < best
+        if g.get("via") or slow:
+            where = f"behind a PCIe switch on root port {g['root_port']}" if g.get("via") else f"root port {g.get('root_port')}"
+            out.append(f"GPU{g['index']} {g['name']} is {where}, link gen {g.get('link_gen')} x{g.get('link_width')}"
+                       + (f" (others reach gen {best})" if slow else ""))
+    return out
+
+
 def gpu_notes(g: dict) -> list[str]:
-    notes = [f"changed since boot: {c}" for c in g["changes"]]
+    notes = link_notes(g["visible"])
+    notes += [f"changed since boot: {c}" for c in g["changes"]]
     notes += [f"changed at boot from the last layout: {c}" for c in g["since_boot"]]
     if g["config_not_present"]:
         notes.append(f"orchestration config names GPU {g['config_not_present']}, not present on this rig")
@@ -1287,12 +1315,15 @@ def cmd_boot(_args) -> int:
         if g["visible"]:
             write_atomic(LAYOUT_PATH, json.dumps({
                 "recorded_at": now_iso(), "boot_id": boot_id(), "changes_at_boot": g["changes"],
-                "gpus": [{k: x[k] for k in ("index", "uuid", "name", "bus", "total_mb")} for x in g["visible"]],
+                "gpus": [{k: x[k] for k in ("index", "uuid", "name", "bus", "total_mb", "link_gen", "link_width",
+                                            "root_port", "via")} for x in g["visible"]],
             }, indent=2) + "\n")
     hold_plan_for_boot()
     say(f"rig idle; gpus {len(g['visible'])} {g['ids']}" + (f" FAULT {g['errors']}" if g["errors"] else ""))
     for c in g["changes"]:
         say(f"  note: changed from the last layout: {c}")
+    for n in link_notes(g["visible"]):
+        say(f"  note: {n}")
     if g["config_not_present"]:
         say(f"  note: orchestration config names GPU {g['config_not_present']}, not present on this rig")
     return 0 if g["ok"] else EXIT_FAIL

@@ -98,10 +98,12 @@ llm-gateway `docs/MANAGER.md` rule 1c.
 
 The rig works with the cards `nvidia-smi` lists now, on any layout. A GPU fault blocks loads (nvidia-smi
 failing or reporting a card it cannot reach, which is a card off the bus: power-cycle), and so does seeing no
-card at all. A different layout does not block. `rig boot` records the cards it sees (index, UUID, PCI bus) in
+card at all. A different layout does not block. `rig boot` records the cards it sees (index, UUID, PCI bus, link gen and
+width, root port, and any bridges in between, which mark a card behind an on-board PCIe switch) in
 rig-local `brain/hw/gpu_layout.json`, along with what changed from the previous boot's layout (cards gone, new,
 or moved to another index or bus). `rig status`, `rig observe` (`gpu_scan`) and the start of a load report those
-changes as notes. Leases, claims and placements are checked against the cards present now. `kill` also takes a
+changes as notes, plus any card behind a switch or trained below the best link gen of the others (on this
+board, slots C17/C18: benchmarking `RIG_PERFORMANCE.md`). Leases, claims and placements are checked against the cards present now. `kill` also takes a
 card that is no longer visible while a runtime, lease or claim still holds it. Only the orchestration stack
 needs the cards its `agents/config.json` names, so `rig start orchestration` refuses when any of them is absent.
 GPU numbers follow PCI bus order: after moving cards, check which index each card has before pinning one.
