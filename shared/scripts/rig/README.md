@@ -73,7 +73,14 @@ sections 10-11):
 
 Open: what power/thermal critical should do; `fail_closed` when the guard is down; VRAM and RAM fit
 before placement; one stop path for every rig job; local results fallback when the drive is gone;
-serialized EvalPlus scoring (run notes section 3).
+serialized EvalPlus scoring (run notes section 3); one fan control for every card.
+
+Fan control (tested 2026-10-25, driver 580): NVML sets fans headless, as root, with no X server or Coolbits,
+through `libnvidia-ml.so.1`: `nvmlDeviceGetNumFans`, `nvmlDeviceGetMinMaxFanSpeed`, `nvmlDeviceGetFanSpeed_v2` /
+`nvmlDeviceGetTargetFanSpeed` per fan, `nvmlDeviceSetFanSpeed_v2(fan, pct)`, and `nvmlDeviceSetDefaultFanSpeed_v2`
+back to the card's curve (also `nvmlDeviceGetFanControlPolicy_v2` / `SetFanControlPolicy`). A GTX 1060 took 100%
+and back to auto; the setting does not survive a reboot. The way to unify control across cards (nvidia-settings
+needs X), next to `hw_power.py`. A card that falls off the bus runs its fan at 100% by itself.
 
 ## Model loads from the manager (2026-10-18)
 
