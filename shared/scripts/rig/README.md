@@ -82,6 +82,28 @@ back to the card's curve (also `nvmlDeviceGetFanControlPolicy_v2` / `SetFanContr
 and back to auto; the setting does not survive a reboot. The way to unify control across cards (nvidia-settings
 needs X), next to `hw_power.py`. A card that falls off the bus runs its fan at 100% by itself.
 
+How it was done (2026-10-25): on the rig, as root, with the driver library through Python ctypes (no script
+is kept; this is all of it). The card is a GPU index as `nvidia-smi` numbers them now; check `rig status` first.
+
+```bash
+sudo python3 - 3 100 <<'EOF'      # GPU index, then a percent or "auto"
+import ctypes, sys
+nv = ctypes.CDLL("libnvidia-ml.so.1"); nv.nvmlInit_v2()
+h = ctypes.c_void_p(); nv.nvmlDeviceGetHandleByIndex_v2(int(sys.argv[1]), ctypes.byref(h))
+n = ctypes.c_uint(); nv.nvmlDeviceGetNumFans(h, ctypes.byref(n))
+for f in range(n.value):
+    if sys.argv[2] == "auto": nv.nvmlDeviceSetDefaultFanSpeed_v2(h, f)
+    else: nv.nvmlDeviceSetFanSpeed_v2(h, f, int(sys.argv[2]))
+nv.nvmlShutdown()
+EOF
+nvidia-smi --query-gpu=index,fan.speed --format=csv   # read back: it reaches the target in a few seconds
+```
+
+Return codes are not checked here (0 is success); read back with nvidia-smi. Put a card back on `auto` when
+done. On 2026-10-25 the white ASUS Dual 1060 fell off the bus 28 s after its first 100% (idle, in a C17/C18
+slot); a repeat at 100% for two minutes did not, and it later dropped under load in a direct slot, so the fan
+was not shown to be the cause.
+
 ## Model loads from the manager (2026-10-18)
 
 `rig start remote <id> --spec JSON --gpus G --port P --lease L` loads any registry model the rig manager
