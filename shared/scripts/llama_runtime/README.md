@@ -26,7 +26,7 @@ On the rig, with the rig idle (`rig stop`):
 cd ~/llm_orchestration/shared/scripts/llama_runtime
 ./upgrade_runtime.sh latest            # newest release tag, e.g. b11669
 ./upgrade_runtime.sh build b11669      # llama-runtime:b11669-candidate
-./upgrade_runtime.sh smoke b11669      # every model in use, on its lane; all must pass
+./upgrade_runtime.sh smoke bNNNNN --baseline /mnt/shared/logs/runtime_upgrades/b11669_20261025_192107.json
 ./upgrade_runtime.sh promote b11669    # tag stable, pin Dockerfile, set registry runtime_image
 ```
 
@@ -40,7 +40,7 @@ certify a candidate before promotion with `run_campaign.py ... --runtime-image <
 Smoke covers the models in use plus promotion-critical six-card Nemotron and split Mellum.
 For Mellum, record a baseline with the current stable image and pass it to the candidate
 smoke as `--baseline /mnt/shared/logs/runtime_upgrades/<stable-receipt>.json`. The
-candidate fails if Mellum decode is below 70% of the matched baseline. This guards
+candidate requires this baseline and fails if Mellum decode is below 70% of it. This guards
 against the upstream Mellum CUDA regression reported in
 https://github.com/ggml-org/llama.cpp/issues/30704. The b11669 baseline on
 2026-10-25 passed both: Nemotron six cards 201.8 s load, Mellum two 1060s

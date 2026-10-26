@@ -161,9 +161,15 @@ def main() -> int:
         baseline_data = json.loads(args.baseline.read_text(encoding="utf-8"))
         baseline = {r["model"]: r for r in baseline_data.get("results", [])}
     registry = model_library.load_registry()
+    selected = args.model or models_in_use()
+    if ("mellum2.1:12b-a2.5b" in selected
+            and args.image != registry.get("runtime_image")
+            and not args.baseline):
+        print("candidate Mellum smoke requires --baseline with a stable-image receipt", file=sys.stderr)
+        return 2
     config = json.loads((TREE / "agents" / "config.json").read_text(encoding="utf-8"))
     results = []
-    for model_id in args.model or models_in_use():
+    for model_id in selected:
         res = smoke(args.image, model_id, registry, config)
         old = baseline.get(model_id)
         if old and model_id == "mellum2.1:12b-a2.5b" and old.get("decode_tps") and res.get("decode_tps"):

@@ -40,7 +40,7 @@ case "${cmd}" in
     ;;
   smoke)
     need_version
-    "${PY}" "${HERE}/smoke_runtime.py" "llama-runtime:${version}-candidate"
+    "${PY}" "${HERE}/smoke_runtime.py" "llama-runtime:${version}-candidate" "${@:3}"
     ;;
   promote)
     need_version
