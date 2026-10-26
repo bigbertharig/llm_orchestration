@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -59,6 +60,17 @@ def models_in_use() -> list[str]:
     used += [rp["model"] for rp in remote_profiles.load().values()]
     used += PROMOTION_MODELS
     return list(dict.fromkeys(used))
+
+
+def replay_counts(gpus: str) -> dict[str, int]:
+    """Read NVIDIA PCIe replays so a candidate smoke records link instability."""
+    result = {}
+    for gpu in gpus.removeprefix("device=").split(","):
+        info = subprocess.run(["nvidia-smi", "-q", "-i", gpu], capture_output=True, text=True)
+        match = re.search(r"Replays Since Reset\s*:\s*(\d+)", info.stdout)
+        if match:
+            result[gpu] = int(match.group(1))
+    return result
 
 
 def post(path: str, body: dict) -> dict:
@@ -170,7 +182,14 @@ def main() -> int:
     config = json.loads((TREE / "agents" / "config.json").read_text(encoding="utf-8"))
     results = []
     for model_id in selected:
+        expected_gpus, _ = lane(registry["models"][model_id], model_id)
+        before = replay_counts(expected_gpus)
         res = smoke(args.image, model_id, registry, config)
+        after = replay_counts(expected_gpus)
+        res["pcie_replay_before"] = before
+        res["pcie_replay_after"] = after
+        res["pcie_replay_delta"] = {gpu: count - before[gpu] for gpu, count in after.items()
+                                    if gpu in before}
         old = baseline.get(model_id)
         if old and model_id == "mellum2.1:12b-a2.5b" and old.get("decode_tps") and res.get("decode_tps"):
             ratio = res["decode_tps"] / float(old["decode_tps"])

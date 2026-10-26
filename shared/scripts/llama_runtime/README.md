@@ -12,7 +12,7 @@ prints it. Profiles may not pin their own image (`model_library.py check` reject
   Pascal `sm_61` GTX 1060s. Change CUDA or the architectures only when the GPUs change.
 - `build_image.sh <tag>`: build `llama-runtime:<tag>-candidate` for a llama.cpp release tag
 - `smoke_runtime.py <image>`: load every model the roles and remote profiles use plus six-card Nemotron
-  and split Mellum, one at a time; check chat + completions and record Mellum decode; results in `/mnt/shared/logs/runtime_upgrades/`
+  and split Mellum, one at a time; check chat + completions, Mellum decode, and per-card PCIe replays; results in `/mnt/shared/logs/runtime_upgrades/`
 - `upgrade_runtime.sh`: the upgrade procedure below
 - `run_runtime.sh`: start one runtime container (defaults to the registry image)
 - `stop_runtime.sh`, `probe_runtime.sh`, `smoke_test.sh`: single-runtime helpers
