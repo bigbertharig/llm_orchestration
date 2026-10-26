@@ -2,7 +2,8 @@
 """Certify a llama-runtime image against every model the rig actually uses.
 
 The model list is every model named by a role in the benchmarking model library or by a remote
-profile llm-gateway offers (scripts/rig/remote_profiles.py). Each loads alone on its normal lane (3090, one 1060, or a 1060 pair) with its
+profile llm-gateway offers (scripts/rig/remote_profiles.py), plus promotion-critical
+Nemotron six-card and Mellum split loads. Each loads alone on its normal lane with its
 orchestration profile (default profile if it has none), must give a clean answer to the litmus
 question (no leaked reasoning) and answer a completion request, and is stopped before the next.
 Results go to the share under logs/runtime_upgrades/.
@@ -35,10 +36,15 @@ NAME = "llama-runtime-smoke"
 LOAD_TIMEOUT_S = 600
 LITMUS = "What is 15 * 37? Reply with ONLY the number."
 RESULTS_DIR = Path("/mnt/shared/logs/runtime_upgrades")
+PROMOTION_MODELS = ("nemotron-3.5-bolt:74b-a9b", "mellum2.1:12b-a2.5b")
+# The six-card Nemotron split was measured at 226,816 context on the current rig.
+NEMOTRON_SPLIT = "47,8,12,9,7,6"
 
 
-def lane(entry: dict) -> tuple[str, str | None]:
+def lane(entry: dict, model_id: str) -> tuple[str, str | None]:
     """(docker gpus, tensor split) for a model's normal placement."""
+    if model_id == "nemotron-3.5-bolt:74b-a9b":
+        return "device=0,1,2,3,4,5", NEMOTRON_SPLIT
     sched = entry.get("schedule", {})
     if sched.get("placement") == "split_gpu":
         return "device=1,3", "1,1"
@@ -51,6 +57,7 @@ def models_in_use() -> list[str]:
     roles = model_library.load_roles()
     used = [spec["model"] for spec in roles["roles"].values()]
     used += [rp["model"] for rp in remote_profiles.load().values()]
+    used += PROMOTION_MODELS
     return list(dict.fromkeys(used))
 
 
@@ -77,7 +84,7 @@ def smoke(image: str, model_id: str, registry: dict, config: dict) -> dict:
     entry = registry["models"][model_id]
     profile = "orchestration" if "orchestration" in entry["profiles"] else "default"
     r = model_library.resolve(model_id, profile, registry)
-    gpus, split = lane(entry)
+    gpus, split = lane(entry, model_id)
     split = r.get("tensor_split") or split
     gguf = str(resolve_hotset_gguf(r["gguf_path"], config))
     cmd = [str(HERE / "run_runtime.sh"), "--name", NAME, "--model", gguf, "--port", str(PORT),
@@ -109,6 +116,21 @@ def smoke(image: str, model_id: str, registry: dict, config: dict) -> dict:
         chat = post("/v1/chat/completions", {"messages": [{"role": "user", "content": LITMUS}],
                                              "max_tokens": 64, "temperature": 0})
         post("/v1/completions", {"prompt": "Say OK", "max_tokens": 4})
+        # The short litmus alone cannot catch the reported Mellum CUDA decode regression.
+        if model_id == "mellum2.1:12b-a2.5b":
+            started_decode = time.monotonic()
+            speed = post("/v1/completions", {
+                "prompt": "Continue this list with many more items: 1, 2, 3, 4, 5,",
+                "max_tokens": 128, "temperature": 0,
+            })
+            elapsed = time.monotonic() - started_decode
+            usage = speed.get("usage") or {}
+            tokens = int(usage.get("completion_tokens") or 0)
+            if tokens < 32:
+                raise RuntimeError(f"speed probe produced only {tokens} tokens")
+            timings = speed.get("timings") or {}
+            result["decode_tps"] = round(float(timings.get("predicted_per_second") or tokens / elapsed), 2)
+            result["decode_tokens"] = tokens
         content = str(chat["choices"][0]["message"].get("content") or "").strip()
         result["reply"] = content[:40]
         if "555" not in content or len(content) > 12 or "<think" in content:
@@ -126,17 +148,30 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("image")
     ap.add_argument("--model", action="append", default=[], help="limit to these model ids")
+    ap.add_argument("--baseline", type=Path, help="previous smoke JSON; reject Mellum decode below 70%%")
+    ap.add_argument("--min-speed-ratio", type=float, default=0.70)
     args = ap.parse_args()
 
     status = subprocess.run(["rig", "status", "--json"], capture_output=True, text=True)
     if status.returncode == 0 and json.loads(status.stdout).get("mode") != "idle":
         print("rig is not idle; run `rig stop` first", file=sys.stderr)
         return 2
+    baseline = {}
+    if args.baseline:
+        baseline_data = json.loads(args.baseline.read_text(encoding="utf-8"))
+        baseline = {r["model"]: r for r in baseline_data.get("results", [])}
     registry = model_library.load_registry()
     config = json.loads((TREE / "agents" / "config.json").read_text(encoding="utf-8"))
     results = []
     for model_id in args.model or models_in_use():
         res = smoke(args.image, model_id, registry, config)
+        old = baseline.get(model_id)
+        if old and model_id == "mellum2.1:12b-a2.5b" and old.get("decode_tps") and res.get("decode_tps"):
+            ratio = res["decode_tps"] / float(old["decode_tps"])
+            res["decode_ratio_vs_baseline"] = round(ratio, 3)
+            if ratio < args.min_speed_ratio:
+                res["ok"] = False
+                res["error"] = f"decode {ratio:.2f}x baseline, below {args.min_speed_ratio:.2f}x"
         results.append(res)
         state = "ok  " if res["ok"] else "FAIL"
         print(f"{state} {model_id:<22} {res['gpus']:<11} load {res.get('load_s', '-')}s  "

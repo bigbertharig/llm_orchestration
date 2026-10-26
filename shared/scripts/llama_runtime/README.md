@@ -11,8 +11,8 @@ prints it. Profiles may not pin their own image (`model_library.py check` reject
   and GPU architectures `61;86`. CUDA 12 is intentional: CUDA 13 removed support for the
   Pascal `sm_61` GTX 1060s. Change CUDA or the architectures only when the GPUs change.
 - `build_image.sh <tag>`: build `llama-runtime:<tag>-candidate` for a llama.cpp release tag
-- `smoke_runtime.py <image>`: load every model the roles and remote profiles use, one at a time
-  on its normal lane, and check chat + completions; results in `/mnt/shared/logs/runtime_upgrades/`
+- `smoke_runtime.py <image>`: load every model the roles and remote profiles use plus six-card Nemotron
+  and split Mellum, one at a time; check chat + completions and record Mellum decode; results in `/mnt/shared/logs/runtime_upgrades/`
 - `upgrade_runtime.sh`: the upgrade procedure below
 - `run_runtime.sh`: start one runtime container (defaults to the registry image)
 - `stop_runtime.sh`, `probe_runtime.sh`, `smoke_test.sh`: single-runtime helpers
@@ -37,6 +37,13 @@ certify a candidate before promotion with `run_campaign.py ... --runtime-image <
 `promote` keeps exactly two images: the new one and the previous one as rollback. Rollback: set
 `runtime_image` back to the previous image in `model_registry.json`.
 
-Smoke covers the models in use (every model a role or remote profile names), not every tested
-model. When a new build changes a model's behaviour, fix that model's settings in the registry
+Smoke covers the models in use plus promotion-critical six-card Nemotron and split Mellum.
+For Mellum, record a baseline with the current stable image and pass it to the candidate
+smoke as `--baseline /mnt/shared/logs/runtime_upgrades/<stable-receipt>.json`. The
+candidate fails if Mellum decode is below 70% of the matched baseline. This guards
+against the upstream Mellum CUDA regression reported in
+https://github.com/ggml-org/llama.cpp/issues/30704. The b11669 baseline on
+2026-10-25 passed both: Nemotron six cards 201.8 s load, Mellum two 1060s
+98.6 s load and 49.62 decode tok/s. Receipt:
+`/mnt/shared/logs/runtime_upgrades/b11669_20261025_192107.json`. When a new build changes a model's behaviour, fix that model's settings in the registry
 (example: b11669 needed `--reasoning off` instead of `--reasoning-budget 0` for Gemma 4).
