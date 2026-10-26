@@ -31,7 +31,7 @@ class Phase3BrainRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(config["runtime_host"], "http://localhost:11434")
-        self.assertEqual(config["model_search_roots"], ["/mnt/shared/models"])
+        self.assertEqual(config["model_search_roots"], ["/data/model-hotset", "/home/bryan/model-hotset", "/mnt/shared/models"])
 
     def test_startup_uses_running_llama_brain_container_for_preload_detection(self):
         original_run = startup.subprocess.run

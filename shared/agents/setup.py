@@ -212,6 +212,8 @@ def build_config(assignment, runtime, system):
         "model_catalog_path": "models.catalog.json",
         "runtime_backend": "llama",
         "model_search_roots": [
+            "/data/model-hotset",
+            "/home/bryan/model-hotset",
             "/mnt/shared/models",
         ],
         "runtime_host": runtime["host"],

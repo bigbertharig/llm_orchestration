@@ -10,6 +10,7 @@
   "permissions_path": "permissions/",
   "runtime_backend": "llama",
   "model_search_roots": [
+    "/data/model-hotset",
     "/home/bryan/model-hotset",
     "/mnt/shared/models"
   ],

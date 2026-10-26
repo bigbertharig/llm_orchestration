@@ -11,6 +11,8 @@
   "permissions_path": "permissions/",
   "model_catalog_path": "models.catalog.json",
   "model_search_roots": [
+    "/data/model-hotset",
+    "/home/bryan/model-hotset",
     "/mnt/shared/models"
   ],
   "runtime_host": "http://localhost:11434",
