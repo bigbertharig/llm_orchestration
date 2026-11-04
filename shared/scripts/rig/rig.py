@@ -579,6 +579,10 @@ def spec_profile(pid: str, spec: dict) -> dict:
     missing = [k for k in ("model", "gguf_path", "ctx_size") if not spec.get(k)]
     if missing:
         raise RigError(f"spec for {pid} lacks {missing}")
+    if spec.get("allow_partial_offload"):
+        layers = spec.get("n_gpu_layers")
+        if not isinstance(layers, int) or layers < 1:
+            raise RigError("partial offload needs a positive integer n_gpu_layers")
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     return {"batch_size": 64, "parallel": 1, "extra_args": [], **spec, "id": pid, "spec": True,
             "gguf_path": str(resolve_hotset_gguf(spec["gguf_path"], config))}
@@ -616,6 +620,8 @@ def launch_profile(p: dict, gpus: list[int], port: int, lease: str | None = None
         "--ctx-size", str(p["ctx_size"]), "--batch-size", str(p["batch_size"]),
         "--parallel", str(p["parallel"]), "--memory-limit", REMOTE_MEMORY_LIMIT,
     ]
+    if p.get("allow_partial_offload"):
+        cmd += ["--memory-swap", REMOTE_MEMORY_LIMIT]  # no disk swap for CPU layers
     if p.get("n_gpu_layers") is not None:
         cmd += ["--n-gpu-layers", str(p["n_gpu_layers"])]
     if p.get("tensor_split"):
@@ -750,7 +756,9 @@ def claim_remote(requested: list[str], force: bool, placement: dict | None = Non
         loaded[pid] = {"model": p["model"], "port": port, "gpus": gpus, "ctx_size": p["ctx_size"],
                        "state": "loading", "container": REMOTE_CONTAINER_PREFIX + pid, "since": now_iso(),
                        "from": caller(), "lease": (placement or {}).get("lease"),
-                       **({"spec": True, "tensor_split": p.get("tensor_split")} if p.get("spec") else {})}
+                       **({"spec": True, "tensor_split": p.get("tensor_split"),
+                            "allow_partial_offload": bool(p.get("allow_partial_offload")),
+                            "n_gpu_layers": p.get("n_gpu_layers")} if p.get("spec") else {})}
         save_state(refresh_remote_status(st))
         try:
             launch_profile(p, gpus, port, (placement or {}).get("lease"), (placement or {}).get("cache_ram"))
@@ -760,6 +768,18 @@ def claim_remote(requested: list[str], force: bool, placement: dict | None = Non
     if loaded:
         save_state(refresh_remote_status(st))
     return wanted, None
+
+
+def partial_ready_error(pid: str, entry: dict, info: dict, mem_available_mb: int | None) -> str | None:
+    """Reject a partial load unless the actual layers, context and host reserve match."""
+    requested = entry.get("n_gpu_layers")
+    if info["offloaded"] != requested or info["layers"] is None:
+        return f"{pid}: partial offload mismatch: requested {requested}, {hw_loadlog.summary(info)}"
+    if info["n_ctx"] != entry["ctx_size"]:
+        return f"{pid}: context mismatch: requested {entry['ctx_size']}, got {info['n_ctx']}"
+    if mem_available_mb is None or mem_available_mb < 4096:
+        return f"{pid}: less than 4096 MB host RAM available after partial load ({mem_available_mb})"
+    return None
 
 
 def wait_remote(pid: str) -> str | None:
@@ -773,7 +793,15 @@ def wait_remote(pid: str) -> str | None:
             return None
         if http_get(f"http://127.0.0.1:{entry['port']}/health")[0] == 200:
             info = load_info(entry)
-            if info["offloaded"] is not None and not info["full_offload"]:
+            partial = entry.get("allow_partial_offload", False)
+            if partial:
+                mem = hw_guard.memory_sample().get("mem_available_mb")
+                err = partial_ready_error(pid, entry, info, mem)
+                if err:
+                    with Lock():
+                        drop_remote_profile(read_state(), pid, error=err[:800])
+                    return err
+            elif info["offloaded"] is not None and not info["full_offload"]:
                 err = f"{pid}: refused, not fully on the GPUs: {hw_loadlog.summary(info)}"
                 with Lock():
                     drop_remote_profile(read_state(), pid, error=err[:800])
