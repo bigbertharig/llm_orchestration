@@ -106,3 +106,7 @@ llm_orchestration/
 ## License
 
 MIT
+
+## Managed Strata runtime
+
+The rig's `rig start remote <id> --spec ...` path accepts `backend: strata` from the gateway manager. The rig uses the pinned Strata control under `/data/bench-staging/strata-v0.2.10`, launches only a registered pack on GPU 0, verifies API health and at least 4 GiB available host RAM, records the upstream model id, and stops the engine when the profile unloads. The existing rig plan, GPU lease, mode, and guard admission still own the hardware. A second Strata engine is refused. Qwen3.8 requires its prepared expert pack on disk; the load path does not download or repack one.

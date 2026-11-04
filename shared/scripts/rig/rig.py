@@ -72,6 +72,10 @@ BRAIN_PORT = 11434
 REMOTE_PORTS = range(11434, 11442)
 REMOTE_CONTAINER_PREFIX = "rig-remote-"
 REMOTE_MEMORY_LIMIT = "20g"
+STRATA_CONTROL = Path("/data/bench-staging/strata-v0.2.10/control/bin/strata")
+STRATA_COMPONENTS = Path("/data/bench-staging/strata-v0.2.10/components")
+STRATA_HOME = Path("/data/bench-staging/strata-v0.2.10/home-rig")
+
 # A GPU counts as free for remote placement only if nearly empty (catches strays).
 GPU_FREE_MAX_USED_MB = 1000
 STACK_READY_TIMEOUT_S = 600
@@ -437,8 +441,22 @@ def unit_active(unit: str) -> bool:
 
 # ---------------------------------------------------------------- stop
 
+def strata_env() -> dict[str, str]:
+    return {**os.environ, "STRATA_HOME": str(STRATA_HOME),
+            "STRATA_COMPONENTS_DIR": str(STRATA_COMPONENTS), "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+
+
+def stop_strata() -> None:
+    proc = subprocess.run([str(STRATA_CONTROL), "launch", "--stop", "--output", "json"],
+                          env=strata_env(), capture_output=True, text=True, timeout=90)
+    if proc.returncode:
+        raise RigError(f"Strata stop failed ({proc.returncode}): {proc.stderr[-800:]}")
+
+
 def stop_everything() -> None:
     """Stop any mode and return to idle. Caller holds the lock."""
+    if any(e.get("backend") == "strata" for e in read_state().get("profiles", {}).values()):
+        stop_strata()
     for unit in STACK_UNITS.values():
         if unit_active(unit):
             say(f"  stopping {unit}")
@@ -458,7 +476,10 @@ def drop_remote_profile(state: dict, pid: str, error: str | None = None) -> dict
     """Unload one remote profile; go idle when none remain. Caller holds the lock."""
     entry = state.get("profiles", {}).pop(pid, None)
     if entry:
-        run(["docker", "rm", "-f", entry["container"]], check=False, timeout=60)
+        if entry.get("backend") == "strata":
+            stop_strata()
+        else:
+            run(["docker", "rm", "-f", entry["container"]], check=False, timeout=60)
     if error:
         state["error"] = error
     if not state.get("profiles"):
@@ -583,6 +604,20 @@ def spec_profile(pid: str, spec: dict) -> dict:
         layers = spec.get("n_gpu_layers")
         if not isinstance(layers, int) or layers < 1:
             raise RigError("partial offload needs a positive integer n_gpu_layers")
+    if spec.get("backend") == "strata":
+        cfg = spec.get("strata") or {}
+        if cfg.get("family") not in {"qwen", "qwen36"} or not cfg.get("model"):
+            raise RigError("Strata spec needs a registered family and model")
+        model_path = Path(str(cfg.get("model_path", "")))
+        if not model_path.is_absolute() or not model_path.exists() or not model_path.is_relative_to("/data/model-hotset"):
+            raise RigError("Strata model_path must exist under /data/model-hotset")
+        if cfg.get("data_dir") and not Path(cfg["data_dir"]).is_dir():
+            raise RigError("Strata data_dir is missing")
+        if cfg.get("prepared_experts_path") and not Path(cfg["prepared_experts_path"]).is_file():
+            raise RigError("Strata prepared expert pack is missing")
+        budget = cfg.get("resident_budget_gib")
+        if budget is not None and not (0 < float(budget) <= 26):
+            raise RigError("Strata resident_budget_gib must be 0..26")
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     return {"batch_size": 64, "parallel": 1, "extra_args": [], **spec, "id": pid, "spec": True,
             "gguf_path": str(resolve_hotset_gguf(spec["gguf_path"], config))}
@@ -612,6 +647,26 @@ def place_profile(profile: dict, free_gpus: list[dict]) -> list[int] | None:
 
 def launch_profile(p: dict, gpus: list[int], port: int, lease: str | None = None,
                    cache_ram: int | None = None) -> str:
+    if p.get("backend") == "strata":
+        if gpus != [0]:
+            raise RigError("validated Strata profiles require GPU 0 alone")
+        if not STRATA_CONTROL.is_file() or not STRATA_COMPONENTS.is_dir():
+            raise RigError("Strata control or components missing on rig")
+        cfg = p["strata"]
+        cmd = [str(STRATA_CONTROL), "launch", "--family", cfg["family"], "--model", cfg["model"],
+               "--model-path", cfg["model_path"], "--gpu", "0", "--backend", "nvidia",
+               "--vision", "off", "--context", str(p["ctx_size"]), "--kv", "int8",
+               "--parallel", "1", "--drafting", "off", "--mtp", "off", "--port", str(port),
+               "--access", "local", "--no-api-key", "--tune", "skip", "--no-tui", "--yes",
+               "--output", "json"]
+        if cfg.get("data_dir"):
+            cmd += ["--data-dir", cfg["data_dir"]]
+        if cfg.get("resident_budget_gib") is not None:
+            cmd += ["--set", f"resident-budget-gib={cfg['resident_budget_gib']:g}"]
+        proc = subprocess.run(cmd, env=strata_env(), capture_output=True, text=True, timeout=900)
+        if proc.returncode:
+            raise RigError(f"Strata launch failed ({proc.returncode}): {(proc.stdout + proc.stderr)[-1200:]}")
+        return "strata"
     name = REMOTE_CONTAINER_PREFIX + p["id"]
     run(["docker", "rm", "-f", name], check=False)
     cmd = [
@@ -699,6 +754,9 @@ def claim_remote(requested: list[str], force: bool, placement: dict | None = Non
         st = {"mode": mode, "status": "loading", "since": now_iso(), "from": caller(), "profiles": {}}
 
     loaded = st.setdefault("profiles", {})
+    if any(profiles[pid].get("backend") == "strata" for pid in wanted) and any(
+            e.get("backend") == "strata" for e in loaded.values()):
+        raise RigError("one Strata engine is already active", EXIT_NO_CAPACITY)
     # One load at a time: concurrent loads share disk and PCIe bandwidth and all finish slower.
     in_flight = [pid for pid, e in loaded.items() if e["state"] == "loading" and pid not in wanted]
     if in_flight:
@@ -754,7 +812,8 @@ def claim_remote(requested: list[str], force: bool, placement: dict | None = Non
         # Recorded before the launch: run_runtime.sh waits for the rig load lock and returns only once
         # the model serves, and observers (the Pi manager) need to see the load while it waits.
         loaded[pid] = {"model": p["model"], "port": port, "gpus": gpus, "ctx_size": p["ctx_size"],
-                       "state": "loading", "container": REMOTE_CONTAINER_PREFIX + pid, "since": now_iso(),
+                       "state": "loading", "container": REMOTE_CONTAINER_PREFIX + pid,
+                       "backend": p.get("backend", "llama"), "since": now_iso(),
                        "from": caller(), "lease": (placement or {}).get("lease"),
                        **({"spec": True, "tensor_split": p.get("tensor_split"),
                             "allow_partial_offload": bool(p.get("allow_partial_offload")),
@@ -792,6 +851,28 @@ def wait_remote(pid: str) -> str | None:
         if entry["state"] == "ready":
             return None
         if http_get(f"http://127.0.0.1:{entry['port']}/health")[0] == 200:
+            if entry.get("backend") == "strata":
+                mem = hw_guard.memory_sample().get("mem_available_mb")
+                if mem is None or mem < 4096:
+                    err = f"{pid}: Strata left less than 4096 MB host RAM available ({mem})"
+                    with Lock():
+                        drop_remote_profile(read_state(), pid, error=err)
+                    return err
+                upstream_model = served_model(entry["port"])
+                if not upstream_model or upstream_model == "?":
+                    err = f"{pid}: Strata health is ready but /v1/models has no model id"
+                    with Lock():
+                        drop_remote_profile(read_state(), pid, error=err)
+                    return err
+                with Lock():
+                    st = read_state()
+                    if pid in st.get("profiles", {}):
+                        st["profiles"][pid]["upstream_model"] = upstream_model
+                        st["profiles"][pid]["state"] = "ready"
+                        st["profiles"][pid]["fit"] = {"n_ctx": entry["ctx_size"], "backend": "strata",
+                                                       "mem_available_mb": mem}
+                        save_state(refresh_remote_status(st))
+                return None
             info = load_info(entry)
             partial = entry.get("allow_partial_offload", False)
             if partial:
@@ -816,12 +897,16 @@ def wait_remote(pid: str) -> str | None:
                         e["ctx_size"] = info["n_ctx"]  # what llama.cpp allocated
                     save_state(refresh_remote_status(st))
             return None
-        running = run(["docker", "inspect", "-f", "{{.State.Running}}", entry["container"]],
-                      check=False).stdout.strip()
+        running = ("true" if entry.get("backend") == "strata" else
+                   run(["docker", "inspect", "-f", "{{.State.Running}}", entry["container"]],
+                       check=False).stdout.strip())
         if running != "true" or time.time() > deadline:
-            logs = run(["docker", "logs", "--tail", "15", entry["container"]], check=False)
-            why = "container exited" if running != "true" else f"not ready within {REMOTE_READY_TIMEOUT_S}s"
-            err = f"{pid}: {why}: {hw_loadlog.summary(load_info(entry))}\n{logs.stdout}{logs.stderr}".strip()
+            if entry.get("backend") == "strata":
+                err = f"{pid}: Strata API not ready within {REMOTE_READY_TIMEOUT_S}s"
+            else:
+                logs = run(["docker", "logs", "--tail", "15", entry["container"]], check=False)
+                why = "container exited" if running != "true" else f"not ready within {REMOTE_READY_TIMEOUT_S}s"
+                err = f"{pid}: {why}: {hw_loadlog.summary(load_info(entry))}\n{logs.stdout}{logs.stderr}".strip()
             with Lock():
                 drop_remote_profile(read_state(), pid, error=err[:800])
             return err
@@ -928,7 +1013,8 @@ def status_payload() -> dict:
     st = read_state()
     g = gpu_check()
     profiles = [
-        {"id": pid, **{k: e.get(k) for k in ("model", "port", "gpus", "ctx_size", "state", "since", "from", "lease")}}
+        {"id": pid, **{k: e.get(k) for k in ("model", "port", "gpus", "ctx_size", "state", "since", "from", "lease",
+                                            "backend", "upstream_model")}}
         for pid, e in st.get("profiles", {}).items()
     ]
     return {
@@ -1242,10 +1328,13 @@ def cmd_observe(_args) -> int:
         "mode": st["mode"],
         "last_error": st.get("error"),
         # A profile whose container is no longer running (the guard stopped it, or it crashed) is "gone".
-        "profiles": {pid: {**{k: e.get(k) for k in ("port", "gpus", "state", "container", "lease", "model",
-                                                   "ctx_size", "tensor_split", "fit") if k in e or k in (
-                                                       "port", "gpus", "state", "container", "lease")},
-                           **({"state": "gone"} if e.get("state") == "ready" and e.get("container") not in running
+        "profiles": {pid: {**{k: e.get(k) for k in ("port", "gpus", "state", "container", "backend",
+                                                   "lease", "model", "ctx_size", "tensor_split", "fit",
+                                                   "upstream_model")
+                             if k in e or k in ("port", "gpus", "state", "container", "lease")},
+                           **({"state": "gone"} if e.get("state") == "ready" and
+                              (http_get(f"http://127.0.0.1:{e['port']}/health")[0] != 200
+                               if e.get("backend") == "strata" else e.get("container") not in running)
                               else {})}
                      for pid, e in st.get("profiles", {}).items()},
         "jobs": hw_jobs.jobs(),
