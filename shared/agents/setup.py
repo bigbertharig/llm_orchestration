@@ -213,7 +213,6 @@ def build_config(assignment, runtime, system):
         "runtime_backend": "llama",
         "model_search_roots": [
             "/data/model-hotset",
-            "/home/bryan/model-hotset",
             "/mnt/shared/models",
         ],
         "runtime_host": runtime["host"],

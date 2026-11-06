@@ -51,9 +51,9 @@ Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
   (`/media/bryan/shared`, `root_squash,anonuid=1000,anongid=1000` to `<rig-subnet>`). The Pi is the network
   leader: storage and time (chrony serves the LAN; the rig syncs only from the Pi).
 - The rig mounts it at `/mnt/shared` (NFS automount, soft, 10 min idle timeout). The rig itself is
-  self-contained for idle/remote mode: code, config, model library and the model hotset are rig-local
-  (`~/llm_orchestration`, `/home/bryan/model-hotset` SATA, `/data/model-hotset` NVMe); the share holds the
-  model archive and the orchestration/bench stack files.
+  self-contained for idle/remote mode: code, config, model library and the NVMe model cache are rig-local
+  (`~/llm_orchestration`, `/data/model-hotset`); the share holds the canonical model archive
+  and the orchestration/bench stack files.
 - Rig-local path convention: `/mnt/shared/...`
 - Pi/operator path convention: `/media/bryan/shared/...`
 - CPU worker path convention: usually `/media/bryan/shared/...` (some hosts may expose `/mnt/shared/...`)

@@ -73,7 +73,6 @@ fi
 chk "fstab has the Pi share automount" grep -qE '^10\.0\.0\.2:/media/bryan/shared[[:space:]]+/mnt/shared[[:space:]]+nfs' /etc/fstab
 chk "shared drive reachable (/mnt/shared/models)" timeout 20 ls /mnt/shared/models
 chk "NVMe hot-set /data/model-hotset" test -d /data/model-hotset
-chk "SATA hot-set ~/model-hotset" test -d /home/bryan/model-hotset
 extra=$(swapon --noheadings --show=NAME 2>/dev/null | grep -v -E '^(/dev/zram0|/swap.img)$' | xargs)
 [ -z "$extra" ] && ok "no extra swap (zram + /swap.img only)" || bad "no extra swap" "$extra (never add swap: RIG_PROJECT run notes section 11)"
 chk "zram swap active" bash -c 'swapon --noheadings --show=NAME | grep -qx /dev/zram0'

@@ -121,15 +121,15 @@ The gateway catalog and manager plan name GGUFs under
 `brain_core.resolve_hotset_gguf` before launching a container. It checks
 `shared/agents/config.json` `model_search_roots` in order and uses a file
 with the same relative path from the first local root where it exists.
-The archive path is the fallback. A manager plan showing
+The archive path is the canonical source. A manager plan showing
 `/mnt/shared/models/...` therefore does not prove the runtime read NFS;
 inspect the container's `--model` argument or mount for the actual source.
 
-The 2026-10-25 rig order is NVMe `/data/model-hotset`, then legacy SATA
-`/home/bryan/model-hotset`, then NFS `/mnt/shared/models`. Stage new
+The rig order is NVMe `/data/model-hotset`, then the canonical NFS archive
+`/mnt/shared/models`. Stage new
 GGUFs as a hidden temporary file in the matching directory, compare them
 with the archive copy, and rename into place only after verification.
-A missing local copy naturally falls back to the archive. The NVMe is a
+A missing local copy is resolved from the archive. The NVMe is a
 working set for the selected models, not a second full archive; review
 which models belong there as selections and capacity change.
 

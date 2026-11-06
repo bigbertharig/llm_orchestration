@@ -31,7 +31,7 @@ class Phase3BrainRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(config["runtime_host"], "http://localhost:11434")
-        self.assertEqual(config["model_search_roots"], ["/data/model-hotset", "/home/bryan/model-hotset", "/mnt/shared/models"])
+        self.assertEqual(config["model_search_roots"], ["/data/model-hotset", "/mnt/shared/models"])
 
     def test_startup_uses_running_llama_brain_container_for_preload_detection(self):
         original_run = startup.subprocess.run
@@ -104,7 +104,7 @@ class Phase3BrainRuntimeTests(unittest.TestCase):
         roots = resolve_model_search_roots(
             {
                 "model_search_roots": [
-                    "/home/bryan/model-hotset",
+                    "/data/model-hotset",
                     "/mnt/shared/models",
                 ]
             }
@@ -112,7 +112,7 @@ class Phase3BrainRuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             [str(root) for root in roots],
-            ["/home/bryan/model-hotset", "/mnt/shared/models"],
+            ["/data/model-hotset", "/mnt/shared/models"],
         )
 
     def test_preloaded_llama_brain_uses_full_ready_budget(self):

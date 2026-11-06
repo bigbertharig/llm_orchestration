@@ -8,8 +8,6 @@ storage. Published remote profiles are copied by default; --model adds registry 
 example candidates under test) by id:
   python3 ~/llm_orchestration/shared/scripts/manage_model_hotset.py sync-gguf --root /data/model-hotset --model qwen3.8:27b
   python3 ~/llm_orchestration/shared/scripts/manage_model_hotset.py sync-gguf --root /data/model-hotset
-  python3 ~/llm_orchestration/shared/scripts/manage_model_hotset.py sync-gguf \
-      --root /home/bryan/model-hotset --profile chat-27b --profile coder-7b
 
 Legacy Ollama hot-set, typical usage on rig host:
   python3 /mnt/shared/scripts/manage_model_hotset.py report

@@ -82,7 +82,6 @@ VENV=/home/bryan/llm-orchestration-venv
 if ! "$VENV/bin/python" -c 'import requests, filelock' 2>/dev/null; then
   step "orchestration venv" bash -c "python3 -m venv '$VENV' && '$VENV/bin/pip' install -q -r '$TREE/requirements.txt'"
 fi
-[ -d /home/bryan/model-hotset ] || step "SATA hot-set folder" mkdir -p /home/bryan/model-hotset
 if mountpoint -q /data && [ ! -d /data/model-hotset ]; then
   step "NVMe hot-set folder" bash -c "sudo mkdir -p /data/model-hotset && sudo chown bryan:bryan /data/model-hotset"
 fi
