@@ -1,0 +1,18 @@
+[Unit]
+Description=LLM orchestration private status API
+After=local-fs.target
+
+[Service]
+Type=simple
+User=bryan
+Group=bryan
+WorkingDirectory=/home/bryan/llm_orchestration/scripts
+RuntimeDirectory=llm-orchestration
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/bin/python3 -m orchestration_api --socket /run/llm-orchestration/api.sock
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

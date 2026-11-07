@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dashboard.data import apply_gpu_leases
+from orchestration_api.data import apply_gpu_leases
 
 
 class DashboardLeaseOverlayTests(unittest.TestCase):

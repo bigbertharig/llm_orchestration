@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dashboard.workers import load_worker_rows
+from orchestration_api.workers import load_worker_rows
 
 
 class DashboardWorkerRowsTests(unittest.TestCase):

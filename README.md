@@ -26,7 +26,7 @@ in a local, uncommitted inventory (`shared/workspace/local/inventory.md`). Scrip
 | Repo | Owns | Start at |
 |---|---|---|
 | [llm-gateway](https://github.com/bigbertharig/llm-gateway) | the machines and the API: rig manager (leases, placement, model loads, runs), the OpenAI-compatible gateway, the dashboard, `rigctl` | `docs/MANAGER.md` |
-| **llm_orchestration** (this one) | parallel batch work (brain, workers, plans), the rig hardware scripts, CPU workers | `shared/workspace/CONTEXT.md` |
+| **llm_orchestration** (this one) | parallel batch work (brain, workers, plans), rig hardware scripts, CPU workers, and a private status/control API consumed by the gateway dashboard | `shared/workspace/CONTEXT.md`, `scripts/orchestration_api/README.md` |
 | [benchmarking](https://github.com/bigbertharig/benchmarking) | which models are good: model registry and roles, suites, campaigns, results | `NEW_MODEL_INTEGRATION.md`, `MODEL_LIBRARY.md` |
 | [llm-harness](https://github.com/bigbertharig/llm-harness) | one model in an interactive loop (no code yet) | `README.md` |
 
@@ -51,6 +51,11 @@ python3 scripts/submit.py ~/llm_orchestration/shared/plans/<plan_name> --config 
 # Watch it: the dashboard (served by llm-gateway on the Pi)
 #   http://127.0.0.1:8080/dashboard/      (from elsewhere: ssh -N -L 8080:127.0.0.1:8080 pi)
 ```
+
+The dashboard UI lives only in llm-gateway. This repo's `scripts/orchestration_api` serves
+versioned status and plan-control endpoints over a private Unix socket on the Pi. The gateway
+reads it through HTTP and reads hardware status through its own `/v1/manager/status` API.
+The service definition is `deploy/llm-orchestration-api.service`.
 
 Starting and stopping the orchestration mode on the rig, and its startup order: `shared/workspace/CONTEXT.md`
 and `shared/workspace/quickstart.md`.
