@@ -12,16 +12,13 @@ import subprocess
 
 
 MODELS = {
-    "qwen3.6-35b-a3b": {
-        "id": "qwen3.6:35b-a3b",
+    "qwen3.6:35b-a3b": {
         "path": "/mnt/shared/models/qwen3.6-35b-a3b-strata-xl/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
     },
-    "nemotron-bolt-74b": {
-        "id": "nemotron-3.5-bolt:74b-a9b",
+    "nemotron-3.5-bolt:74b-a9b": {
         "path": "/mnt/shared/models/nemotron-3.5-bolt-74b-a9b/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-Q3_K_XL.gguf",
     },
-    "qwen3-coder-next": {
-        "id": "qwen3-coder-next:80b-a3b",
+    "qwen3-coder-next:80b-a3b": {
         "path": "/mnt/shared/models/qwen3-coder-next/Qwen3-Coder-Next-Q4_K_S.gguf",
     },
 }
@@ -49,19 +46,19 @@ def mode_spec(model, mode):
         raise ValueError(f"unknown model {model}; choose from {', '.join(MODELS)}")
     base = MODELS[model]
     spec = {
-        "model": base["id"], "gguf_path": base["path"], "use": "benchmark",
+        "model": model, "gguf_path": base["path"], "use": "benchmark",
         "batch_size": 512, "parallel": 1, "image": "llama-runtime:b11669",
         "extra_args": ["--ubatch-size", "32", "-ctk", "f16", "-ctv", "f16"],
     }
-    if model == "qwen3.6-35b-a3b" and mode == "gpu0-chat-16k":
+    if model == "qwen3.6:35b-a3b" and mode == "single-chat-fast":
         spec.update(ctx_size=16384, tensor_split="48")
         spec["extra_args"] = []
         return spec, [0]
-    if model == "nemotron-bolt-74b" and mode == "gpu0-chat-262k":
+    if model == "nemotron-3.5-bolt:74b-a9b" and mode == "single-chat-fast":
         spec.update(ctx_size=262144, tensor_split="88,0,0,0,0")
         spec["extra_args"] += ["--reasoning", "off", "--override-tensor", expert_map(NEMO_GROUPS[:4], "(up|down)")]
         return spec, list(range(5))
-    if model == "qwen3-coder-next" and mode == "gpu0-chat-262k":
+    if model == "qwen3-coder-next:80b-a3b" and mode == "single-chat-fast":
         spec.update(ctx_size=262144, tensor_split="48,0,0,0,0,0")
         spec["extra_args"] += ["--override-tensor", expert_map(CODER_GROUPS, "(up|down|gate)")]
         return spec, list(range(6))
@@ -77,12 +74,16 @@ def main():
     p.add_argument("--lease")
     p.add_argument("--detach", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--json", action="store_true", help="machine-readable list")
     a = p.parse_args()
     if a.action == "list":
-        for model, mode in (("qwen3.6-35b-a3b", "gpu0-chat-16k"),
-                            ("nemotron-bolt-74b", "gpu0-chat-262k"),
-                            ("qwen3-coder-next", "gpu0-chat-262k")):
-            print(f"{model} {mode}")
+        rows = [{"model": model, "mode": "single-chat-fast"} for model in MODELS]
+        if a.json:
+            print(json.dumps(rows, indent=2))
+        else:
+            print("MODEL\tMODE")
+            for row in rows:
+                print(f"{row['model']}\t{row['mode']}")
         return
     if not a.model or not a.mode:
         p.error("show/start needs MODEL MODE")
@@ -95,7 +96,7 @@ def main():
         return
     if not a.port or not 1024 <= a.port <= 65535:
         p.error("start needs --port 1024..65535")
-    name = f"mode-{a.model}-{a.mode}"
+    name = f"mode-{a.model.replace(':', '-')}-{a.mode}"
     cmd = ["/usr/local/bin/rig", "start", "remote", name, "--spec", json.dumps(spec, separators=(",", ":")),
            "--gpus", ",".join(map(str, gpus)), "--port", str(a.port)]
     if a.lease:

@@ -5,14 +5,17 @@ measurements and receipts that justify a mode. A caller names a model and a
 mode; the rig controller applies admission, launches the runtime, verifies
 readiness, and reports the endpoint. The gateway and harness should use the
 returned endpoint and never copy GPU maps, tensor patterns, or KV flags.
+The request key is **canonical registry model ID + mode**. The mode describes
+the requested capability; context capacity and hardware placement are resolved
+by that pair. `list --json` exposes the same two columns for callers.
 
 On the rig:
 
 ```bash
 python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py list
-python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py show qwen3-coder-next gpu0-chat-262k
-python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py start qwen3-coder-next gpu0-chat-262k --port 11522 --dry-run
-python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py start qwen3-coder-next gpu0-chat-262k --port 11522 --detach
+python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py show qwen3-coder-next:80b-a3b single-chat-fast
+python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py start qwen3-coder-next:80b-a3b single-chat-fast --port 11522 --dry-run
+python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py start qwen3-coder-next:80b-a3b single-chat-fast --port 11522 --detach
 rig observe
 ```
 
@@ -22,11 +25,11 @@ rejects busy cards and ports. Use its normal stop command for an intentional
 mode switch. `--detach` runs a tracked rig load job; readiness is visible in
 `rig observe`. Without it, `start` waits for readiness.
 
-| Model | Mode | Placement | Evidence |
+| Canonical model ID | Mode | Placement | Evidence |
 | --- | --- | --- | --- |
-| Qwen3.6 35B-A3B | `gpu0-chat-16k` | Single GPU 0 server, ordinary baseline | Benchmarking model benchmark reference |
-| Nemotron Bolt 74B-A9B | `gpu0-chat-262k` | GPU 0 chat, routed experts across GPUs 1–4, F16 KV | Benchmarking `results/runtime_experiments/nemo_chat3090_20261109/` |
-| Qwen3-Coder-Next 80B-A3B | `gpu0-chat-262k` | GPU 0 chat, 30 expert layers across GPUs 1–5, F16 KV | Benchmarking `results/runtime_experiments/coder_next_chat_20261111/` |
+| `qwen3.6:35b-a3b` | `single-chat-fast` | Single GPU 0 server, 16K cap, ordinary baseline | Benchmarking model benchmark reference |
+| `nemotron-3.5-bolt:74b-a9b` | `single-chat-fast` | GPU 0 chat, routed experts across GPUs 1–4, 262K cap, F16 KV | Benchmarking `results/runtime_experiments/nemo_chat3090_20261109/` |
+| `qwen3-coder-next:80b-a3b` | `single-chat-fast` | GPU 0 chat, 30 expert layers across GPUs 1–5, 262K cap, F16 KV | Benchmarking `results/runtime_experiments/coder_next_chat_20261111/` |
 
 These are experimental single-server modes on the current six-card rig and
 model files. The Nemo and Coder layout measurements used a private llama.cpp
