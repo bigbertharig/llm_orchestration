@@ -12,7 +12,7 @@ import subprocess
 
 
 MODELS = {
-    "qwen3.6:35b-a3b": {
+    "qwen3.6:35b-a3b-xl": {
         "path": "/mnt/shared/models/qwen3.6-35b-a3b-strata-xl/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
     },
     "nemotron-3.5-bolt:74b-a9b": {
@@ -50,7 +50,7 @@ def mode_spec(model, mode):
         "batch_size": 512, "parallel": 1, "image": "llama-runtime:b11669",
         "extra_args": ["--ubatch-size", "32", "-ctk", "f16", "-ctv", "f16"],
     }
-    if model == "qwen3.6:35b-a3b" and mode == "single-chat-fast":
+    if model == "qwen3.6:35b-a3b-xl" and mode == "single-chat-fast":
         spec.update(ctx_size=16384, tensor_split="48")
         spec["extra_args"] = []
         return spec, [0]

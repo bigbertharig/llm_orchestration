@@ -27,7 +27,7 @@ mode switch. `--detach` runs a tracked rig load job; readiness is visible in
 
 | Canonical model ID | Mode | Placement | Evidence |
 | --- | --- | --- | --- |
-| `qwen3.6:35b-a3b` | `single-chat-fast` | Single GPU 0 server, 16K cap, ordinary baseline | Benchmarking model benchmark reference |
+| `qwen3.6:35b-a3b-xl` | `single-chat-fast` | Single GPU 0 server, 16K cap, ordinary baseline | Benchmarking model benchmark reference |
 | `nemotron-3.5-bolt:74b-a9b` | `single-chat-fast` | GPU 0 chat, routed experts across GPUs 1–4, 262K cap, F16 KV | Benchmarking `results/runtime_experiments/nemo_chat3090_20261109/` |
 | `qwen3-coder-next:80b-a3b` | `single-chat-fast` | GPU 0 chat, 30 expert layers across GPUs 1–5, 262K cap, F16 KV | Benchmarking `results/runtime_experiments/coder_next_chat_20261111/` |
 
