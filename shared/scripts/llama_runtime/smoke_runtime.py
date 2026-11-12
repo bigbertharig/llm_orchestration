@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Certify a llama-runtime image against every model the rig actually uses.
 
-The model list is every model named by a role in the benchmarking model library or by a remote
-profile llm-gateway offers (scripts/rig/remote_profiles.py), plus promotion-critical
+The model list is every model named by an imported role or in orchestration's
+local interactive model list, plus promotion-critical
 Nemotron six-card and Mellum split loads. Each loads alone on its normal lane with its
 orchestration profile (default profile if it has none), must give a clean answer to the litmus
 question (no leaked reasoning) and answer a completion request, and is stopped before the next.
@@ -26,9 +26,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TREE = HERE.parents[1]  # <tree>/scripts/llama_runtime -> <tree>
 sys.path.insert(0, str(TREE / "agents"))
-sys.path.insert(0, str(TREE / "scripts" / "rig"))
 import orchestration_model_library as model_library  # noqa: E402
-import remote_profiles  # noqa: E402
 from brain_core import resolve_hotset_gguf  # noqa: E402
 
 PORT = 11450  # outside every mode's port range
@@ -56,7 +54,8 @@ def lane(entry: dict, model_id: str) -> tuple[str, str | None]:
 def models_in_use() -> list[str]:
     roles = model_library.load_roles()
     used = [spec["model"] for spec in roles["roles"].values()]
-    used += [rp["model"] for rp in remote_profiles.load().values()]
+    access = json.loads((TREE / "agents" / "model_access.json").read_text(encoding="utf-8"))
+    used += access["models"]
     used += PROMOTION_MODELS
     return list(dict.fromkeys(used))
 

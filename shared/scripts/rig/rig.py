@@ -48,7 +48,7 @@ STATE_PATH = LOCAL / "brain" / "rig_mode.json"
 STATE_MIRROR_PATH = SHARED / "brain" / "rig_mode.json"  # read by watchers on the Pi
 LOCK_PATH = LOCAL / "brain" / "rig_mode.lock"
 CONFIG_PATH = LOCAL / "agents" / "config.json"
-# Remote profiles: llm-gateway's generated remote_profiles.json (see remote_profiles.py beside this file).
+# Remote loads require a complete manager spec; this checkout owns no gateway offer file.
 RUN_RUNTIME = LOCAL / "scripts" / "llama_runtime" / "run_runtime.sh"
 # GPU leases and claims, rig-local (hw_state.py); mirrored to SHARED/gpus/ for orchestration workers.
 HW_STATE_ROOT = LOCAL / "brain" / "hw"
@@ -575,26 +575,6 @@ def report_busy(st: dict, wanted: str) -> int:
 
 # ---------------------------------------------------------------- remote mode
 
-def published_profiles() -> dict[str, dict]:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    sys.path.insert(0, str(LOCAL / "agents"))
-    import remote_profiles
-    from brain_core import resolve_hotset_gguf
-
-    try:
-        profiles = remote_profiles.load()
-    except (OSError, KeyError, ValueError) as exc:
-        raise RigError(f"cannot read remote profiles from {remote_profiles.PATH}: {exc}")
-    if not profiles:
-        raise RigError(f"no remote_profiles in {remote_profiles.PATH}")
-    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    for p in profiles.values():
-        if not p.get("gpus_needed"):
-            raise RigError(f"profile {p['id']}: gpus_needed is required")
-        p["gguf_path"] = str(resolve_hotset_gguf(p["gguf_path"], config))
-    return profiles
-
-
 def spec_profile(pid: str, spec: dict) -> dict:
     """A load spec from the rig manager (`--spec`, llm-gateway `load_model`): any registry model, with the
     context and tensor split the manager planned for the GPUs it leased. Same shape as a published profile."""
@@ -725,16 +705,10 @@ def claim_remote(requested: list[str], force: bool, placement: dict | None = Non
     spec (one profile, with placement): a manager load spec instead of a published profile.
     Returns (profile ids to wait on, early exit code or None).
     """
-    if spec is not None:
-        if len(requested) != 1 or placement is None or "gpus" not in placement:
-            raise RigError("--spec loads exactly one profile and needs --gpus and --port")
-        profiles = {requested[0]: spec_profile(requested[0], spec)}
-    else:
-        profiles = published_profiles()
-    unknown = [r for r in requested if r not in profiles]
-    if unknown:
-        raise RigError(f"unknown remote profile(s) {unknown}; published: {sorted(profiles)}")
-    wanted = requested or [pid for pid, p in profiles.items() if p.get("default")]
+    if spec is None or len(requested) != 1 or placement is None or "gpus" not in placement:
+        raise RigError("remote load needs one profile, --spec, --gpus, and --port")
+    profiles = {requested[0]: spec_profile(requested[0], spec)}
+    wanted = requested
     modes = {load_mode(profiles[pid]) for pid in wanted} or {"remote"}
     if len(modes) > 1:
         raise RigError(f"one load mode at a time: {sorted(modes)} requested together")
@@ -925,10 +899,6 @@ def load_info(entry: dict) -> dict:
 
 def detach_remote(pid: str, args) -> int:
     """Run `start remote <pid> --queue ...` as a rig job and return at once (see hw_jobs)."""
-    if not args.spec:
-        profiles = published_profiles()
-        if pid not in profiles:
-            raise RigError(f"unknown remote profile {pid}; published: {sorted(profiles)}")
     entry = read_state().get("profiles", {}).get(pid)
     if entry:
         job = {"job": hw_jobs.unit_name(pid), "profile": pid, "active_state": "inactive",
@@ -964,15 +934,13 @@ def claim_remote_queued(pid: str, force: bool, placement: dict | None,
 
 
 def cmd_start_remote(args) -> int:
-    spec = None
-    if args.spec:
-        try:
-            spec = json.loads(args.spec)
-        except ValueError as exc:
-            raise RigError(f"--spec is not JSON: {exc}")
-        if len(args.profiles) != 1:
-            raise RigError("--spec loads exactly one profile id")
-    requested = args.profiles or [pid for pid, p in published_profiles().items() if p.get("default")]
+    if not args.spec or len(args.profiles) != 1:
+        raise RigError("remote load needs one profile id and a manager --spec")
+    try:
+        spec = json.loads(args.spec)
+    except ValueError as exc:
+        raise RigError(f"--spec is not JSON: {exc}")
+    requested = args.profiles
     placement = None
     if args.gpus is not None or args.port is not None or args.lease:
         if len(requested) != 1 or args.gpus is None or args.port is None:
@@ -1495,7 +1463,7 @@ def main() -> int:
     s.set_defaults(fn=cmd_status)
     s = sub.add_parser("start")
     s.add_argument("mode", choices=MODES)
-    s.add_argument("profiles", nargs="*", help="remote profile ids (default: profiles marked default)")
+    s.add_argument("profiles", nargs="*", help="remote: one manager load id with --spec")
     s.add_argument("--force", action="store_true", help="stop the current mode first")
     s.add_argument("--gpus", help="remote, one profile: GPU ids chosen by the rig manager, e.g. 0 or 1,2")
     s.add_argument("--port", type=int, help="remote, one profile: port chosen by the rig manager")
@@ -1506,8 +1474,7 @@ def main() -> int:
     s.add_argument("--json", action="store_true", help="with --detach: print the job as JSON")
     s.add_argument("--cache-ram", type=int, help="remote: llama-server host prompt cache in MiB (controller's "
                                                   "choice per use; default: run_runtime.sh floor 0)")
-    s.add_argument("--spec", help="remote, one profile: a manager load spec (JSON: model, gguf_path, ctx_size, "
-                                  "tensor_split, ...) instead of a published profile")
+    s.add_argument("--spec", help="remote, one profile: required manager load spec (JSON: model, gguf_path, ctx_size, tensor_split, ...)")
     s.set_defaults(fn=cmd_start)
     s = sub.add_parser("shared-kv", help="control the loaded shared-weight chat service")
     s.add_argument("action", choices=("status", "attach", "detach", "turn"))

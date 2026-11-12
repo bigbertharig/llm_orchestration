@@ -124,22 +124,22 @@ Pick one mode at a time with the `rig` mode selector, from any machine:
 ssh <rig-ip> rig status
 ssh <rig-ip> rig start orchestration   # brain (27B on GPU0) + 5 cold workers, plans admitted
 # bench mode: entered by a benchmark load through the rig manager (rigctl load-model --use benchmark, lanes, campaigns)
-ssh <rig-ip> rig start remote [profile ...]  # published remote_profiles, no orchestrator
+python3 ~/llm-gateway/tools/rigctl.py load-model MODEL --use chat  # manager sends a full rig load spec
 ssh <rig-ip> rig start <mode> --force  # replace whatever mode is running
 ssh <rig-ip> rig stop                  # back to idle
 ```
 
 - `start` refuses (exit 2) if another mode is running and reports who started it and when.
-- Remote is additive: `rig start remote <id>` places the profile on free GPUs matching its
-  `gpus_needed` (exit 4 if none fit); `rig stop <id>` unloads one. `rig status --json` for scripts.
+- Remote loads are additive through the manager: it fits and leases cards, then sends a
+  full spec to `rig start remote <id> --spec ... --gpus ... --port ...`.
+  `rig stop <id>` unloads one. `rig status --json` reports the actual state.
 - llm-gateway (Pi `~/llm-gateway`, `pi-gateway.service` on Pi 127.0.0.1:8080) serves `gpu-rig/<profile>` over
   the OpenAI API and loads profiles on first request (`rig start remote` over ssh; rig ports reach the Pi
   through `pi-rig-tunnel.service`). Deploy: `~/llm-gateway/deploy/deploy_pi.sh` on the Pi.
 - Orchestration runs under systemd (`llm-orchestration.service`).
   Never start `startup.py` by hand.
-- Remote profiles: llm-gateway owns the offer (`OFFER` in `~/llm-gateway/tools/generate_profiles.py`),
-  resolved against `model_registry.json` into `~/llm-gateway/remote_profiles.json`, which `rig` reads via
-  `scripts/rig/remote_profiles.py`. Change a model's settings in the registry, then re-run the generator.
+- Gateway owns its published offers. The rig receives each accepted load as a complete
+  manager spec and does not read gateway offer files.
 - State: `brain/rig_mode.json`. Code: `shared/scripts/rig/rig.py`. Design: `workspace/implement/rig_boot_modes.md`.
 - Rig hardware layer (2026-10-17): `shared/scripts/rig/README.md`. The controller is llm-gateway's rig manager on
   the Pi (`~/llm-gateway/docs/MANAGER.md`); the rig keeps the GPU lease/claim record (`rig lease`, `rig claim`,

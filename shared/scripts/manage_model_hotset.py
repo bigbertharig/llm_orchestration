@@ -4,8 +4,8 @@ Manage the rig's local model hot-set.
 
 GGUF hot-set (llama-server): copy archive GGUFs into a local root listed in config.json
 `model_search_roots`; resolve_hotset_gguf() then loads them from there instead of network
-storage. Published remote profiles are copied by default; --model adds registry models (for
-example candidates under test) by id:
+storage. Active interactive models from the local import are copied by default;
+--model selects specific models, including candidates under test:
   python3 ~/llm_orchestration/shared/scripts/manage_model_hotset.py sync-gguf --root /data/model-hotset --model qwen3.8:27b
   python3 ~/llm_orchestration/shared/scripts/manage_model_hotset.py sync-gguf --root /data/model-hotset
 
@@ -22,6 +22,7 @@ Legacy Ollama hot-set, typical usage on rig host:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -261,28 +262,19 @@ def cmd_evict(args: argparse.Namespace) -> int:
     return 0
 
 
-def published_gguf_paths(profile_ids: list[str], model_ids: list[str] | None = None) -> dict[str, Path]:
-    """Archive GGUF path per published remote profile and per named registry model.
-
-    With nothing named, every published profile is selected; naming only models selects
-    only those models.
-    """
+def selected_gguf_paths(model_ids: list[str] | None = None) -> dict[str, Path]:
+    """Archive GGUF paths from orchestration's imported model library."""
     sys.path.insert(0, str(MODEL_LIBRARY_DIR))
-    sys.path.insert(0, str(TREE / "scripts" / "rig"))
     import orchestration_model_library as model_library
-    import remote_profiles
 
     model_ids = model_ids or []
-    selected: dict[str, Path] = {}
-    if profile_ids or not model_ids:
+    if not model_ids:
+        access = TREE / "agents" / "model_access.json"
         try:
-            profiles = remote_profiles.load()
-        except (OSError, KeyError, ValueError) as exc:
-            raise SystemExit(f"remote profiles ({remote_profiles.PATH}): {exc}")
-        unknown = [pid for pid in profile_ids if pid not in profiles]
-        if unknown:
-            raise SystemExit(f"unknown profile(s) {unknown}; published: {sorted(profiles)}")
-        selected.update({pid: Path(profiles[pid]["gguf_path"]) for pid in profile_ids or list(profiles)})
+            model_ids = json.loads(access.read_text(encoding="utf-8"))["models"]
+        except (OSError, ValueError, KeyError) as exc:
+            raise SystemExit(f"cannot read local interactive models from {access}: {exc}")
+    selected: dict[str, Path] = {}
     for model_id in model_ids:
         try:
             selected[model_id] = Path(model_library.resolve(model_id)["gguf_path"])
@@ -296,7 +288,7 @@ def cmd_sync_gguf(args: argparse.Namespace) -> int:
     if not root.is_dir():
         raise SystemExit(f"hot-set root not found: {root}")
     failed = 0
-    for pid, src in published_gguf_paths(args.profile, args.model).items():
+    for pid, src in selected_gguf_paths(args.model).items():
         try:
             dst = root / src.relative_to(ARCHIVE_MODELS)
         except ValueError:
@@ -329,9 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage the rig's local model hot-set")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_sync = sub.add_parser("sync-gguf", help="Copy published profiles' archive GGUFs into a hot-set root")
+    p_sync = sub.add_parser("sync-gguf", help="Copy imported active interactive GGUFs into a hot-set root")
     p_sync.add_argument("--root", required=True, help="Hot-set root listed in config.json model_search_roots")
-    p_sync.add_argument("--profile", action="append", default=[], help="Remote profile id (repeatable; default: all)")
     p_sync.add_argument("--model", action="append", default=[],
                         help="Registry model id, for example a candidate under test (repeatable)")
     p_sync.set_defaults(func=cmd_sync_gguf)

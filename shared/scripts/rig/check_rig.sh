@@ -99,7 +99,6 @@ lvl=$(python3 -c "import json; print(json.load(open('$TREE/shared/brain/hw/guard
 [ "$lvl" = "ok" ] && ok "guard ok" || bad "guard ok" "${lvl:-no guard state}"
 chk "orchestration venv (requests, filelock)" /home/bryan/llm-orchestration-venv/bin/python -c 'import requests, filelock'
 chk "machine config shared/agents/config.json" test -s "$TREE/shared/agents/config.json"
-chk "llm-gateway deployed (remote_profiles.json)" test -s /home/bryan/llm-gateway/remote_profiles.json
 
 # --- access and time ---
 chk "passwordless sudo" sudo -n true

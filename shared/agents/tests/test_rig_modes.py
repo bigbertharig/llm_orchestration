@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 AGENTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AGENTS.parent / "scripts" / "rig"))
@@ -36,6 +37,10 @@ class ModeTests(unittest.TestCase):
     def test_bench_is_no_longer_a_stack(self):
         self.assertNotIn("bench", rig.STACK_UNITS)
         self.assertEqual(set(rig.LOAD_MODES), {"bench", "remote"})
+
+    def test_remote_load_requires_manager_spec(self):
+        with self.assertRaisesRegex(rig.RigError, "manager --spec"):
+            rig.cmd_start_remote(SimpleNamespace(spec=None, profiles=["chat"]))
 
 
 if __name__ == "__main__":
