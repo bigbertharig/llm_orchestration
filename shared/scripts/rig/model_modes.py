@@ -54,6 +54,10 @@ def mode_spec(model, mode):
         spec.update(ctx_size=16384, tensor_split="48")
         spec["extra_args"] = ["--reasoning", "off"]
         return spec, [0]
+    if model == "qwen3.6:35b-a3b-xl" and mode == "gpu0-main-q4":
+        spec.update(ctx_size=262144, tensor_split="48")
+        spec["extra_args"] = ["--reasoning", "off", "-ctk", "q4_0", "-ctv", "q4_0"]
+        return spec, [0]
     if model == "nemotron-3.5-bolt:74b-a9b" and mode == "single-chat-fast":
         spec.update(ctx_size=262144, tensor_split="88,0,0,0,0")
         spec["extra_args"] += ["--reasoning", "off", "--override-tensor", expert_map(NEMO_GROUPS[:4], "(up|down)")]
@@ -63,6 +67,20 @@ def mode_spec(model, mode):
         spec["extra_args"] += ["--override-tensor", expert_map(CODER_GROUPS, "(up|down|gate)")]
         return spec, list(range(6))
     raise ValueError(f"no executable mode {mode} for {model}")
+
+
+def catalog():
+    rows = [{"model": model, "mode": "single-chat-fast", "kind": "model_load",
+             "executable": True} for model in MODELS]
+    rows.append({"model": "qwen3.6:35b-a3b-xl", "mode": "gpu0-main-q4",
+                 "kind": "model_load", "executable": True,
+                 "chat_gpu": 0, "context_cap": 262144})
+    rows.append({"model": "qwen3.6:35b-a3b-xl", "mode": "gpu1060-chat-q4",
+                 "kind": "attached_chat", "executable": False,
+                 "requires": {"model": "qwen3.6:35b-a3b-xl", "mode": "gpu0-main-q4"},
+                 "candidate_gpus": [1, 2, 3, 4, 5], "context_cap": 262144,
+                 "reason": "Current HTTP runtime cannot attach per-chat KV on another GPU to a loaded model."})
+    return rows
 
 
 def main():
@@ -77,7 +95,7 @@ def main():
     p.add_argument("--json", action="store_true", help="machine-readable list")
     a = p.parse_args()
     if a.action == "list":
-        rows = [{"model": model, "mode": "single-chat-fast"} for model in MODELS]
+        rows = catalog()
         if a.json:
             print(json.dumps(rows, indent=2))
         else:
@@ -87,6 +105,13 @@ def main():
         return
     if not a.model or not a.mode:
         p.error("show/start needs MODEL MODE")
+    attached = next((row for row in catalog() if row["model"] == a.model and
+                     row["mode"] == a.mode and row["kind"] == "attached_chat"), None)
+    if attached:
+        if a.action == "show":
+            print(json.dumps(attached, indent=2))
+            return
+        p.error(attached["reason"] + " Benchmark replay is available; no worker HTTP route is ready.")
     try:
         spec, gpus = mode_spec(a.model, a.mode)
     except ValueError as exc:
