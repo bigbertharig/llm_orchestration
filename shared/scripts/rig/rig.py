@@ -1023,8 +1023,12 @@ def status_payload() -> dict:
             url = f"http://127.0.0.1:{item['port']}/health"
             with urllib.request.urlopen(url, timeout=2) as response:
                 ready = json.load(response).get("model_loaded") is True
+            chats = []
+            if ready:
+                with urllib.request.urlopen(f"http://127.0.0.1:{item['port']}/chats", timeout=2) as response:
+                    chats = json.load(response).get("chats", [])
             kv = {"status": "ready" if ready else "down", "model": item["model"],
-                  "port": item["port"], "mode": item["mode"]}
+                  "port": item["port"], "mode": item["mode"], "chats": chats}
         except (OSError, ValueError, KeyError, urllib.error.URLError):
             kv = {"status": "down"}
     g = gpu_check()
@@ -1469,6 +1473,16 @@ def cmd_boot(_args) -> int:
     return 0 if g["ok"] else EXIT_FAIL
 
 
+def cmd_shared_kv(args) -> int:
+    """Delegate shared-chat lifecycle to the rig-side controller; keep its claims authoritative."""
+    command = [sys.executable, str(Path(__file__).with_name("kv_chat_control.py")), args.action]
+    if args.chat_id: command += ["--chat-id", args.chat_id]
+    if args.message is not None: command += ["--message", args.message]
+    if args.max_tokens is not None: command += ["--max-tokens", str(args.max_tokens)]
+    if args.gpu is not None: command += ["--gpu", str(args.gpu)]
+    return subprocess.run(command, check=False).returncode
+
+
 def main() -> int:
     if not LOCAL.joinpath("agents").is_dir():
         say(f"error: {LOCAL}/agents not found; rig.py must run from a rig checkout")
@@ -1495,6 +1509,13 @@ def main() -> int:
     s.add_argument("--spec", help="remote, one profile: a manager load spec (JSON: model, gguf_path, ctx_size, "
                                   "tensor_split, ...) instead of a published profile")
     s.set_defaults(fn=cmd_start)
+    s = sub.add_parser("shared-kv", help="control the loaded shared-weight chat service")
+    s.add_argument("action", choices=("status", "attach", "detach", "turn"))
+    s.add_argument("--chat-id")
+    s.add_argument("--message")
+    s.add_argument("--max-tokens", type=int)
+    s.add_argument("--gpu", type=int)
+    s.set_defaults(fn=cmd_shared_kv)
     sub.add_parser("observe", help="JSON snapshot for the rig manager").set_defaults(fn=cmd_observe)
     s = sub.add_parser("why", help="why a runtime is down: exit, OOM, guard action, earlyoom")
     s.add_argument("--port", type=int)
