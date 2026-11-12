@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "models": [
+    "devstral-small:24b",
+    "gemma-4:31b",
+    "gpt-oss:20b",
+    "qwen2.5-coder:7b",
+    "qwen3-coder:30b-a3b",
+    "qwen3.6:27b",
+    "qwen3.6:35b-a3b-xl"
+  ]
+}

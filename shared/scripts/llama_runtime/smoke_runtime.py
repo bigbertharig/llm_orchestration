@@ -25,10 +25,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TREE = HERE.parents[1]  # <tree>/scripts/llama_runtime -> <tree>
-sys.path.insert(0, str(TREE / "plans" / "shoulders" / "benchmarking" / "scripts" / "active"))
 sys.path.insert(0, str(TREE / "agents"))
 sys.path.insert(0, str(TREE / "scripts" / "rig"))
-import model_library  # noqa: E402
+import orchestration_model_library as model_library  # noqa: E402
 import remote_profiles  # noqa: E402
 from brain_core import resolve_hotset_gguf  # noqa: E402
 

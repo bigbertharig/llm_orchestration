@@ -145,8 +145,8 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "${IMAGE_TAG}" ]; then
-  LIBRARY="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/plans/shoulders/benchmarking/scripts/active/model_library.py"
-  IMAGE_TAG="$(python3 "${LIBRARY}" runtime-image 2>/dev/null || true)"
+  LIBRARY="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/agents/model_library.json"
+  IMAGE_TAG="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["registry"]["runtime_image"])' "${LIBRARY}" 2>/dev/null || true)"
   if [ -z "${IMAGE_TAG}" ]; then
     echo "No --image given and the model library runtime_image could not be read (${LIBRARY})" >&2
     exit 66

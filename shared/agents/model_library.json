@@ -1,0 +1,2758 @@
+{
+  "schema": "orchestration-model-library/1",
+  "source_sha256": "ec86410e3ee4b2a3424c5995a0b51897fc8803581772276cfeccbd89a6372aad",
+  "registry": {
+    "schema": "model-registry/1",
+    "updated": "2026-11-06",
+    "about": "Every model the rig has tested, with its archive GGUF, status, scheduling placement, and named profiles. The only place model settings are edited. models.catalog.json, model_tuning_profiles.json and custom_tasks/model_prompt_profiles.json are generated from this file by scripts/active/model_library.py.",
+    "archive_root": "/mnt/shared/models",
+    "runtime_image": "llama-runtime:b11669",
+    "runtime_image_note": "Default llama.cpp image for ordinary orchestration, remote mode and campaigns; Strata-only entries use their recorded Strata version and recipe. Upgrade the llama image with llm_orchestration shared/scripts/llama_runtime/upgrade_runtime.sh.",
+    "catalog_defaults": {
+      "schema_version": 1,
+      "default_llm_min_tier": 1
+    },
+    "orchestration_defaults": {
+      "single": {
+        "ctx_size": 16384,
+        "batch_size": 64,
+        "parallel": 1,
+        "n_gpu_layers": 999
+      },
+      "split": {
+        "ctx_size": 16384,
+        "batch_size": 128,
+        "parallel": 1,
+        "n_gpu_layers": 999
+      },
+      "max_tokens": 8192,
+      "_notes": "single/split: llama launch fallbacks when a model has no orchestration profile. max_tokens: generation cap per worker request."
+    },
+    "models": {
+      "deepseek-r1:14b": {
+        "gguf": "deepseek-r1-14b/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Benchmark-incompatible (structural think-tag issue)",
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and give only the final answer. Do not output reasoning or internal thoughts in your response.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "tuning",
+              "last_tuned_at": "2026-03-16T00:00:00+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Split-load (2x 1060). Prompt v2 2026-03-16: replaced boolean-only evaluator prompt with general worker prompt. Old prompt forced True/False answers on all tasks including math, causing all-zero GSM8K/DROP."
+          }
+        },
+        "model_size_bytes": 8988110240,
+        "ngram_size_bytes": 0
+      },
+      "deepseek-r1:32b": {
+        "gguf": "deepseek-r1-32b/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/DeepSeek-R1-Distill-Qwen-32B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Benchmark-incompatible (structural think-tag issue)",
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict evaluator assistant. Never output reasoning, analysis, or internal thoughts. For boolean tasks, output exactly one sentence in this exact format: So the answer is True. or So the answer is False. Do not output anything else.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Brain-tier (3090). Same prompt as 7B deepseek sibling. First benchmark pass pending."
+          }
+        },
+        "model_size_bytes": 19851335840,
+        "ngram_size_bytes": 0
+      },
+      "deepseek-r1:7b": {
+        "gguf": "deepseek-r1-7b/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Benchmark-incompatible (structural think-tag issue)",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "reasoning",
+            "worker_candidate"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict evaluator assistant. Never output reasoning, analysis, or internal thoughts. For boolean tasks, output exactly one sentence in this exact format: So the answer is True. or So the answer is False. Do not output anything else.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Keep as baseline settings until next locked-suite tuning pass."
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [],
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "test_prompt_overrides": {
+          "custom_json_schema_strict": "Output only a strict JSON object with required keys. No markdown, no explanation, no reasoning steps."
+        },
+        "model_size_bytes": 4683073504,
+        "ngram_size_bytes": 0
+      },
+      "devstral-small:24b": {
+        "gguf": "devstral-small-24b/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF/resolve/main/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "code"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only. Never wrap JSON in ```json code blocks or markdown formatting. Start JSON with { and end with }.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "smoke_complete",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Brain-tier candidate. Corrupt archive artifact replaced and SHA-256 verified on 2026-08-12; geo-import smoke completed successfully. 2026-11-04: 16K load and short probe passed on GPU 0; realistic multi-file coding validation is still needed before deciding whether to archive.",
+            "context_bounds": {
+              "min": 4096,
+              "max": 393216,
+              "max_basis": "gguf_train"
+            }
+          },
+          "interactive": {
+            "runtime": {
+              "ctx_size": 32768,
+              "batch_size": 64,
+              "parallel": 1
+            },
+            "extra_args": [],
+            "notes": "Interactive remote use (devstral-24b); runtime fields replace the default profile's.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 393216,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 14334446752,
+        "ngram_size_bytes": 0
+      },
+      "gemma-3:12b": {
+        "gguf": "gemma-3-12b/gemma-3-12b-it-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/ggml-org/gemma-3-12b-it-GGUF/resolve/main/gemma-3-12b-it-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Superseded by Gemma-4, can't split on 1060s",
+        "superseded_by": "gemma-4:12b",
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Split-load (2x 1060). First benchmark pass pending."
+          }
+        },
+        "model_size_bytes": 7300575264,
+        "ngram_size_bytes": 0
+      },
+      "gemma-3:4b": {
+        "gguf": "gemma-3-4b/gemma-3-4b-it-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Superseded by Gemma-4-E4B",
+        "superseded_by": "gemma-4:e4b",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "small",
+            "worker_candidate"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict benchmark assistant. Think silently and output only the final answer. Never include reasoning, analysis, or extra text. For GSM8K-style math, end with exactly: #### <answer>. For BBH-style reasoning, end with exactly: So the answer is <answer>. For short reading-comprehension questions, output only the shortest final answer phrase.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "tuning",
+              "last_tuned_at": "2026-03-16T00:00:00+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "RPi5-tier (4B). Google Gemma 3. 262K vocab \u2014 watch for VRAM on small GPUs. Prompt tuned 2026-03-16 for reasoning extraction: enforce final-answer-only format across GSM8K, BBH, and DROP."
+          }
+        },
+        "model_size_bytes": 2489757856,
+        "ngram_size_bytes": 0
+      },
+      "gemma-4:12b": {
+        "gguf": "gemma-4-12b/gemma-4-12B-it-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/bartowski/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 2,
+          "placement": "split_gpu",
+          "split_groups": [
+            {
+              "id": "pair_1_3",
+              "members": [
+                "gpu-1",
+                "gpu-3"
+              ],
+              "port": 11440
+            },
+            {
+              "id": "pair_4_5",
+              "members": [
+                "gpu-4",
+                "gpu-5"
+              ],
+              "port": 11441
+            }
+          ],
+          "tags": [
+            "gemma4",
+            "higher_reasoning"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "good_for": [
+              "chatbot"
+            ],
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only. Never wrap JSON in ```json code blocks or markdown formatting. Start JSON with { and end with }.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 48
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Split-load (2x 1060). Gemma 4 12B dense Q4_K_M. Requires -fit off and --tensor-split 1,1 (2 visible GPUs). Do NOT use --n-gpu-layers 999 (auto-fitter aborts). CPU mapped ~924 MiB. VRAM: 3.1+3.8 GB across GPUs. Requires llama-runtime:b8884-candidate. BENCHMARK: use --reasoning-budget 0 (A/B tested: budget=0 scored BBH 0.82, budget=1024 scored 0.24 \u2014 thinking tokens consume generation budget). 2026-11-04: 8K load and short probe passed on GTX 1060 GPUs 1 and 3; deep recall pending.",
+            "context_bounds": {
+              "min": 4096,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 7381382048,
+        "ngram_size_bytes": 0
+      },
+      "gemma-4:26b-a4b": {
+        "gguf": "gemma-4-26b-a4b/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/lmstudio-community/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "gemma4",
+            "moe"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only. Never wrap JSON in ```json code blocks or markdown formatting. Start JSON with { and end with }.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Brain-tier (3090). Gemma 4 26B MoE, 3.8B active. Loads 16GB VRAM + 577MB CPU buffer. BENCHMARK: use --reasoning-budget 0 (A/B confirmed on 26B: budget=0 scored BBH 0.867 l5, previous thinking-on score was 0.265 l50). llama.cpp b11669: --reasoning-budget 0 no longer suppresses Gemma 4 thinking (answer leaked reasoning); --reasoning off does (2026-10-15).",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 16796010720,
+        "ngram_size_bytes": 0
+      },
+      "gemma-4:31b": {
+        "gguf": "gemma-4-31b/gemma-4-31B-it-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/gemma-4-31B-it-GGUF/resolve/main/gemma-4-31B-it-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "gemma4",
+            "dense"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only. Never wrap JSON in ```json code blocks or markdown formatting. Start JSON with { and end with }.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Brain-tier (3090). Gemma 4 31B dense. 19.5GB VRAM, comfortable fit. Has reasoning_content field active. BENCHMARK: use --reasoning-budget 0 (confirmed: thinking mode destroys BBH extraction across all Gemma 4 sizes). llama.cpp b11669: --reasoning-budget 0 no longer suppresses Gemma 4 thinking (answer leaked reasoning); --reasoning off does (2026-10-15).",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          },
+          "interactive": {
+            "runtime": {
+              "batch_size": 512
+            },
+            "notes": "Measured 2026-10-25: faster prefill at the same context and decode speed; benchmark default remains 128."
+          },
+          "orchestration": {
+            "runtime": {
+              "batch_size": 512,
+              "ctx_size": 16384
+            },
+            "notes": "Measured 2026-10-25: faster prefill at the same context and decode speed; benchmark default remains 128."
+          }
+        },
+        "model_size_bytes": 18687057376,
+        "ngram_size_bytes": 0
+      },
+      "gemma-4:e2b-q8": {
+        "gguf": "gemma-4-e2b/gemma-4-e2b-it-Q8_0.gguf",
+        "source_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q8_0.gguf",
+        "status": "active",
+        "aliases": [
+          "gemma-4:e2b"
+        ],
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "small",
+            "worker_candidate",
+            "gemma4"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only. Never wrap JSON in ```json code blocks or markdown formatting. Start JSON with { and end with }.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Worker-tier (1060 6GB). Gemma 4 E2B dense ~5.1B Q8_0. Wraps JSON in markdown fences in smoke test. BENCHMARK: use --reasoning-budget 0 (confirmed: thinking mode destroys BBH extraction across all Gemma 4 sizes). llama.cpp b11669: --reasoning-budget 0 no longer suppresses Gemma 4 thinking (answer leaked reasoning); --reasoning off does (2026-10-15).",
+            "context_bounds": {
+              "min": 4096,
+              "max": 131072,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 4967490208,
+        "ngram_size_bytes": 0
+      },
+      "gemma-4:e4b": {
+        "gguf": "gemma-4-e4b/gemma-4-e4b-it-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "small",
+            "worker_candidate",
+            "gemma4"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "good_for": [
+              "chatbot"
+            ],
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only. Never wrap JSON in ```json code blocks or markdown formatting. Start JSON with { and end with }.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Worker-tier (1060 6GB). Gemma 4 E4B dense ~4B. Clean JSON output observed in smoke test \u2014 explicit JSON prompt retained for consistency. BENCHMARK: use --reasoning-budget 0 (confirmed: thinking mode destroys BBH extraction across all Gemma 4 sizes). llama.cpp b11669: --reasoning-budget 0 no longer suppresses Gemma 4 thinking (answer leaked reasoning); --reasoning off does (2026-10-15).",
+            "context_bounds": {
+              "min": 4096,
+              "max": 131072,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 5335285440,
+        "ngram_size_bytes": 0
+      },
+      "gpt-oss:20b": {
+        "gguf": "gpt-oss-20b/gpt-oss-20b-mxfp4.gguf",
+        "source_url": "https://huggingface.co/ggml-org/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-MXFP4.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "moe",
+            "openai"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a helpful assistant. When answering multiple choice questions, reason briefly then conclude with exactly: So the answer is (X). Use plain text only, no markdown formatting. When JSON is requested, return raw JSON only, no code blocks.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--jinja",
+              "--reasoning-budget",
+              "0"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Brain-tier (3090). OpenAI gpt-oss 20B MoE, 3.6B active params. MXFP4 native quant (12.1GB). Apache 2.0. Requires --jinja for chat template. BENCHMARK: use --reasoning-budget 0 (channel-based thinking puts reasoning in reasoning_content, leaving only terse answer in content \u2014 BBH get-answer regex fails). Prompt tuned: 'keep output minimal' caused bare-letter answers; 'no markdown' prevents bold formatting around (X).",
+            "context_bounds": {
+              "min": 8192,
+              "max": 131072,
+              "max_basis": "gguf_train"
+            }
+          },
+          "interactive": {
+            "good_for": [
+              "chatbot"
+            ],
+            "runtime": {
+              "ctx_size": 65536,
+              "batch_size": 64,
+              "parallel": 1
+            },
+            "extra_args": [
+              "--jinja"
+            ],
+            "notes": "Interactive remote use (gpt-oss-20b); runtime fields replace the default profile's."
+          }
+        },
+        "model_size_bytes": 12109566560,
+        "ngram_size_bytes": 0
+      },
+      "llama3.2:3b": {
+        "gguf": "llama-3.2-3b/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "small",
+            "worker_candidate"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict benchmark assistant. Think silently and output only the final answer. Never include reasoning, analysis, or extra text. For GSM8K-style math, end with exactly: #### <answer>. For BBH-style reasoning, end with exactly: So the answer is <answer>. For short reading-comprehension questions, output only the shortest final answer phrase.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "tuning",
+              "last_tuned_at": "2026-03-16T00:00:00+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "RPi5-tier (3B). Meta Llama 3.2. Disaster Clippy currently uses this family. Prompt tuned 2026-03-16 for reasoning extraction: enforce final-answer-only format across GSM8K, BBH, and DROP.",
+            "context_bounds": {
+              "min": 4096,
+              "max": 131072,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 2019377696,
+        "ngram_size_bytes": 0
+      },
+      "llama3.3:70b": {
+        "gguf": "llama-3.3-70b/Llama-3.3-70B-Instruct-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Llama-3.3-70B-Instruct-GGUF/resolve/main/Llama-3.3-70B-Instruct-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Superseded: a December 2024 dense 70B, about 4 tok/s across all six cards; newer MoE models of this size run faster and score higher. Archive GGUF retained on Pi storage (SHA-256 32df3baccb556f9840059b2528b2dee4d3d516b24afdfb9d0c56ff5f63e3a664); rig NVMe hotset copy removed 2026-10-27. Historical records stay in the ledger.",
+        "schedule": {
+          "tier": 3,
+          "placement": "split_gpu",
+          "split_groups": [
+            {
+              "id": "all_gpus_capacity",
+              "members": [
+                "gpu-0",
+                "gpu-1",
+                "gpu-2",
+                "gpu-3",
+                "gpu-4",
+                "gpu-5"
+              ],
+              "port": 11445
+            }
+          ],
+          "tags": [
+            "capacity_candidate",
+            "dense",
+            "multi_gpu"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only. Never wrap JSON in ```json code blocks or markdown formatting. Start JSON with { and end with }.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 2048,
+              "batch_size": 32,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "tuning",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Capacity candidate requiring the RTX 3090 plus five GTX 1060s. First load completed from shared storage in 19m43.972s at 2K context. Sustained 512-token decode measured 4.113 tok/s at 306.13 W average combined GPU draw. Litmus math and JSON pass; code output wraps the function in Markdown fences. Pipeline smoke completed: JSON 30.8%, command safety 75.0%, ambiguity 15.4%, tool sequence 93.3%, orchestration 75.0%, long context 100%. Reasoning and code smoke pending in a dedicated capacity window."
+          }
+        },
+        "model_size_bytes": 42520398816,
+        "ngram_size_bytes": 0
+      },
+      "mellum2.1:12b-a2.5b": {
+        "gguf": "mellum2.1-12b-a2.5b/Mellum2.1-12B-A2.5B-Thinking-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/JetBrains/Mellum2.1-12B-A2.5B-Thinking-GGUF/resolve/main/Mellum2.1-12B-A2.5B-Thinking-Q4_K_M.gguf",
+        "status": "candidate",
+        "in_testing": true,
+        "status_note": "Full code and validated reasoning suites completed by 2026-10-23. HumanEval+ 83.5%, MBPP+ 72.5%, BBH 45.6%, strict prompt IFEval 62%. Candidate for a specialized split-GPU code role; no routine role assigned.",
+        "schedule": {
+          "tier": 2,
+          "placement": "split_gpu",
+          "tags": [
+            "code",
+            "worker_candidate",
+            "moe"
+          ],
+          "split_groups": [
+            {
+              "id": "pair_1_3",
+              "members": [
+                "gpu-1",
+                "gpu-3"
+              ],
+              "port": 11440
+            },
+            {
+              "id": "pair_4_5",
+              "members": [
+                "gpu-4",
+                "gpu-5"
+              ],
+              "port": 11441
+            }
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only. Never wrap JSON in ```json code blocks or markdown formatting. Start JSON with { and end with }.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Split-worker (2x 1060). JetBrains Mellum2.1 12B MoE (2.5B active) code model, Apache-2.0, new 'mellum' arch (load on b11669 unverified). Thinking model: decide reasoning flag at litmus. Competes with ministral-3:14b (split_quality).",
+            "context_bounds": {
+              "min": 8192,
+              "max": 131072,
+              "max_basis": "gguf_train"
+            }
+          },
+          "thinking": {
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 4096
+            },
+            "extra_args": [
+              "--reasoning",
+              "on"
+            ],
+            "notes": "Thinking variant (2026-10-20 Phase 4.5, GPUs 1+2): reasoning on with a 4096-token output budget scored bbh 0.707 vs 0.437 and gsm8k 1.0 vs 0.8 against the default, at about 7x the wall time (278 vs 38 min). The default is reasoning off: with no flag this Thinking model thinks, and under the default 512-token budget 18 of 20 gsm8k answers came back empty (Phase 4 2026-10-18)."
+          }
+        },
+        "model_size_bytes": 8071295264,
+        "ngram_size_bytes": 0
+      },
+      "minicpm5:2b": {
+        "gguf": "minicpm5-2b/MiniCPM5-2B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/main/MiniCPM5-2B-Q4_K_M.gguf",
+        "status": "candidate",
+        "in_testing": true,
+        "status_note": "Reasoning smoke and strict IFEval ran by 2026-10-26, but full code was 0.6% HumanEval+ and 1.9% MBPP+. Candidate only for a narrow low-cost worker role after task-specific validation.",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "small",
+            "worker_candidate"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict benchmark assistant. Think silently and output only the final answer. Never include reasoning, analysis, or extra text. For GSM8K-style math, end with exactly: #### <answer>. For BBH-style reasoning, end with exactly: So the answer is <answer>. For short reading-comprehension questions, output only the shortest final answer phrase.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Single 1060. OpenBMB MiniCPM5 2B dense, Apache-2.0, llama arch. Cheap lower-bound worker; compare with ministral-3:3b.",
+            "context_bounds": {
+              "min": 4096,
+              "max": 131072,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 1561318368,
+        "ngram_size_bytes": 0
+      },
+      "ministral-3:14b": {
+        "gguf": "ministral-3-14b-instruct-2512/Ministral-3-14B-Instruct-2512-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Ministral-3-14B-Instruct-2512-GGUF/resolve/main/Ministral-3-14B-Instruct-2512-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 2,
+          "placement": "split_gpu",
+          "split_groups": [
+            {
+              "id": "pair_1_3",
+              "members": [
+                "gpu-1",
+                "gpu-3"
+              ],
+              "port": 11440
+            },
+            {
+              "id": "pair_4_5",
+              "members": [
+                "gpu-4",
+                "gpu-5"
+              ],
+              "port": 11441
+            }
+          ],
+          "tags": [
+            "worker_candidate",
+            "code",
+            "import_prep"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only with no markdown or extra text.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "smoke_complete",
+              "last_tuned_at": "2026-08-14T00:00:00+00:00",
+              "benchmark_suite": "import_prep"
+            },
+            "notes": "Modern 14B split-worker candidate; initial compatibility smoke runs on the 3090.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [],
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "model_size_bytes": 8239067840,
+        "ngram_size_bytes": 0
+      },
+      "ministral-3:3b": {
+        "gguf": "ministral-3-3b-instruct-2512/Ministral-3-3B-Instruct-2512-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Ministral-3-3B-Instruct-2512-GGUF/resolve/main/Ministral-3-3B-Instruct-2512-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "worker_candidate",
+            "single_gpu",
+            "qualification_pending"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only with no markdown or extra text.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "tuning",
+              "last_tuned_at": "2026-08-14T00:00:00+00:00",
+              "benchmark_suite": "import_prep"
+            },
+            "notes": "Single-1060 qualification candidate. Broad smoke tasks eventually completed, but the full EvalPlus code block timed out and the first campaign left stale failure rows. Keep out of production routing until the focused code/runtime rerun completes.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [],
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "model_size_bytes": 2146497824,
+        "ngram_size_bytes": 0
+      },
+      "ministral-3:8b": {
+        "gguf": "ministral-3-8b-instruct-2512/Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Ministral-3-8B-Instruct-2512-GGUF/resolve/main/Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "worker_candidate",
+            "code",
+            "import_prep"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only with no markdown or extra text.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "smoke_complete",
+              "last_tuned_at": "2026-08-14T00:00:00+00:00",
+              "benchmark_suite": "import_prep"
+            },
+            "notes": "Modern single-worker candidate; initial compatibility smoke runs on the 3090.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [],
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "model_size_bytes": 5198386720,
+        "ngram_size_bytes": 0
+      },
+      "mistral:7b-instruct": {
+        "gguf": "mistral-7b-instruct/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Old gen, no unique strength",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "instruction_following",
+            "worker_candidate"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Stay on task, avoid tangents, and answer only what is requested.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "candidate_tuned",
+              "last_tuned_at": "2026-03-10T06:39:13+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Higher score than qwen2.5-coder:7b on this run, but slower."
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 12288,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [],
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "test_prompt_overrides": {
+          "custom_json_schema_strict": "Output exactly one JSON object only. No prose before or after."
+        },
+        "model_size_bytes": 4372812000,
+        "ngram_size_bytes": 0
+      },
+      "nex-n2.5:mini": {
+        "gguf": "nex-n2.5-mini/nex-agi_Nex-N2.5-mini-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/bartowski/nex-agi_Nex-N2.5-mini-GGUF/resolve/main/nex-agi_Nex-N2.5-mini-Q4_K_M.gguf",
+        "status": "candidate",
+        "in_testing": true,
+        "status_note": "Full code and validated reasoning suites completed by 2026-10-17. HumanEval+ 82.3%, BBH 73.8%, strict prompt IFEval 82%. Thinking control requires its template switch; candidate because current active brain alternatives score higher.",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "moe"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Never output <think> tags, chain-of-thought, or internal reasoning. Respond with only the final answer in the exact format requested. When JSON is requested, return raw JSON with no markdown or extra text. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 1024
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--chat-template-kwargs",
+              "{\"reasoning_effort\":\"none\"}"
+            ],
+            "tuning": {
+              "status": "tuned",
+              "last_tuned_at": "2026-10-17T00:00:00+00:00",
+              "benchmark_suite": "phase4_5_settings"
+            },
+            "notes": "Brain-tier (3090). Nex N2.5 mini 35B MoE (3B active), Apache-2.0, Qwen3.5 MoE base. 22.3 GB GGUF: tightest fit; ctx 8192, lower if it OOMs. Competes with qwen3.6:35b-a3b. Thinking control (2026-10-16): its chat template always ends the prompt with an open <think> and ignores --reasoning off, --reasoning-budget 0 and enable_thinking=false, so the first token is a newline and DROP's newline stop returns empty answers (limit-50 DROP 0.0). The template's own switch reasoning_effort=none emits an empty closed think block; set via --chat-template-kwargs. Phase 4.5 (2026-10-17): thinking on gave no accuracy gain (BBH flexible 0.833 vs 0.837, GSM8K flexible 0.90 both) and was 23% slower, so thinking stays off; family prompt beat the benchmark prompt (DROP 0.60 vs 0.40); max_tokens 512 -> 1024 because the geoimport prep plan needs about 600 tokens (geoimport 0.845 -> 0.967).",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          },
+          "interactive": {
+            "runtime": {
+              "ctx_size": 65536,
+              "batch_size": 128,
+              "parallel": 1
+            },
+            "extra_args": [
+              "--chat-template-kwargs",
+              "{\"reasoning_effort\":\"none\"}",
+              "-fit",
+              "off"
+            ],
+            "notes": "Interactive remote use (llm-gateway nex-split, five 1060s at tensor split 0.75,1,1,1,1, 3090 left free). Split placement from BENCHMARK_LESSONS_LEARNED.md 2026-10-17 (tested at ctx 8192; 65536 untested, hybrid recurrent KV is small). -fit off is required with n_gpu_layers 999; thinking off as in the default profile."
+          }
+        },
+        "model_size_bytes": 22318512256,
+        "ngram_size_bytes": 0
+      },
+      "ornith-1.5:35b-a3b": {
+        "gguf": "ornith-1.5-35b-a3b/Ornith-1.5-35B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF/resolve/main/Ornith-1.5-35B-Q4_K_M.gguf",
+        "status": "active",
+        "status_note": "Promoted 2026-11-06 after full code and validated reasoning suites: BBH 92.4%, HumanEval+ 85.4%, strict prompt IFEval 82%. Measured 164.9 tok/s at 8K on the 3090; two-card 262K depth passed. Available as a fast brain alternative; no default role changed.",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "moe"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Never output <think> tags, chain-of-thought, or internal reasoning. Respond with only the final answer in the exact format requested. When JSON is requested, return raw JSON with no markdown or extra text. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 4096
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "on"
+            ],
+            "tuning": {
+              "status": "tuned",
+              "last_tuned_at": "2026-10-17T00:00:00+00:00",
+              "benchmark_suite": "phase4_5_settings"
+            },
+            "notes": "Brain-tier (3090). Ornith 1.5 35B MoE (~3B active), MIT, qwen3_5_moe arch. 21.7 GB GGUF: tight on 24 GB, ctx 8192 to start. Competes with qwen3.6:35b-a3b. Phase 4.5 (2026-10-17): thinking on (limit 10, end-of-text stops): GSM8K flexible 0.80 -> 1.00, BBH flexible 0.844 -> 0.930, DROP flexible 0.60 -> 0.90, ambiguity 0.538 -> 0.769, IFEval unchanged (0.90 / 0.944), cmd_safety 1.0 -> 0.833, tool_plan 0.933 -> 0.867; about 2x the time and still faster than qwen3.8:27b with thinking off. Chosen for max scores. max_tokens 4096 because the budget covers the thinking (geoimport plan fits 512 with thinking off). Reasoning benchmarks need --gen-kwargs max_gen_toks=4096,until=</s>: task stop sequences fire inside thinking text. The family prompt's 'never output chain-of-thought' wording was kept as tested.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 21713463040,
+        "ngram_size_bytes": 0
+      },
+      "ornith-1.5:9b": {
+        "gguf": "ornith-1.5-9b/Ornith-1.5-9B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/ornith-ai/Ornith-1.5-9B-GGUF/resolve/main/Ornith-1.5-9B-Q4_K_M.gguf",
+        "status": "active",
+        "status_note": "Provisional single_1060 default since 2026-10-20 on smoke evidence from 2026-10-19 (leads qwen2.5-coder:7b on GSM8K, BBH, ambiguity, orchestration, long context; trails it on HumanEval+). Full code and l50 reasoning suites still to run. Downloaded 2026-10-15 from ornith-ai/Ornith-1.5-9B-GGUF.",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "worker_candidate",
+            "dense",
+            "single_gpu"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Never output <think> tags, chain-of-thought, or internal reasoning. Respond with only the final answer in the exact format requested. When JSON is requested, return raw JSON with no markdown or extra text. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Single 1060 (corrected 2026-10-20): the harness fit puts 33 layers (4812 MiB) + KV 496 MiB + compute 169 MiB on one 6 GB card at ctx 26880 (hybrid attention keeps KV small); it loaded and served on GPU 1 alone in rig_stress runs 2026-10-18/19. The earlier note said it needed a 2x 1060 split. Ornith 1.5 9B, MIT, qwen3_5 arch.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          },
+          "thinking": {
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 4096
+            },
+            "extra_args": [
+              "--reasoning",
+              "on"
+            ],
+            "notes": "Thinking variant (2026-10-20 Phase 4.5, GPU 3 alone, ctx 26880): reasoning on with a 4096-token output budget scored gsm8k 1.0 vs 0.9 and bbh 0.896 vs 0.822 against the default, at about 2.6x the wall time (172 vs 67 min); answers kept the expected format (0 of 270 bbh misses from extraction). Same system prompt as the default, as in that run. Pick it per task in the harness: thinking for accuracy, default for throughput."
+          }
+        },
+        "model_size_bytes": 5780090816,
+        "ngram_size_bytes": 0
+      },
+      "phi-4-mini-reasoning:3.8b": {
+        "gguf": "phi-4-mini-reasoning/Phi-4-mini-reasoning-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Phi-4-mini-reasoning-GGUF/resolve/main/Phi-4-mini-reasoning-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "reasoning",
+            "worker_candidate"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only. Never wrap JSON in ```json code blocks or markdown formatting. Start JSON with { and end with }.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Worker-tier (1060 6GB). Microsoft Phi-4-mini-reasoning 3.8B dense. Q4_K_M (2.49GB). MIT license. Structural <think> tokens (same as DeepSeek-R1): --reasoning-budget 0 has no effect, runtime shows thinking=0. BENCHMARK: use --patch-think-tag-strip for bench-reasoning. bench-code INCOMPATIBLE (evalplus strips think+code together). bench-reasoning BBH/DROP FAIL on 1060 (runtime OOM from long prompts + think chains at 3g limit). bench-pipeline: json_schema 0% (think tags in JSON). Memory: needs 3g/4g Docker limits (2g causes OOM). Only GSM8K viable on 1060. 2026-10-17 (b11669): --reasoning-format deepseek does not split the thinking either (template has no thinking markers; litmus 0/3, all answers raw <think> text). Operator: models under 7B run as-is with working settings, no further tuning; results stand with these known limits.",
+            "context_bounds": {
+              "min": 4096,
+              "max": 131072,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 2491875232,
+        "ngram_size_bytes": 0
+      },
+      "phi-4-mini:3.8b": {
+        "gguf": "phi-4-mini/Phi-4-mini-instruct-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Phi-4-mini-instruct-GGUF/resolve/main/Phi-4-mini-instruct-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Covered by Phi-4-14B, incomplete reasoning",
+        "superseded_by": "phi-4:14b",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "small",
+            "worker_candidate"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict benchmark assistant. Think silently and output only the final answer. Never include reasoning, analysis, or extra text. For GSM8K-style math, end with exactly: #### <answer>. For BBH-style reasoning, end with exactly: So the answer is <answer>. For short reading-comprehension questions, output only the shortest final answer phrase.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "tuning",
+              "last_tuned_at": "2026-03-16T00:00:00+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "RPi5-tier (3.8B). Microsoft Phi-4-mini. Prompt tuned 2026-03-16 for reasoning extraction: enforce final-answer-only format across GSM8K, BBH, and DROP."
+          }
+        },
+        "model_size_bytes": 2491874272,
+        "ngram_size_bytes": 0
+      },
+      "phi-4:14b": {
+        "gguf": "phi-4-14b/phi-4-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 2,
+          "placement": "split_gpu",
+          "split_groups": [
+            {
+              "id": "pair_1_3",
+              "members": [
+                "gpu-1",
+                "gpu-3"
+              ],
+              "port": 11440
+            },
+            {
+              "id": "pair_4_5",
+              "members": [
+                "gpu-4",
+                "gpu-5"
+              ],
+              "port": 11441
+            }
+          ],
+          "tags": [
+            "safe_tool_use",
+            "tool_planning",
+            "higher_reasoning"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only \u2014 never wrap in ```json code blocks or markdown. Start JSON with { and end with }.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "tuning",
+              "last_tuned_at": "2026-03-16T00:00:00+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Split-load (2x 1060). Prompt reverted to baseline+JSON (2026-03-16): 5 tuning iterations showed diminishing returns on reasoning. Baseline l50 scores (GSM8K 0.70, BBH 0.283, DROP 0.070) remain best overall. Model excels on pipeline (100% safety/sequence/extract) and code (78.7% humaneval).",
+            "context_bounds": {
+              "min": 8192,
+              "max": 16384,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 9053114816,
+        "ngram_size_bytes": 0
+      },
+      "qwen2.5-coder:14b": {
+        "gguf": "qwen2.5-coder-14b/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen2.5-Coder-14B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+        "status": "active",
+        "aliases": [
+          "qwen2.5:14b"
+        ],
+        "schedule": {
+          "tier": 2,
+          "placement": "split_gpu",
+          "split_groups": [
+            {
+              "id": "pair_1_3",
+              "members": [
+                "gpu-1",
+                "gpu-3"
+              ],
+              "port": 11440
+            },
+            {
+              "id": "pair_4_5",
+              "members": [
+                "gpu-4",
+                "gpu-5"
+              ],
+              "port": 11441
+            }
+          ],
+          "tags": [
+            "code_review",
+            "higher_reasoning"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only. Never wrap JSON in ```json code blocks or markdown formatting. Start with { and end with }.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "tuning",
+              "last_tuned_at": "2026-03-14T00:00:00+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Split-load (2x 1060). Prompt updated 2026-03-14: added explicit markdown/code-block suppression for JSON tasks (was 0% on json_schema_strict due to ```json wrapping).",
+            "context_bounds": {
+              "min": 8192,
+              "max": 32768,
+              "max_basis": "gguf_train"
+            }
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--no-warmup"
+            ],
+            "tensor_split": "1,1",
+            "meta_timeout_seconds": 600,
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "model_size_bytes": 8988111072,
+        "ngram_size_bytes": 0
+      },
+      "qwen2.5-coder:32b": {
+        "gguf": "qwen2.5-coder-32b/Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen2.5-Coder-32B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Beaten by Qwen3.6-27B on all metrics",
+        "superseded_by": "qwen3.6:27b",
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Brain-tier (3090). Same prompt as 7B coder sibling. First benchmark pass pending."
+          }
+        },
+        "model_size_bytes": 19851336672,
+        "ngram_size_bytes": 0
+      },
+      "qwen2.5-coder:7b": {
+        "gguf": "qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "general",
+            "fast"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "active_best",
+              "last_tuned_at": "2026-03-10T06:38:08+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Current speed/quality balance leader in worker-facing suite.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 32768,
+              "max_basis": "gguf_train"
+            }
+          },
+          "interactive": {
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1
+            },
+            "extra_args": [],
+            "notes": "Interactive remote use (coder-7b); runtime fields replace the default profile's."
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--no-warmup"
+            ],
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "test_prompt_overrides": {
+          "custom_json_schema_strict": "Return only one raw JSON object. No markdown, no code fences, no extra text."
+        },
+        "model_size_bytes": 4683074336,
+        "ngram_size_bytes": 0
+      },
+      "qwen3-coder:30b-a3b": {
+        "gguf": "qwen3-coder-30b-a3b/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/resolve/main/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "code",
+            "moe"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only with no markdown or extra text.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "smoke_complete",
+              "last_tuned_at": null,
+              "benchmark_suite": "import_prep"
+            },
+            "notes": "Brain-tier import-prep candidate. Qwen3 MoE with 30.5B total and 3.3B active parameters.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          },
+          "interactive": {
+            "runtime": {
+              "ctx_size": 32768,
+              "batch_size": 64,
+              "parallel": 1
+            },
+            "extra_args": [],
+            "notes": "Interactive remote use (coder-30b); runtime fields replace the default profile's."
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [],
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "model_size_bytes": 18556689568,
+        "ngram_size_bytes": 0
+      },
+      "qwen3.5:27b": {
+        "gguf": "qwen3.5-27b/Qwen3.5-27B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen3.5-27B-GGUF/resolve/main/Qwen3.5-27B-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "dense",
+            "historical_comparison"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Never output <think> tags, chain-of-thought, or internal reasoning. Respond with only the final answer in the exact format requested. When JSON is requested, return raw JSON with no markdown or extra text. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning-budget",
+              "0"
+            ],
+            "tuning": {
+              "status": "smoke_complete",
+              "last_tuned_at": "2026-08-14T00:00:00+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Brain-tier candidate on the RTX 3090. Corrupt archive artifact replaced and SHA-256 verified on 2026-08-12; data-import and geo-import smoke completed successfully.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning-budget",
+              "0"
+            ],
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "model_size_bytes": 16740812704,
+        "ngram_size_bytes": 0
+      },
+      "qwen3.5:35b-a3b": {
+        "gguf": "qwen3.5-35b-a3b/Qwen3.5-35B-A3B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/resolve/main/Qwen3.5-35B-A3B-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Superseded by Qwen3.6-35B-A3B (same arch, better scores, no SWA)",
+        "superseded_by": "qwen3.6:35b-a3b",
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Never output <think> tags, chain-of-thought, or internal reasoning. Respond with only the final answer in the exact format requested. When JSON is requested, return raw JSON with no markdown or extra text. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Brain-tier (3090). MoE 35B total / 3B active. Same prompt family as Qwen3.5-4B. First benchmark pass pending."
+          }
+        },
+        "model_size_bytes": 22016023168,
+        "ngram_size_bytes": 0
+      },
+      "qwen3.5:4b": {
+        "gguf": "qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Superseded by Gemma-4-E4B, SWA blocks reasoning",
+        "superseded_by": "gemma-4:e4b",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "small",
+            "worker_candidate"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Never output <think> tags, chain-of-thought, or internal reasoning. Respond with only the final answer in the exact format requested. When JSON is requested, return raw JSON with no markdown or extra text. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "baseline_locked",
+              "last_tuned_at": "2026-03-11T01:46:21+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "A/B prompt test complete (2026-03-11): keep A profile as baseline; B profile underperformed."
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning-budget",
+              "0"
+            ],
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "test_prompt_overrides": {
+          "custom_json_schema_strict": "Return exactly one raw JSON object. No <think> tags, no markdown, no commentary."
+        },
+        "model_size_bytes": 2740937888,
+        "ngram_size_bytes": 0
+      },
+      "qwen3.5:9b-q3km": {
+        "gguf": "qwen3.5-9b/Qwen3.5-9B-Q3_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q3_K_M.gguf",
+        "status": "archived",
+        "status_note": "Superseded by Qwen3.6, SWA blocks reasoning",
+        "superseded_by": "qwen3.6:27b",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "worker_candidate",
+            "larger_single_gpu"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Respond with only the final answer in the exact format requested. Do not prepend punctuation, repeat your answer, or add extra text. When JSON is requested, return raw JSON with no markdown. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "baseline_locked",
+              "last_tuned_at": "2026-03-11T01:46:21+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "A/B prompt test complete (2026-03-11): keep A profile as baseline; B profile underperformed."
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning-budget",
+              "0"
+            ],
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "test_prompt_overrides": {
+          "custom_json_schema_strict": "Return only one valid JSON object with required keys. No surrounding text, no repeated output."
+        },
+        "model_size_bytes": 4673643744,
+        "ngram_size_bytes": 0
+      },
+      "qwen3.6:27b": {
+        "gguf": "qwen3.6-27b/Qwen3.6-27B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/ggml-org/Qwen3.6-27B-GGUF/resolve/main/Qwen3.6-27B-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "dense"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Never output <think> tags, chain-of-thought, or internal reasoning. Respond with only the final answer in the exact format requested. When JSON is requested, return raw JSON with no markdown or extra text. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Brain-tier (3090). Qwen 3.6 27B dense. 16GB VRAM + comfortable headroom. Same prompt family as Qwen3.5. First benchmark pass.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          },
+          "interactive": {
+            "good_for": [
+              "chatbot"
+            ],
+            "runtime": {
+              "ctx_size": 65536,
+              "batch_size": 512,
+              "parallel": 1
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tensor_split": "4,1",
+            "notes": "Interactive remote use (chat-27b); runtime fields replace the default profile's."
+          },
+          "orchestration": {
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 512,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning-budget",
+              "0"
+            ],
+            "notes": "Orchestrator llama launch settings (moved from config.json 2026-10-15)."
+          }
+        },
+        "model_size_bytes": 16817244384,
+        "ngram_size_bytes": 0
+      },
+      "qwen3.6:35b-a3b": {
+        "gguf": "qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        "status": "archived",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "moe"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Never output <think> tags, chain-of-thought, or internal reasoning. Respond with only the final answer in the exact format requested. When JSON is requested, return raw JSON with no markdown or extra text. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "tuned",
+              "last_tuned_at": "2026-10-17T00:00:00+00:00",
+              "benchmark_suite": "phase4_5_settings"
+            },
+            "notes": "Brain-tier (3090). Qwen 3.6 35B MoE, ~3B active. 21GB VRAM - tight on 3090, ~3GB headroom. Same prompt family as Qwen3.5. Re-integrated 2026-10-17 on b11669: the profile had no reasoning flag, so thinking was on by default. Phase 4.5 (limit 10): thinking off GSM8K 1.00, BBH flexible 0.911 (7:53), DROP 0.80, IFEval 0.80 / 0.889; thinking on was worse at both budgets (4096: BBH 0.800 with 47/270 empty, IFEval 0.70 / 0.611, 49:43; 8192: BBH 0.852 with 29 empty, 65:30) because it thinks past the budget. Thinking off. max_tokens 512 and 1024 score the same on geoimport (plan 0.879).",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          },
+          "interactive": {
+            "runtime": {
+              "batch_size": 512
+            },
+            "notes": "Measured 2026-10-25: faster prefill at the same context and decode speed; benchmark default remains 128."
+          },
+          "orchestration": {
+            "runtime": {
+              "batch_size": 512,
+              "ctx_size": 16384
+            },
+            "notes": "Measured 2026-10-25: faster prefill at the same context and decode speed; benchmark default remains 128."
+          }
+        },
+        "status_note": "Superseded by Strata-compatible qwen3.6:35b-a3b-xl after matched benchmark and 262K capacity comparison (2026-11-04); historical scores remain attached to this quantization.",
+        "model_size_bytes": 22134528992,
+        "ngram_size_bytes": 0
+      },
+      "qwen3.8:27b": {
+        "gguf": "qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_M.gguf",
+        "status": "candidate",
+        "in_testing": true,
+        "status_note": "Full code and validated reasoning suites completed by 2026-10-17. HumanEval+ 90.2%, strict prompt IFEval 92%, but BBH 41.6% in the selected validated run versus 91.6% for active Qwen3.6 27B. Candidate pending a useful role or settings correction.",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "dense"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Never output <think> tags, chain-of-thought, or internal reasoning. Respond with only the final answer in the exact format requested. When JSON is requested, return raw JSON with no markdown or extra text. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 8192
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "on"
+            ],
+            "tuning": {
+              "status": "tuned",
+              "last_tuned_at": "2026-10-17T00:00:00+00:00",
+              "benchmark_suite": "phase4_5_settings"
+            },
+            "notes": "Brain-tier (3090). Qwen3.8 27B dense, Apache-2.0, qwen35 arch, MTP layers (speculative decoding via --spec-type draft-mtp, untested). Expected successor of qwen3.6:27b and qwen3.5:27b. Thinking on by default in the template; --reasoning off gives a clean empty think block (litmus 3/3 clean). Prompt (2026-10-16): stays on the thinking-suppression family prompt. Two tuned prompts (v2, v3) chased the strict BBH/DROP extractors; once BBH/DROP gained flexible scoring the family prompt scored best (limit-10 DROP flexible 0.90 vs 0.70) and they were reverted. Real-use observation: on plain questions it sometimes answers in JSON ({\"answer\": \"80\"}). Phase 4.5 (2026-10-17): thinking on (end-of-text stops only) gave small gains (GSM8K flexible 0.90 -> 1.00, BBH flexible 0.878 -> 0.896, DROP EM 0.60 -> 0.70, IFEval prompt 0.80 -> 0.90 but inst 0.889 -> 0.833) at 3x BBH time (22 -> 67 min) and with runaway thinking (one BBH answer took 8402 tokens and 189 s, and was wrong). Thinking-on pipeline/geoimport at max_tokens 8192: equal or better everywhere (orchestration 0.75 -> 0.833, geoimport prep_plan 0.939 -> 0.970). Thinking on chosen for max scores (time is secondary below about 5x); max_tokens 8192 covers thinking, and reasoning benchmarks need --gen-kwargs max_gen_toks=8192,until=</s>. With thinking off, max_tokens 1024 is needed for the geoimport plan (512 cut it: prep_plan 0.0).",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 16464440224,
+        "ngram_size_bytes": 0
+      },
+      "qwen3:1.7b": {
+        "gguf": "qwen3-1.7b/Qwen3-1.7B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Weak everywhere (BBH 0.0), no niche",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "small",
+            "worker_candidate"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict benchmark assistant. Think silently and output only the final answer. Never include reasoning, analysis, or extra text. For GSM8K-style math, end with exactly: #### <answer>. For BBH-style reasoning, end with exactly: So the answer is <answer>. For short reading-comprehension questions, output only the shortest final answer phrase.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "tuning",
+              "last_tuned_at": "2026-03-16T00:00:00+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "RPi5-tier (1.7B). Prompt tuned 2026-03-16 for reasoning extraction: enforce final-answer-only format across GSM8K, BBH, and DROP."
+          }
+        },
+        "model_size_bytes": 1107409472,
+        "ngram_size_bytes": 0
+      },
+      "qwen3:14b": {
+        "gguf": "qwen3-14b/Qwen3-14B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/ggml-org/Qwen3-14B-GGUF/resolve/main/Qwen3-14B-Q4_K_M.gguf",
+        "status": "invalid",
+        "status_note": "GGUF artifact invalid (tensor data outside file bounds); replace before testing",
+        "schedule": {
+          "tier": 2,
+          "placement": "split_gpu",
+          "split_groups": [
+            {
+              "id": "pair_1_3",
+              "members": [
+                "gpu-1",
+                "gpu-3"
+              ],
+              "port": 11440
+            },
+            {
+              "id": "pair_4_5",
+              "members": [
+                "gpu-4",
+                "gpu-5"
+              ],
+              "port": 11441
+            }
+          ],
+          "tags": [
+            "reasoning",
+            "worker_candidate"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Never output <think> tags, chain-of-thought, or internal reasoning. Respond with only the final answer in the exact format requested. When JSON is requested, return raw JSON with no markdown or extra text. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning-budget",
+              "0"
+            ],
+            "tuning": {
+              "status": "artifact_invalid",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Split-worker candidate on two GTX 1060s. First load on 2026-08-09 failed before CUDA initialization: GGUF tensor data is outside file bounds. Replace or re-verify the local artifact before smoke runs."
+          }
+        },
+        "model_size_bytes": 5463531520,
+        "ngram_size_bytes": 0
+      },
+      "qwen3:8b": {
+        "gguf": "qwen3-8b/Qwen3-8B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
+        "status": "archived",
+        "status_note": "Superseded by Qwen3.6-27B",
+        "superseded_by": "qwen3.6:27b",
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Single-worker (1060 6GB). Qwen3 family (non-3.5), may not have SWA issue."
+          }
+        },
+        "model_size_bytes": 5027783488,
+        "ngram_size_bytes": 0
+      },
+      "smollm3:3b": {
+        "gguf": "smollm3-3b/SmolLM3-3B-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/unsloth/SmolLM3-3B-GGUF/resolve/main/SmolLM3-3B-Q4_K_M.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 1,
+          "placement": "single_gpu",
+          "tags": [
+            "small",
+            "worker_candidate"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict benchmark assistant. Think silently and output only the final answer. Never include reasoning, analysis, or extra text. For GSM8K-style math, end with exactly: #### <answer>. For BBH-style reasoning, end with exactly: So the answer is <answer>. For short reading-comprehension questions, output only the shortest final answer phrase.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 4096,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "tuning",
+              "last_tuned_at": "2026-03-16T00:00:00+00:00",
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "RPi5-tier (3B). HuggingFace SmolLM3. Prompt tuned 2026-03-16 for reasoning extraction: enforce final-answer-only format across GSM8K, BBH, and DROP.",
+            "context_bounds": {
+              "min": 4096,
+              "max": 65536,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 1915305312,
+        "ngram_size_bytes": 0
+      },
+      "qwen3-coder-next:80b-a3b": {
+        "gguf": "qwen3-coder-next/Qwen3-Coder-Next-Q4_K_S.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen3-Coder-Next-GGUF/resolve/main/Qwen3-Coder-Next-Q4_K_S.gguf",
+        "status": "candidate",
+        "in_testing": true,
+        "status_note": "Full code and validated reasoning suites completed by 2026-10-25. HumanEval+ 89.0%, MBPP+ 75.4%; 162,304-token six-card depth passed. 185,600-token manager placement failed; a later 32K six-card load passed. Candidate for expert-placement research; routine coding offers little measured gain over active Qwen3 Coder 30B for six-card cost.",
+        "schedule": {
+          "tier": 3,
+          "placement": "split_gpu",
+          "split_groups": [
+            {
+              "id": "all_gpus_capacity",
+              "members": [
+                "gpu-0",
+                "gpu-1",
+                "gpu-2",
+                "gpu-3",
+                "gpu-4",
+                "gpu-5"
+              ],
+              "port": 11445
+            }
+          ],
+          "tags": [
+            "capacity_candidate",
+            "code",
+            "moe",
+            "multi_gpu"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only with no markdown or extra text.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "tuning": {
+              "status": "tuning",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "Qwen3-Next architecture coder: 80B total, about 3B active per token (hybrid linear/full attention MoE). Q4_K_S (45.5 GB) chosen over Q4_K_M (48.5 GB) to leave room for six cards' compute buffers and context in 54 GB. Downloaded 2026-10-21 straight to the rig NVMe hotset. 2026-11-04: 32K load and short probe passed on all six cards. Five-card manager fit refused at 32K because layers/output would not divide within per-card memory; deep recall pending.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 45531949088,
+        "ngram_size_bytes": 0
+      },
+      "k2-v2-instruct:70b": {
+        "gguf": "k2-v2-instruct/k2v2-Q4_K_M.gguf",
+        "source_url": "https://huggingface.co/cturan/K2-V2-Instruct-GGUF/resolve/main/k2v2-Q4_K_M.gguf",
+        "status": "candidate",
+        "in_testing": true,
+        "status_note": "SHA-256 and 5/6-card load gates passed 2026-10-27. Twenty-one selected smoke results exist by 2026-10-28, including BBH 11.9%, strict prompt IFEval 20%, HumanEval+ 72%; no full run or depth validation. Candidate retained for controlled retest, not routine placement.",
+        "schedule": {
+          "tier": 3,
+          "placement": "split_gpu",
+          "split_groups": [
+            {
+              "id": "all_gpus_capacity",
+              "members": [
+                "gpu-0",
+                "gpu-1",
+                "gpu-2",
+                "gpu-3",
+                "gpu-4",
+                "gpu-5"
+              ],
+              "port": 11445
+            }
+          ],
+          "tags": [
+            "capacity_candidate",
+            "dense",
+            "multi_gpu",
+            "reasoning"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only with no markdown or extra text.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 2048
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--chat-template-kwargs",
+              "{\"reasoning_effort\":\"low\"}"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "K2-V2-Instruct 70B dense Q4_K_M (43,904,518,656 bytes), Apache 2.0. Upstream post-training sequence length 524,288. Manager fit plus real full-offload loads passed 2026-10-27: minimum deployment setting is 13,312 context on 3090+four 1060s (216.1 s load); maximum deployment setting is 30,464 on all six (213.2 s load). The 8,192 context planning floor also loaded on both groups. These are memory limits, not yet depth/recall validated. Default remains 8K and low reasoning effort for smoke. Source GGUF SHA-256 da1855d1d4ac1f40c344e04b889f9601bae2d3b60e9622dd985c9fcf2c6d4a02.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 524288,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 43904518656,
+        "ngram_size_bytes": 0
+      },
+      "nemotron-3.5-bolt:74b-a9b": {
+        "gguf": "nemotron-3.5-bolt-74b-a9b/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-Q3_K_XL.gguf",
+        "source_url": "https://huggingface.co/unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF/resolve/main/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-Q3_K_XL.gguf",
+        "status": "active",
+        "status_note": "Integrated 2026-10-24 (phases 0-5).",
+        "schedule": {
+          "tier": 3,
+          "placement": "split_gpu",
+          "split_groups": [
+            {
+              "id": "all_gpus_capacity",
+              "members": [
+                "gpu-0",
+                "gpu-1",
+                "gpu-2",
+                "gpu-3",
+                "gpu-4",
+                "gpu-5"
+              ],
+              "port": 11445
+            }
+          ],
+          "tags": [
+            "capacity_candidate",
+            "moe",
+            "hybrid_mamba",
+            "multi_gpu"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a strict worker assistant. Follow instructions exactly and keep output minimal. When JSON is requested, return raw JSON only with no markdown or extra text.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 64,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "agent_reliability"
+            },
+            "notes": "NVIDIA Nemotron 3.5 Bolt: 74B total, about 9B active, Mamba-2/Transformer hybrid MoE (GGUF arch nemotron_h_moe, llama-runtime:b11669), OpenMDW-1.1, used text only (no mmproj). UD-Q3_K_XL (39.0 GB) for headroom in 54 GB. Bench placement: GPUs 0-3 at ctx 16384 (split 57,16,10,6); all six cards hold ctx 226816. Decode 24.1 tok/s (3090 about 142 W, 1060s about 42 W each). The template thinks by default; --reasoning off kept: Phase 4 showed nothing to fix, thinking A/B not run. Known limit: asks for clarification less than peers (pipeline ambiguity and command safety). 2026-11-04: 32K load and short probe passed on GPUs 0-3; 10%/90% recall at 32K is pending. Matched 32K 89/89 GPU-layer placement decoded 24.63 tok/s versus 6.26 tok/s with 48/89 layers on GPU 0 and the rest in host RAM.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          }
+        },
+        "model_size_bytes": 39027158016,
+        "ngram_size_bytes": 0
+      },
+      "qwen3.6:35b-a3b-xl": {
+        "gguf": "qwen3.6-35b-a3b-strata-xl/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+        "source_url": "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+        "status": "active",
+        "schedule": {
+          "tier": 3,
+          "placement": "single_gpu",
+          "tags": [
+            "brain_candidate",
+            "moe"
+          ]
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a worker assistant. Never output <think> tags, chain-of-thought, or internal reasoning. Respond with only the final answer in the exact format requested. When JSON is requested, return raw JSON with no markdown or extra text. When a short answer is requested, give only that answer.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 16384,
+              "batch_size": 128,
+              "parallel": 1,
+              "n_gpu_layers": 999
+            },
+            "extra_args": [
+              "--reasoning",
+              "off"
+            ],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "phase4"
+            },
+            "notes": "Strata-compatible UD-Q4_K_XL candidate. Matched quant comparison against qwen3.6:35b-a3b UD-Q4_K_M; same system prompt, inference settings and runtime settings. SHA-256 verified on rig; see STRATA_MEMORY_TEST_PLAN.md. 2026-11-04: 262K final-answer recall passed at 10% and 90% on the 3090 plus one 1060; that is the fewest validated cards for the trained ceiling (see RIG_PERFORMANCE.md).",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          },
+          "interactive": {
+            "runtime": {
+              "batch_size": 512
+            },
+            "notes": "Measured 2026-10-25: faster prefill at the same context and decode speed; benchmark default remains 128."
+          },
+          "orchestration": {
+            "runtime": {
+              "batch_size": 512,
+              "ctx_size": 16384
+            },
+            "notes": "Measured 2026-10-25: faster prefill at the same context and decode speed; benchmark default remains 128."
+          }
+        },
+        "model_size_bytes": 22853663008,
+        "ngram_size_bytes": 0,
+        "strata": {
+          "family": "qwen36",
+          "model": "ud-q4_k_xl",
+          "model_path": "/data/model-hotset/qwen3.6-35b-a3b-strata-xl/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+          "validated_version": "0.2.10",
+          "max_context": 8192,
+          "min_host_available_mb": 8192,
+          "prepared_pack_size_bytes": 9843821,
+          "bundle_size_bytes": 22863506829
+        }
+      },
+      "qwen3.8-flash-next:q2_0": {
+        "gguf": "/data/model-hotset/qwen3.8-flash-next-q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf",
+        "source_url": "https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/tree/ed59f92082b1e93c0e96d60a8b11aab089b52f09/Q2_0",
+        "status": "candidate",
+        "in_testing": true,
+        "status_note": "Loading stage complete for the tested Strata Q2_0 recipe; gateway route, 256K recall, and short concurrent chats passed. Capability and application quality remain untested for this quant, so it stays a candidate.",
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "strata/0.2.10",
+          "recipe": "Q2_0 bundle on GPU 0 with 8 GiB resident expert RAM; gateway route works",
+          "default_context": 8192,
+          "context_limit": 262144,
+          "context_basis": "Single-chat marker recall passed at 251864 prompt tokens within 262144 configured context.",
+          "limits": "The 256K result is single-chat; concurrent chats were short at 8K. This loading result applies only to the Q2_0 Strata recipe."
+        },
+        "model_size_bytes": 37623740192,
+        "ngram_size_bytes": 28800138432,
+        "strata": {
+          "family": "qwen",
+          "model": "q2_0",
+          "model_path": "/data/model-hotset/qwen3.8-flash-next-q2_0",
+          "data_dir": "/data/bench-staging/strata-v0.2.10/data",
+          "resident_budget_gib": 8,
+          "validated_version": "0.2.10",
+          "only": true,
+          "max_context": 262144,
+          "min_host_available_mb": 12288,
+          "prepared_experts_path": "/data/bench-staging/strata-v0.2.10/data/packs/q2_0/experts.bin",
+          "prepared_pack_size_bytes": 35469412079,
+          "bundle_size_bytes": 101893290703
+        },
+        "profiles": {
+          "default": {
+            "system_prompt": "You are a helpful assistant. Answer the user directly.",
+            "inference": {
+              "temperature": 0.0,
+              "top_p": 1.0,
+              "max_tokens": 512
+            },
+            "runtime": {
+              "ctx_size": 8192,
+              "batch_size": 128,
+              "parallel": 1
+            },
+            "extra_args": [],
+            "tuning": {
+              "status": "untuned",
+              "last_tuned_at": null,
+              "benchmark_suite": "strata_memory"
+            },
+            "notes": "Two verified GGUF shards; model_size_bytes is shard 1 and ngram_size_bytes is shard 2. The manager sums them for total disk footprint. Strata placement is version- and pack-specific.",
+            "context_bounds": {
+              "min": 8192,
+              "max": 262144,
+              "max_basis": "gguf_train"
+            }
+          }
+        }
+      }
+    }
+  },
+  "roles": {
+    "schema": "model-roles/1",
+    "updated": "2026-10-15",
+    "about": "Quick reference: the model and profile to use for each rig lane and job. Other repos read this (through model_library.py) instead of choosing models themselves. Change a role only after a benchmark review; 'evidence' names the campaign behind it.",
+    "roles": {
+      "brain": {
+        "model": "qwen3.6:27b",
+        "profile": "default",
+        "lane": "3090",
+        "why": "Running brain model; Qwen3.8-27B is the next candidate.",
+        "good_for": [
+          "general",
+          "planning",
+          "orchestration_brain"
+        ],
+        "evidence": "MODEL_BEST_OF 2026-08-22 (qwen3.5:27b provisional); operator choice 2026-10-15"
+      },
+      "brain_code": {
+        "model": "qwen3-coder:30b-a3b",
+        "profile": "default",
+        "lane": "3090",
+        "why": "Leads MBPP+ base 87.8% vs 85.7%; code-only brain work.",
+        "good_for": [
+          "coding",
+          "code_review",
+          "orchestration_brain"
+        ],
+        "evidence": "20260813_limit5_all full EvalPlus"
+      },
+      "split_quality": {
+        "model": "ministral-3:14b",
+        "profile": "default",
+        "lane": "2x1060",
+        "why": "Data prep and split-worker code; HumanEval+ base 87.2%.",
+        "good_for": [
+          "data_preparation",
+          "coding",
+          "split_worker"
+        ],
+        "evidence": "20260820_modern_validation_l50_retry3"
+      },
+      "split_speed": {
+        "model": "ministral-3:8b",
+        "profile": "default",
+        "lane": "2x1060",
+        "why": "Faster split lane for parallel import prep and cheaper code work.",
+        "good_for": [
+          "data_preparation",
+          "small_coding",
+          "split_worker"
+        ],
+        "evidence": "20260820_modern_validation_l50_retry3"
+      },
+      "single_1060": {
+        "model": "ornith-1.5:9b",
+        "profile": "default",
+        "lane": "1x1060",
+        "why": "General single-1060 worker: structured extraction, document prep, QA. Provisional; leads qwen2.5-coder:7b on reasoning, ambiguity, orchestration and long context.",
+        "good_for": [
+          "structured_extraction",
+          "document_preparation",
+          "question_answering"
+        ],
+        "evidence": "smoke suites 2026-10-19 (full code and l50 reasoning pending); switched 2026-10-20"
+      },
+      "single_1060_code": {
+        "model": "qwen2.5-coder:7b",
+        "profile": "default",
+        "lane": "1x1060",
+        "why": "Code on one 1060: still leads ornith-1.5:9b on HumanEval+ (84.1 vs 73.8). The single_1060 default until 2026-10-20.",
+        "good_for": [
+          "coding",
+          "small_coding",
+          "single_gpu_worker"
+        ],
+        "evidence": "complete l100 suites; full code 2026-10-18"
+      },
+      "single_1060_compact": {
+        "model": "ministral-3:3b",
+        "profile": "default",
+        "lane": "1x1060",
+        "why": "Tested smaller alternative; weaker than the 7B default.",
+        "good_for": [
+          "compact_worker",
+          "small_tasks"
+        ],
+        "evidence": "20260820_modern_validation_l50_retry3 full code/runtime"
+      },
+      "text_extraction": {
+        "model": "gemma-4:e2b-q8",
+        "profile": "default",
+        "lane": "1x1060",
+        "why": "Document QA and reading comprehension (high DROP, low code).",
+        "good_for": [
+          "document_qa",
+          "reading_comprehension",
+          "text_extraction"
+        ],
+        "evidence": "model_task_library 2026-04-28"
+      },
+      "safe_tool_use": {
+        "model": "phi-4:14b",
+        "profile": "default",
+        "lane": "2x1060",
+        "why": "Command safety and tool sequencing; not for complex reasoning.",
+        "good_for": [
+          "tool_sequencing",
+          "command_safety"
+        ],
+        "evidence": "model_task_library 2026-04-28"
+      }
+    },
+    "jobs": [
+      {
+        "id": "country_import_coordinator",
+        "role": "brain",
+        "keywords": [
+          "country import",
+          "coordinate import"
+        ]
+      },
+      {
+        "id": "geometry_preparation",
+        "role": "brain",
+        "keywords": [
+          "geometry",
+          "boundary",
+          "admin spine"
+        ]
+      },
+      {
+        "id": "agent_orchestration",
+        "role": "brain",
+        "keywords": [
+          "orchestrate",
+          "plan tasks",
+          "agent"
+        ]
+      },
+      {
+        "id": "data_preparation",
+        "role": "split_quality",
+        "keywords": [
+          "data prep",
+          "prepare source",
+          "convert"
+        ]
+      },
+      {
+        "id": "code_generation",
+        "role": "split_quality",
+        "keywords": [
+          "generate code",
+          "write code",
+          "implement",
+          "patch",
+          "fix bug"
+        ]
+      },
+      {
+        "id": "code_review",
+        "role": "split_quality",
+        "keywords": [
+          "review",
+          "diagnose",
+          "debug",
+          "refactor"
+        ]
+      },
+      {
+        "id": "deep_reasoning",
+        "role": "split_quality",
+        "keywords": [
+          "score",
+          "judge",
+          "reason",
+          "rank",
+          "decide",
+          "tradeoff"
+        ]
+      },
+      {
+        "id": "fast_import_prep",
+        "role": "split_speed",
+        "keywords": [
+          "bulk prep",
+          "parallel prep"
+        ]
+      },
+      {
+        "id": "structured_extraction",
+        "role": "single_1060",
+        "keywords": [
+          "extract",
+          "json",
+          "schema",
+          "parse",
+          "triage",
+          "plan_searches"
+        ]
+      },
+      {
+        "id": "general_qa",
+        "role": "single_1060",
+        "keywords": [
+          "summarize",
+          "answer",
+          "qa",
+          "question"
+        ]
+      },
+      {
+        "id": "text_extraction",
+        "role": "text_extraction",
+        "keywords": [
+          "document qa",
+          "evidence",
+          "quote",
+          "passage",
+          "reading",
+          "extract facts"
+        ]
+      },
+      {
+        "id": "safe_tool_use",
+        "role": "safe_tool_use",
+        "keywords": [
+          "safety",
+          "command",
+          "shell",
+          "tool use",
+          "risk",
+          "dangerous"
+        ]
+      }
+    ]
+  },
+  "load_recipes": {
+    "schema_version": 1,
+    "recipes": {
+      "qwen27_3090_five_kv1060_v1": {
+        "model": "qwen3.6:27b",
+        "status": "research",
+        "procedure": "kvchat_private_v1",
+        "placement": {
+          "weights": [
+            "gpu0"
+          ],
+          "chat_state": [
+            "gpu_workers"
+          ]
+        },
+        "evidence": [
+          "results/runtime_experiments/kv_local_worker_matrix_20261107/README.md",
+          "results/runtime_experiments/kv_overnight_20261107/README.md"
+        ]
+      },
+      "nemotron74_expert1060_chat1060_v1": {
+        "model": "nemotron-3.5-bolt:74b-a9b",
+        "status": "research",
+        "procedure": "kv_expert_private_v1",
+        "placement": {
+          "weights": [
+            "gpu0"
+          ],
+          "experts": [
+            "gpu_workers"
+          ],
+          "chat_state": [
+            "gpu_workers"
+          ]
+        },
+        "evidence": [
+          "results/runtime_experiments/kv_expert_chat_20261107/README.md",
+          "results/runtime_experiments/kv_matched_placement_20261107/README.md"
+        ]
+      }
+    }
+  },
+  "imported_at": "2026-11-12T08:40:27+00:00"
+}

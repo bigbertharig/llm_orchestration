@@ -39,7 +39,7 @@ IMPORT_DIR = Path("/var/lib/ollama-import")
 ARCHIVE_MODELS = Path("/mnt/shared/models")
 # The checkout this script lives in (<tree>/scripts/manage_model_hotset.py).
 TREE = Path(__file__).resolve().parents[1]
-MODEL_LIBRARY_DIR = TREE / "plans" / "shoulders" / "benchmarking" / "scripts" / "active"
+MODEL_LIBRARY_DIR = TREE / "agents"
 
 
 def run_cmd(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -269,7 +269,7 @@ def published_gguf_paths(profile_ids: list[str], model_ids: list[str] | None = N
     """
     sys.path.insert(0, str(MODEL_LIBRARY_DIR))
     sys.path.insert(0, str(TREE / "scripts" / "rig"))
-    import model_library
+    import orchestration_model_library as model_library
     import remote_profiles
 
     model_ids = model_ids or []

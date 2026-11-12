@@ -9,20 +9,14 @@ import argparse
 import json
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "agents"))
+import orchestration_model_library as model_library  # noqa: E402
 
-MODELS = {
-    "qwen3.6:35b-a3b-xl": {
-        "path": "/mnt/shared/models/qwen3.6-35b-a3b-strata-xl/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
-    },
-    "nemotron-3.5-bolt:74b-a9b": {
-        "path": "/mnt/shared/models/nemotron-3.5-bolt-74b-a9b/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-Q3_K_XL.gguf",
-    },
-    "qwen3-coder-next:80b-a3b": {
-        "path": "/mnt/shared/models/qwen3-coder-next/Qwen3-Coder-Next-Q4_K_S.gguf",
-    },
-}
+
+MODELS = ("qwen3.6:35b-a3b-xl", "nemotron-3.5-bolt:74b-a9b", "qwen3-coder-next:80b-a3b")
 
 
 def expert_map(groups, kind):
@@ -45,9 +39,9 @@ NEMO_GROUPS = [
 def mode_spec(model, mode):
     if model not in MODELS:
         raise ValueError(f"unknown model {model}; choose from {', '.join(MODELS)}")
-    base = MODELS[model]
+    path = model_library.resolve(model)["gguf_path"]
     spec = {
-        "model": model, "gguf_path": base["path"], "use": "benchmark",
+        "model": model, "gguf_path": path, "use": "benchmark",
         "batch_size": 512, "parallel": 1, "image": "llama-runtime:b11669",
         "extra_args": ["--ubatch-size", "32", "-ctk", "f16", "-ctv", "f16"],
     }

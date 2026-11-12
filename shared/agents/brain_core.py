@@ -18,17 +18,11 @@ from typing import Any, Dict, List
 
 import requests
 from brain_constants import DEFAULT_LLM_MIN_TIER
-
-
-MODEL_LIBRARY_DIR = Path(__file__).resolve().parent.parent / "plans" / "shoulders" / "benchmarking" / "scripts" / "active"
+import orchestration_model_library as model_library
 
 
 def load_model_library():
-    """The benchmarking repo's model library module (model_roles.json + model_registry.json)."""
-    if str(MODEL_LIBRARY_DIR) not in sys.path:
-        sys.path.insert(0, str(MODEL_LIBRARY_DIR))
-    import model_library
-
+    """Orchestration's imported model-library snapshot."""
     return model_library
 
 
@@ -472,19 +466,14 @@ class BrainCoreMixin:
         return catalog
 
     def _load_model_roles(self, config_dir: Path) -> Dict[str, str]:
-        """Default model per role (brain, single_1060, ...) from the benchmarking model library."""
-        library_dir = (config_dir.parent / "plans" / "shoulders" / "benchmarking" / "scripts" / "active").resolve()
+        """Default model per role from orchestration's imported snapshot."""
         try:
-            if str(library_dir) not in sys.path:
-                sys.path.insert(0, str(library_dir))
-            import model_library
-
             roles = model_library.load_roles()
-            self.logger.info(f"Loaded model roles from {model_library.ROLES_PATH}")
+            self.logger.info(f"Loaded model roles from {model_library.SNAPSHOT_PATH}")
             return {name: str(spec["model"]) for name, spec in roles["roles"].items()}
         except Exception as exc:
             self.logger.warning(
-                f"Model roles unavailable from {library_dir}: {exc} - "
+                f"Model roles unavailable from {model_library.SNAPSHOT_PATH}: {exc} - "
                 "falling back to catalog-based model selection"
             )
             return {}

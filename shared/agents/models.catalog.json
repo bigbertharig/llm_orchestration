@@ -1,1 +1,587 @@
-../plans/shoulders/benchmarking/models.catalog.json
+{
+  "_comment": "Generated from model_registry.json by scripts/active/model_library.py export. Do not edit.",
+  "schema_version": 1,
+  "default_llm_min_tier": 1,
+  "models": [
+    {
+      "id": "deepseek-r1:7b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/deepseek-r1-7b/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+      "tags": [
+        "reasoning",
+        "worker_candidate"
+      ]
+    },
+    {
+      "id": "devstral-small:24b",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/devstral-small-24b/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
+      "tags": [
+        "brain_candidate",
+        "code"
+      ]
+    },
+    {
+      "id": "gemma-3:4b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/gemma-3-4b/gemma-3-4b-it-Q4_K_M.gguf",
+      "tags": [
+        "small",
+        "worker_candidate"
+      ]
+    },
+    {
+      "id": "gemma-4:12b",
+      "tier": 2,
+      "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/gemma-4-12b/gemma-4-12B-it-Q4_K_M.gguf",
+      "split_groups": [
+        {
+          "id": "pair_1_3",
+          "members": [
+            "gpu-1",
+            "gpu-3"
+          ],
+          "port": 11440
+        },
+        {
+          "id": "pair_4_5",
+          "members": [
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11441
+        }
+      ],
+      "tags": [
+        "gemma4",
+        "higher_reasoning"
+      ]
+    },
+    {
+      "id": "gemma-4:26b-a4b",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/gemma-4-26b-a4b/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+      "tags": [
+        "brain_candidate",
+        "gemma4",
+        "moe"
+      ]
+    },
+    {
+      "id": "gemma-4:31b",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/gemma-4-31b/gemma-4-31B-it-Q4_K_M.gguf",
+      "tags": [
+        "brain_candidate",
+        "gemma4",
+        "dense"
+      ]
+    },
+    {
+      "id": "gemma-4:e2b-q8",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/gemma-4-e2b/gemma-4-e2b-it-Q8_0.gguf",
+      "tags": [
+        "small",
+        "worker_candidate",
+        "gemma4"
+      ]
+    },
+    {
+      "id": "gemma-4:e4b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/gemma-4-e4b/gemma-4-e4b-it-Q4_K_M.gguf",
+      "tags": [
+        "small",
+        "worker_candidate",
+        "gemma4"
+      ]
+    },
+    {
+      "id": "gpt-oss:20b",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/gpt-oss-20b/gpt-oss-20b-mxfp4.gguf",
+      "tags": [
+        "brain_candidate",
+        "moe",
+        "openai"
+      ]
+    },
+    {
+      "id": "llama3.2:3b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/llama-3.2-3b/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+      "tags": [
+        "small",
+        "worker_candidate"
+      ]
+    },
+    {
+      "id": "llama3.3:70b",
+      "tier": 3,
+      "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/llama-3.3-70b/Llama-3.3-70B-Instruct-Q4_K_M.gguf",
+      "split_groups": [
+        {
+          "id": "all_gpus_capacity",
+          "members": [
+            "gpu-0",
+            "gpu-1",
+            "gpu-2",
+            "gpu-3",
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11445
+        }
+      ],
+      "tags": [
+        "capacity_candidate",
+        "dense",
+        "multi_gpu"
+      ]
+    },
+    {
+      "id": "mellum2.1:12b-a2.5b",
+      "tier": 2,
+      "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/mellum2.1-12b-a2.5b/Mellum2.1-12B-A2.5B-Thinking-Q4_K_M.gguf",
+      "in_testing": true,
+      "split_groups": [
+        {
+          "id": "pair_1_3",
+          "members": [
+            "gpu-1",
+            "gpu-3"
+          ],
+          "port": 11440
+        },
+        {
+          "id": "pair_4_5",
+          "members": [
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11441
+        }
+      ],
+      "tags": [
+        "code",
+        "worker_candidate",
+        "moe"
+      ]
+    },
+    {
+      "id": "minicpm5:2b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/minicpm5-2b/MiniCPM5-2B-Q4_K_M.gguf",
+      "in_testing": true,
+      "tags": [
+        "small",
+        "worker_candidate"
+      ]
+    },
+    {
+      "id": "ministral-3:14b",
+      "tier": 2,
+      "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/ministral-3-14b-instruct-2512/Ministral-3-14B-Instruct-2512-Q4_K_M.gguf",
+      "split_groups": [
+        {
+          "id": "pair_1_3",
+          "members": [
+            "gpu-1",
+            "gpu-3"
+          ],
+          "port": 11440
+        },
+        {
+          "id": "pair_4_5",
+          "members": [
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11441
+        }
+      ],
+      "tags": [
+        "worker_candidate",
+        "code",
+        "import_prep"
+      ]
+    },
+    {
+      "id": "ministral-3:3b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/ministral-3-3b-instruct-2512/Ministral-3-3B-Instruct-2512-Q4_K_M.gguf",
+      "tags": [
+        "worker_candidate",
+        "single_gpu",
+        "qualification_pending"
+      ]
+    },
+    {
+      "id": "ministral-3:8b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/ministral-3-8b-instruct-2512/Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
+      "tags": [
+        "worker_candidate",
+        "code",
+        "import_prep"
+      ]
+    },
+    {
+      "id": "mistral:7b-instruct",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/mistral-7b-instruct/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+      "tags": [
+        "instruction_following",
+        "worker_candidate"
+      ]
+    },
+    {
+      "id": "nex-n2.5:mini",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/nex-n2.5-mini/nex-agi_Nex-N2.5-mini-Q4_K_M.gguf",
+      "in_testing": true,
+      "tags": [
+        "brain_candidate",
+        "moe"
+      ]
+    },
+    {
+      "id": "ornith-1.5:35b-a3b",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/ornith-1.5-35b-a3b/Ornith-1.5-35B-Q4_K_M.gguf",
+      "tags": [
+        "brain_candidate",
+        "moe"
+      ]
+    },
+    {
+      "id": "ornith-1.5:9b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/ornith-1.5-9b/Ornith-1.5-9B-Q4_K_M.gguf",
+      "tags": [
+        "worker_candidate",
+        "dense",
+        "single_gpu"
+      ]
+    },
+    {
+      "id": "phi-4-mini-reasoning:3.8b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/phi-4-mini-reasoning/Phi-4-mini-reasoning-Q4_K_M.gguf",
+      "tags": [
+        "reasoning",
+        "worker_candidate"
+      ]
+    },
+    {
+      "id": "phi-4-mini:3.8b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/phi-4-mini/Phi-4-mini-instruct-Q4_K_M.gguf",
+      "tags": [
+        "small",
+        "worker_candidate"
+      ]
+    },
+    {
+      "id": "phi-4:14b",
+      "tier": 2,
+      "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/phi-4-14b/phi-4-Q4_K_M.gguf",
+      "split_groups": [
+        {
+          "id": "pair_1_3",
+          "members": [
+            "gpu-1",
+            "gpu-3"
+          ],
+          "port": 11440
+        },
+        {
+          "id": "pair_4_5",
+          "members": [
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11441
+        }
+      ],
+      "tags": [
+        "safe_tool_use",
+        "tool_planning",
+        "higher_reasoning"
+      ]
+    },
+    {
+      "id": "qwen2.5-coder:14b",
+      "tier": 2,
+      "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/qwen2.5-coder-14b/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+      "split_groups": [
+        {
+          "id": "pair_1_3",
+          "members": [
+            "gpu-1",
+            "gpu-3"
+          ],
+          "port": 11440
+        },
+        {
+          "id": "pair_4_5",
+          "members": [
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11441
+        }
+      ],
+      "tags": [
+        "code_review",
+        "higher_reasoning"
+      ]
+    },
+    {
+      "id": "qwen2.5-coder:7b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
+      "tags": [
+        "general",
+        "fast"
+      ]
+    },
+    {
+      "id": "qwen3-coder:30b-a3b",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/qwen3-coder-30b-a3b/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+      "tags": [
+        "brain_candidate",
+        "code",
+        "moe"
+      ]
+    },
+    {
+      "id": "qwen3.5:27b",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/qwen3.5-27b/Qwen3.5-27B-Q4_K_M.gguf",
+      "tags": [
+        "brain_candidate",
+        "dense",
+        "historical_comparison"
+      ]
+    },
+    {
+      "id": "qwen3.5:4b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf",
+      "tags": [
+        "small",
+        "worker_candidate"
+      ]
+    },
+    {
+      "id": "qwen3.5:9b-q3km",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/qwen3.5-9b/Qwen3.5-9B-Q3_K_M.gguf",
+      "tags": [
+        "worker_candidate",
+        "larger_single_gpu"
+      ]
+    },
+    {
+      "id": "qwen3.6:27b",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/qwen3.6-27b/Qwen3.6-27B-Q4_K_M.gguf",
+      "tags": [
+        "brain_candidate",
+        "dense"
+      ]
+    },
+    {
+      "id": "qwen3.6:35b-a3b",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+      "tags": [
+        "brain_candidate",
+        "moe"
+      ]
+    },
+    {
+      "id": "qwen3.8:27b",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_M.gguf",
+      "in_testing": true,
+      "tags": [
+        "brain_candidate",
+        "dense"
+      ]
+    },
+    {
+      "id": "qwen3:1.7b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/qwen3-1.7b/Qwen3-1.7B-Q4_K_M.gguf",
+      "tags": [
+        "small",
+        "worker_candidate"
+      ]
+    },
+    {
+      "id": "qwen3:14b",
+      "tier": 2,
+      "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/qwen3-14b/Qwen3-14B-Q4_K_M.gguf",
+      "split_groups": [
+        {
+          "id": "pair_1_3",
+          "members": [
+            "gpu-1",
+            "gpu-3"
+          ],
+          "port": 11440
+        },
+        {
+          "id": "pair_4_5",
+          "members": [
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11441
+        }
+      ],
+      "tags": [
+        "reasoning",
+        "worker_candidate"
+      ]
+    },
+    {
+      "id": "smollm3:3b",
+      "tier": 1,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/smollm3-3b/SmolLM3-3B-Q4_K_M.gguf",
+      "tags": [
+        "small",
+        "worker_candidate"
+      ]
+    },
+    {
+      "id": "qwen3-coder-next:80b-a3b",
+      "tier": 3,
+      "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/qwen3-coder-next/Qwen3-Coder-Next-Q4_K_S.gguf",
+      "in_testing": true,
+      "split_groups": [
+        {
+          "id": "all_gpus_capacity",
+          "members": [
+            "gpu-0",
+            "gpu-1",
+            "gpu-2",
+            "gpu-3",
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11445
+        }
+      ],
+      "tags": [
+        "capacity_candidate",
+        "code",
+        "moe",
+        "multi_gpu"
+      ]
+    },
+    {
+      "id": "k2-v2-instruct:70b",
+      "tier": 3,
+      "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/k2-v2-instruct/k2v2-Q4_K_M.gguf",
+      "in_testing": true,
+      "split_groups": [
+        {
+          "id": "all_gpus_capacity",
+          "members": [
+            "gpu-0",
+            "gpu-1",
+            "gpu-2",
+            "gpu-3",
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11445
+        }
+      ],
+      "tags": [
+        "capacity_candidate",
+        "dense",
+        "multi_gpu",
+        "reasoning"
+      ]
+    },
+    {
+      "id": "nemotron-3.5-bolt:74b-a9b",
+      "tier": 3,
+      "placement": "split_gpu",
+      "gguf_path": "/mnt/shared/models/nemotron-3.5-bolt-74b-a9b/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-Q3_K_XL.gguf",
+      "split_groups": [
+        {
+          "id": "all_gpus_capacity",
+          "members": [
+            "gpu-0",
+            "gpu-1",
+            "gpu-2",
+            "gpu-3",
+            "gpu-4",
+            "gpu-5"
+          ],
+          "port": 11445
+        }
+      ],
+      "tags": [
+        "capacity_candidate",
+        "moe",
+        "hybrid_mamba",
+        "multi_gpu"
+      ]
+    },
+    {
+      "id": "qwen3.6:35b-a3b-xl",
+      "tier": 3,
+      "placement": "single_gpu",
+      "gguf_path": "/mnt/shared/models/qwen3.6-35b-a3b-strata-xl/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+      "tags": [
+        "brain_candidate",
+        "moe"
+      ]
+    }
+  ]
+}

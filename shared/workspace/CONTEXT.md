@@ -40,10 +40,13 @@ Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 - `~/llm_orchestration/scripts/rollup_history.py` roll up an entire history tree
 - `shared/scripts/batch_runtime_diag.py` inspect runtime state for a batch
 - Meta tasks (`load_llm`, `unload_llm`): brain inserts via `brain_resources.py:_insert_resource_task()`, workers execute via `gpu_llama.py:load_model()`
-- Model library (owned by the benchmarking repo, `shared/plans/shoulders/benchmarking/`):
-  `model_roles.json` (model per lane/job) and `model_registry.json` (all models and
-  profiles), resolved by `scripts/active/model_library.py`. `shared/agents/models.catalog.json` links to the
-  generated catalog (model IDs, GGUF paths, placement, tiers).
+- Model knowledge originates in the benchmarking repo. Run
+  `python3 shared/scripts/sync_model_library.py what-new` to inspect changes and
+  `python3 shared/scripts/sync_model_library.py sync` to import them. Orchestration
+  runs from its own `shared/agents/model_library.json`,
+  `shared/agents/models.catalog.json`, and `shared/agents/model_access.json`;
+  benchmarking is not read during ordinary runtime. See
+  `shared/agents/MODEL_LIBRARY_SYNC.md`.
 
 ## Shared Storage Topology (Current)
 

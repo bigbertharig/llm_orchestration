@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
-DEFAULT_MODELS_CATALOG = "/mnt/shared/plans/shoulders/benchmarking/models.catalog.json"
+DEFAULT_MODELS_CATALOG = "/mnt/shared/agents/models.catalog.json"
 DEFAULT_LOAD_TIMEOUT_SECONDS = 300
 RUNTIME_META_COMMANDS = {
     "load_llm",

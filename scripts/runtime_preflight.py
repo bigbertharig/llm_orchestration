@@ -30,7 +30,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Run rig-side runtime preflight")
     ap.add_argument("--shared-root", default="/mnt/shared")
     ap.add_argument("--config", default="config.benchmark.json")
-    ap.add_argument("--catalog", default="/mnt/shared/plans/shoulders/benchmarking/models.catalog.json")
+    ap.add_argument("--catalog", default="/mnt/shared/agents/models.catalog.json")
     ap.add_argument("--runtime-meta-stale-seconds", type=int, default=180)
     ap.add_argument("--clear-orphan-queue-locks", action="store_true")
     ap.add_argument("--cleanup-stale-runtime-meta", action="store_true")

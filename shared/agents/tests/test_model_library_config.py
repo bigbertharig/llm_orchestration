@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""apply_model_library fills model choices and llama settings from the benchmarking library."""
+"""apply_model_library uses orchestration's imported model-library snapshot."""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ sys.path.insert(0, str(AGENTS))
 
 import brain_core  # noqa: E402
 
-LIBRARY_PRESENT = (brain_core.MODEL_LIBRARY_DIR / "model_library.py").is_file()
+LIBRARY_PRESENT = brain_core.model_library.SNAPSHOT_PATH.is_file()
 
 
-@unittest.skipUnless(LIBRARY_PRESENT, "benchmarking model library not checked out beside the agents")
+@unittest.skipUnless(LIBRARY_PRESENT, "orchestration model library has not been synced")
 class ApplyModelLibraryTests(unittest.TestCase):
     def setUp(self):
         self.template = json.loads((AGENTS / "config.template.json").read_text(encoding="utf-8"))
@@ -73,8 +73,8 @@ class ApplyModelLibraryTests(unittest.TestCase):
         self.assertEqual(config["startup_meta_tasks"][0]["target_model"], self.roles["single_1060"]["model"])
 
     def test_missing_library_fails_loudly(self):
-        with mock.patch.object(brain_core, "load_model_library", side_effect=ImportError("no library")):
-            with self.assertRaises(ImportError):
+        with mock.patch.object(brain_core, "load_model_library", side_effect=RuntimeError("no library")):
+            with self.assertRaises(RuntimeError):
                 brain_core.apply_model_library(copy.deepcopy(self.template))
 
 

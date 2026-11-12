@@ -47,11 +47,10 @@ class LlamaRuntimeScriptTests(unittest.TestCase):
         self.assertIn("--gpus device=2", out)
 
     def test_dry_run_uses_the_model_library_image(self):
-        library = SCRIPT.parents[2] / "plans" / "shoulders" / "benchmarking" / "scripts" / "active" / "model_library.py"
+        library = SCRIPT.parents[2] / "agents" / "model_library.json"
         if not library.is_file():
-            self.skipTest("benchmarking model library not checked out")
-        expected = subprocess.run(["python3", str(library), "runtime-image"],
-                                  capture_output=True, text=True, check=True).stdout.strip()
+            self.skipTest("orchestration model library has not been synced")
+        expected = __import__("json").loads(library.read_text(encoding="utf-8"))["registry"]["runtime_image"]
         out = self._dry_run("device=2")
         self.assertIn(expected, out)
 

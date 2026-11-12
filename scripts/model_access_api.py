@@ -574,7 +574,7 @@ def main() -> int:
         access_config_path=(
             Path(args.access_config).resolve()
             if args.access_config
-            else shared_root / "plans" / "shoulders" / "benchmarking" / "model_roles.json"
+            else shared_root / "agents" / "model_access.json"
         ),
         lease_store=GPULeaseStore(shared_root),
         runtime_loader=loader,

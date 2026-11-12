@@ -25,7 +25,7 @@ from prepare_llm_runtimes import (
 )
 
 
-DEFAULT_MODELS_CATALOG = "/mnt/shared/plans/shoulders/benchmarking/models.catalog.json"
+DEFAULT_MODELS_CATALOG = "/mnt/shared/agents/models.catalog.json"
 
 
 def _load_json(path: Path) -> dict:

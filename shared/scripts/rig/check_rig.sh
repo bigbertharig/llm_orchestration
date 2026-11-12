@@ -57,7 +57,7 @@ chk "docker active" systemctl is-active --quiet docker
 chk "bryan in docker group" bash -c 'id -nG bryan | tr " " "\n" | grep -qx docker'
 chk "nvidia container toolkit" nvidia-ctk --version
 chk "docker nvidia runtime configured" grep -q nvidia-container-runtime /etc/docker/daemon.json
-img=$(python3 -c "import json; print(json.load(open('$BENCH/model_registry.json'))['runtime_image'])" 2>/dev/null)
+img=$(python3 -c "import json; print(json.load(open('$TREE/shared/agents/model_library.json'))['registry']['runtime_image'])" 2>/dev/null)
 [ -n "$img" ] && docker image inspect "$img" >/dev/null 2>&1 && ok "runtime image $img" || bad "runtime image ${img:-?}" "build it (llama_runtime/README.md)"
 missing=""
 for d in "$BENCH"/docker/bench-*/; do
