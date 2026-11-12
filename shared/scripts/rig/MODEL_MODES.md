@@ -2,9 +2,10 @@
 
 Orchestration owns the executable load settings. Benchmarking owns the
 measurements and receipts that justify a mode. A caller names a model and a
-mode; the rig controller applies admission, launches the runtime, verifies
-readiness, and reports the endpoint. The gateway and harness should use the
-returned endpoint and never copy GPU maps, tensor patterns, or KV flags.
+mode; the ordinary rig controller handles single-server modes. The shared-KV
+35B service below uses the same rig GPU claims for admission, launches its own
+one-model runtime, verifies readiness, and reports a per-chat endpoint.
+The gateway and harness should use the returned endpoint and never copy GPU maps, tensor patterns, or KV flags.
 The request key is **canonical registry model ID + mode**. The mode describes
 the requested capability; context capacity and hardware placement are resolved
 by that pair. `list --json` exposes the same two columns for callers.
@@ -19,8 +20,9 @@ python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py start qw
 rig observe
 ```
 
-The optional `--lease ID` attaches an existing manager lease. `start` never
-unloads another model or forces a conflicting mode. The existing rig controller
+For ordinary single-server modes, the optional `--lease ID` attaches an existing
+manager lease. The shared-KV mode currently uses GPU claims and rejects
+`--lease`; `start` never unloads another model or forces a conflicting mode. The existing rig controller
 rejects busy cards and ports. Use its normal stop command for an intentional
 mode switch. `--detach` runs a tracked rig load job; readiness is visible in
 `rig observe`. Without it, `start` waits for readiness.
@@ -62,7 +64,9 @@ python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py stop qwe
 the first free 1060. The parent command holds a GPU0 claim and starts one
 container with one model instance. Each attach command claims its 1060 before
 creating a new KV context in that process; detach frees the context and claim.
-`status` reports the live chats and their cards. The returned turn route is
+`status` reports the live chats and their cards. `rig status` also reports the
+shared-KV service beside its ordinary mode state, and a global `rig stop`
+cleans up the service and its claims. The returned turn route is
 loopback on the rig; the Gateway/harness must invoke the controller or use its
 existing rig tunnel to reach that route. The parent stays ready while children
 exist, and stopping it releases all child claims.

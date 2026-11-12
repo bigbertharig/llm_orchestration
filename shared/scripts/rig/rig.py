@@ -455,6 +455,10 @@ def stop_strata() -> None:
 
 def stop_everything() -> None:
     """Stop any mode and return to idle. Caller holds the lock."""
+    kv_state = LOCAL / "brain" / "kv_chat_mode.json"
+    if kv_state.exists():
+        say("  stopping shared-weight KV chat service")
+        run([sys.executable, str(LOCAL / "scripts/rig/kv_chat_control.py"), "stop"], timeout=90)
     if any(e.get("backend") == "strata" for e in read_state().get("profiles", {}).values()):
         stop_strata()
     for unit in STACK_UNITS.values():
@@ -1011,6 +1015,18 @@ def cmd_start_remote(args) -> int:
 
 def status_payload() -> dict:
     st = read_state()
+    kv = None
+    kv_state = LOCAL / "brain" / "kv_chat_mode.json"
+    if kv_state.exists():
+        try:
+            item = json.loads(kv_state.read_text())
+            url = f"http://127.0.0.1:{item['port']}/health"
+            with urllib.request.urlopen(url, timeout=2) as response:
+                ready = json.load(response).get("model_loaded") is True
+            kv = {"status": "ready" if ready else "down", "model": item["model"],
+                  "port": item["port"], "mode": item["mode"]}
+        except (OSError, ValueError, KeyError, urllib.error.URLError):
+            kv = {"status": "down"}
     g = gpu_check()
     profiles = [
         {"id": pid, **{k: e.get(k) for k in ("model", "port", "gpus", "ctx_size", "state", "since", "from", "lease",
@@ -1020,6 +1036,7 @@ def status_payload() -> dict:
     return {
         "mode": st["mode"], "status": st["status"], "since": st.get("since"), "from": st.get("from"),
         "last_error": st.get("error"), "profiles": profiles, "detail": st.get("detail"),
+        "shared_kv_service": kv,
         "gpus": {"visible": len(g["visible"]), "ids": g["ids"], "ok": g["ok"], "errors": g["errors"],
                  "notes": gpu_notes(g)},
     }
@@ -1033,6 +1050,9 @@ def cmd_status(args) -> int:
     say(f"mode: {s['mode']}   status: {s['status']}   since: {s['since'] or '-'}   from: {s['from'] or '-'}")
     for p in s["profiles"]:
         say(f"  {p['id']:<10} {p['state']:<8} :{p['port']}  GPU {p['gpus']}  ctx {p['ctx_size']}  ({p['model']})")
+    if s["shared_kv_service"]:
+        kv = s["shared_kv_service"]
+        say(f"shared KV service: {kv['status']} :{kv.get('port', '-')} ({kv.get('model', '-')})")
     if s["detail"]:
         say(f"detail: {json.dumps(s['detail'])}")
     if s["last_error"]:
@@ -1045,7 +1065,7 @@ def cmd_status(args) -> int:
     say(f"guard: {gs['level']} (loads {'admitted' if gs['loads_admitted'] else 'held'}) {gs['why']}")
     ports = live_ports()
     say("ports: " + (", ".join(f":{p} {m}" for p, m in ports.items()) if ports else "none serving"))
-    if s["mode"] == "idle" and (ports or any(unit_active(u) for u in STACK_UNITS.values())):
+    if s["mode"] == "idle" and (ports or any(unit_active(u) for u in STACK_UNITS.values())) and not s["shared_kv_service"]:
         say("WARNING: state says idle but something is running; run `rig stop` to clean up")
     return 0
 
