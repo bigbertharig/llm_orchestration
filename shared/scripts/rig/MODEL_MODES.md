@@ -32,47 +32,56 @@ mode switch. `--detach` runs a tracked rig load job; readiness is visible in
 | `nemotron-3.5-bolt:74b-a9b` | `single-chat-fast` | GPU 0 chat, routed experts across GPUs 1–4, 262K cap, F16 KV | Benchmarking `results/runtime_experiments/nemo_chat3090_20261109/` |
 | `qwen3-coder-next:80b-a3b` | `single-chat-fast` | GPU 0 chat, 30 expert layers across GPUs 1–5, 262K cap, F16 KV | Benchmarking `results/runtime_experiments/coder_next_chat_20261111/` |
 
-## Preferred 35B placement and attached-chat dependency
+## Preferred 35B placement and attached chats
 
 The preferred experimental capacity layout is one Qwen3.6 35B-A3B XL Q4_K_XL
 weight load on GPU0, one Q4_0 main KV context on GPU0, and up to five Q4_0
 worker KV contexts, one on each of GPUs1?5. The [six-chat replay](https://github.com/bigbertharig/benchmarking/blob/2bc9fda/results/runtime_experiments/model_mode_smokes_20261111/README.md)
 ran all six at 16K, 32K, and 50K occupied depth with 262K reservations. GPU0
 peaked at 23,567 MiB of 24,564 MiB, so this fit has little GPU0 margin.
-It measured short 64-token windows; admission and longer turns still need
-runtime validation.
 
-The model library has **two distinct request keys**:
+The model library has **two request keys**:
 
-| Model | Mode | Type | Requires | Runtime state |
-| --- | --- | --- | --- | --- |
-| `qwen3.6:35b-a3b-xl` | `gpu0-main-q4` | Model + main chat | GPU0 | Executable single-server load, 262K cap, Q4_0 KV |
-| `qwen3.6:35b-a3b-xl` | `gpu1060-chat-q4` | Add one worker chat | Ready `gpu0-main-q4` instance, then one free GPU1?5 | Catalogued dependency; attach endpoint not implemented |
+| Model | Mode | Type | Requires |
+| --- | --- | --- | --- |
+| `qwen3.6:35b-a3b-xl` | `gpu0-main-q4` | Persistent shared-weight model and main chat on GPU0 | GPU0 free; patched KV runtime built |
+| `qwen3.6:35b-a3b-xl` | `gpu1060-chat-q4` | Attach one independent worker chat to a free 1060 | Ready `gpu0-main-q4` parent |
 
-Inspect the two entries with `model_modes.py show MODEL MODE` or
-`model_modes.py list --json`. The main load command is:
+Build the private runtime once on the rig, then use the named commands:
 
 ```bash
-python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py start qwen3.6:35b-a3b-xl gpu0-main-q4 --port 11524 --detach
+/home/bryan/llm_orchestration/shared/scripts/rig/build_kv_chat_server.sh
+python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py start qwen3.6:35b-a3b-xl gpu0-main-q4 --port 11524
+python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py start qwen3.6:35b-a3b-xl gpu1060-chat-q4 --chat-id worker-a
+python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py turn qwen3.6:35b-a3b-xl gpu1060-chat-q4 --chat-id worker-a --message 'What is 2+2?' --max-tokens 32
+python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py stop qwen3.6:35b-a3b-xl gpu1060-chat-q4 --chat-id worker-a
+python3 /home/bryan/llm_orchestration/shared/scripts/rig/model_modes.py stop qwen3.6:35b-a3b-xl gpu0-main-q4
 ```
 
-`start ... gpu1060-chat-q4` currently returns a clear error. The private
-benchmark runner proves device placement, but its replay is not an HTTP chat
-service and cannot attach a live conversation to the existing llama-server.
-A second `rig start remote` would load a second model process, so it is not a
-substitute. Gateway and harness can discover the dependent entry but must not
-advertise it as ready or request worker chat admission until a shared-model
-runtime supports per-chat KV device selection and returns a separate chat route.
-The parent instance must remain ready for the entire worker lifetime; worker
-card leases and per-chat teardown belong to that future attach operation.
+`--gpu 1` through `--gpu 5` selects a worker explicitly; omitting it chooses
+the first free 1060. The parent command holds a GPU0 claim and starts one
+container with one model instance. Each attach command claims its 1060 before
+creating a new KV context in that process; detach frees the context and claim.
+`status` reports the live chats and their cards. The returned turn route is
+loopback on the rig; the Gateway/harness must invoke the controller or use its
+existing rig tunnel to reach that route. The parent stays ready while children
+exist, and stopping it releases all child claims.
+
+This is an experimental inference service around the private patched llama.cpp
+build. It supports text turns with greedy decoding and per-chat Q4_0 KV. It is
+not yet an OpenAI-compatible route or a published Gateway offer; those adapters
+must use the returned chat ID and route, and handle model/worker admission
+through this controller. It has no chat checkpoint durability across parent
+restart. Long-context turn quality and sustained multi-turn speed still need
+verification. Never substitute a second `rig start remote`: that would load
+another copy of the weights.
 
 These are experimental single-server modes on the current six-card rig and
 model files. The Nemo and Coder layout measurements used a private llama.cpp
 probe; the named HTTP server recipes still need matched quality and speed
-verification before general gateway offers. The 35B five-worker and Nemo
-two-chat placements need independent per-chat KV device selection; the current
-HTTP server cannot express them. They remain in benchmarking until that runtime
-capability exists. The CLI rejects unknown model/mode pairs instead of silently
+verification before general gateway offers. The Nemo two-chat placement still needs a corresponding shared-weight
+runtime. The 35B attached-chat mode uses the separate experimental service
+above, not the ordinary llama-server. The CLI rejects unknown model/mode pairs instead of silently
 substituting another placement.
 
 The current interface is deliberately small. It gives experiments one load

@@ -9,6 +9,7 @@ import argparse
 import json
 import shlex
 import subprocess
+from pathlib import Path
 
 
 MODELS = {
@@ -54,10 +55,6 @@ def mode_spec(model, mode):
         spec.update(ctx_size=16384, tensor_split="48")
         spec["extra_args"] = ["--reasoning", "off"]
         return spec, [0]
-    if model == "qwen3.6:35b-a3b-xl" and mode == "gpu0-main-q4":
-        spec.update(ctx_size=262144, tensor_split="48")
-        spec["extra_args"] = ["--reasoning", "off", "-ctk", "q4_0", "-ctv", "q4_0"]
-        return spec, [0]
     if model == "nemotron-3.5-bolt:74b-a9b" and mode == "single-chat-fast":
         spec.update(ctx_size=262144, tensor_split="88,0,0,0,0")
         spec["extra_args"] += ["--reasoning", "off", "--override-tensor", expert_map(NEMO_GROUPS[:4], "(up|down)")]
@@ -74,18 +71,19 @@ def catalog():
              "executable": True} for model in MODELS]
     rows.append({"model": "qwen3.6:35b-a3b-xl", "mode": "gpu0-main-q4",
                  "kind": "model_load", "executable": True,
-                 "chat_gpu": 0, "context_cap": 262144})
+                 "chat_gpu": 0, "context_cap": 262144,
+                 "runtime": "shared-kv-chat", "supports_mode": "gpu1060-chat-q4"})
     rows.append({"model": "qwen3.6:35b-a3b-xl", "mode": "gpu1060-chat-q4",
-                 "kind": "attached_chat", "executable": False,
+                 "kind": "attached_chat", "executable": True,
                  "requires": {"model": "qwen3.6:35b-a3b-xl", "mode": "gpu0-main-q4"},
                  "candidate_gpus": [1, 2, 3, 4, 5], "context_cap": 262144,
-                 "reason": "Current HTTP runtime cannot attach per-chat KV on another GPU to a loaded model."})
+                 "runtime": "shared-kv-chat", "route_kind": "per-chat-turns"})
     return rows
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("list", "show", "start"))
+    p.add_argument("action", choices=("list", "show", "start", "stop", "status", "turn"))
     p.add_argument("model", nargs="?")
     p.add_argument("mode", nargs="?")
     p.add_argument("--port", type=int)
@@ -93,6 +91,10 @@ def main():
     p.add_argument("--detach", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--json", action="store_true", help="machine-readable list")
+    p.add_argument("--chat-id")
+    p.add_argument("--gpu", type=int, help="1060 GPU index for an attached chat; default selects a free one")
+    p.add_argument("--message")
+    p.add_argument("--max-tokens", type=int, default=128)
     a = p.parse_args()
     if a.action == "list":
         rows = catalog()
@@ -107,11 +109,33 @@ def main():
         p.error("show/start needs MODEL MODE")
     attached = next((row for row in catalog() if row["model"] == a.model and
                      row["mode"] == a.mode and row["kind"] == "attached_chat"), None)
-    if attached:
+    shared_main = a.model == "qwen3.6:35b-a3b-xl" and a.mode == "gpu0-main-q4"
+    if attached or shared_main:
         if a.action == "show":
-            print(json.dumps(attached, indent=2))
+            if attached:
+                print(json.dumps(attached, indent=2))
+            else:
+                print(json.dumps(next(row for row in catalog() if row["model"] == a.model and row["mode"] == a.mode), indent=2))
             return
-        p.error(attached["reason"] + " Benchmark replay is available; no worker HTTP route is ready.")
+        if a.lease:
+            p.error("shared-KV chat mode uses rig claims; --lease is not supported yet")
+        if attached and a.action in ("start", "stop") and not a.chat_id:
+            p.error("worker start/stop needs --chat-id")
+        if a.action == "turn" and (not a.chat_id or a.message is None):
+            p.error("turn needs --chat-id and --message")
+        action = ("attach" if a.action == "start" else "detach" if a.action == "stop" else a.action) if attached else a.action
+        cmd = ["python3", str(Path(__file__).with_name("kv_chat_control.py")), action]
+        if a.port: cmd += ["--port", str(a.port)]
+        if a.chat_id: cmd += ["--chat-id", a.chat_id]
+        if a.gpu is not None: cmd += ["--gpu", str(a.gpu)]
+        if a.message is not None: cmd += ["--message", a.message]
+        if a.action == "turn": cmd += ["--max-tokens", str(a.max_tokens)]
+        if a.dry_run:
+            print(shlex.join(cmd))
+            return
+        raise SystemExit(subprocess.run(cmd, check=False).returncode)
+    if a.action not in ("show", "start"):
+        p.error("this action is only available for the 35B shared-KV mode")
     try:
         spec, gpus = mode_spec(a.model, a.mode)
     except ValueError as exc:
