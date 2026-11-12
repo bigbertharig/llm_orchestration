@@ -1475,7 +1475,7 @@ def cmd_boot(_args) -> int:
 
 def cmd_shared_kv(args) -> int:
     """Delegate shared-chat lifecycle to the rig-side controller; keep its claims authoritative."""
-    command = [sys.executable, str(Path(__file__).with_name("kv_chat_control.py")), args.action]
+    command = [sys.executable, str(Path(__file__).resolve().with_name("kv_chat_control.py")), args.action]
     if args.chat_id: command += ["--chat-id", args.chat_id]
     if args.message is not None: command += ["--message", args.message]
     if args.max_tokens is not None: command += ["--max-tokens", str(args.max_tokens)]
