@@ -52,7 +52,7 @@ def mode_spec(model, mode):
     }
     if model == "qwen3.6:35b-a3b-xl" and mode == "single-chat-fast":
         spec.update(ctx_size=16384, tensor_split="48")
-        spec["extra_args"] = []
+        spec["extra_args"] = ["--reasoning", "off"]
         return spec, [0]
     if model == "nemotron-3.5-bolt:74b-a9b" and mode == "single-chat-fast":
         spec.update(ctx_size=262144, tensor_split="88,0,0,0,0")
