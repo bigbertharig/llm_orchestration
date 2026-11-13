@@ -154,3 +154,7 @@ board, slots C17/C18: benchmarking `RIG_PERFORMANCE.md`). Leases, claims and pla
 card that is no longer visible while a runtime, lease or claim still holds it. Only the orchestration stack
 needs the cards its `agents/config.json` names, so `rig start orchestration` refuses when any of them is absent.
 GPU numbers follow PCI bus order: after moving cards, check which index each card has before pinning one.
+
+## Hardware changes and shared chats
+
+`rig status --json` scans the live PCI/NVIDIA inventory and records GPU UUID, name, VRAM and link state. Power limits are matched by model/default board limit; a new card with no rule keeps its default. The 35B shared-chat worker controller now scans free cards with at least 6,000 MiB VRAM and prefers the smaller suitable card, so the GTX 1070 can be used when appropriate. The `gpu1060-chat-q4` mode name is retained for compatibility; its candidate list is discovered at request time. Named expert-placement recipes still prescribe specific card groups and must be reviewed after a topology change.

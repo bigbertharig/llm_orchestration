@@ -90,6 +90,23 @@ def container_running():
     return run(["docker", "inspect", "-f", "{{.State.Running}}", CONTAINER], check=False).stdout.strip() == "true"
 
 
+def worker_cards() -> list[dict]:
+    """Discover cards with enough VRAM for a Q4 worker chat; prefer smaller cards."""
+    output = run(["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used",
+                  "--format=csv,noheader,nounits"]).stdout
+    cards = []
+    for line in output.splitlines():
+        fields = [part.strip() for part in line.split(",")]
+        if len(fields) != 4:
+            raise RuntimeError(f"invalid GPU inventory row: {line}")
+        gpu, name, total, used = fields
+        if not all(value.isdigit() for value in (gpu, total, used)):
+            raise RuntimeError(f"invalid GPU inventory row: {line}")
+        if int(gpu) != 0 and int(total) >= 6000:
+            cards.append({"gpu": int(gpu), "name": name, "total_mib": int(total), "used_mib": int(used)})
+    return sorted(cards, key=lambda card: (card["total_mib"], card["gpu"]))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("action", choices=("start", "attach", "detach", "turn", "status", "stop"))
@@ -165,15 +182,17 @@ def main():
             code, value = request(st["port"], "/chats")
             if code != 200: raise RuntimeError(value)
             used = {chat["gpu"] for chat in value["chats"]}
-            candidates = [args.gpu] if args.gpu is not None else list(range(1, 6))
-            selected = None
-            for gpu in candidates:
-                if gpu not in range(1, 6) or gpu in used: continue
-                claims = json.loads(run(["rig", "claim", "list"]).stdout)["claims"]
-                if any(gpu in item["gpu_ids"] for item in claims): continue
-                memory = run(["nvidia-smi", "--id", str(gpu), "--query-gpu=memory.used", "--format=csv,noheader,nounits"]).stdout.strip()
-                if memory.isdigit() and int(memory) < 1000: selected = gpu; break
-            if selected is None: p.error("no free 1060 card for an attached chat")
+            inventory = worker_cards()
+            eligible = {card["gpu"] for card in inventory}
+            if args.gpu is not None and args.gpu not in eligible:
+                p.error(f"GPU {args.gpu} is not an eligible worker card; detected {sorted(eligible)}")
+            candidates = ([card for card in inventory if card["gpu"] == args.gpu] if args.gpu is not None
+                          else inventory)
+            claims = json.loads(run(["rig", "claim", "list"]).stdout)["claims"]
+            selected = next((card["gpu"] for card in candidates
+                             if card["gpu"] not in used and card["used_mib"] < 1000
+                             and not any(card["gpu"] in item["gpu_ids"] for item in claims)), None)
+            if selected is None: p.error("no free GPU with at least 6000 MiB VRAM for an attached chat")
             name = f"qwen35-kv-chat-{args.chat_id}"
             claim(name, selected, f"35B Q4 KV chat {args.chat_id}; parent {PARENT_CLAIM}")
             try:

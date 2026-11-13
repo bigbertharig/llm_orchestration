@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Named, experimental model loads on the six-card rig.
+"""Named, experimental model loads on the rig.
 
-The benchmark repository records evidence; this module owns the executable
-placements. The rig controller still performs admission, loading and readiness.
+The benchmark repository records evidence; this module owns explicit model
+recipes. The attached-chat candidate list is scanned by VRAM. The rig controller
+still performs admission, loading and readiness.
 """
 
 import argparse
@@ -67,10 +68,16 @@ def catalog():
                  "kind": "model_load", "executable": True,
                  "chat_gpu": 0, "context_cap": 262144,
                  "runtime": "shared-kv-chat", "supports_mode": "gpu1060-chat-q4"})
+    from kv_chat_control import worker_cards
+    try:
+        candidates = [card["gpu"] for card in worker_cards()]
+    except (OSError, RuntimeError, subprocess.CalledProcessError):
+        candidates = []
     rows.append({"model": "qwen3.6:35b-a3b-xl", "mode": "gpu1060-chat-q4",
-                 "kind": "attached_chat", "executable": True,
+                 "kind": "attached_chat", "executable": bool(candidates),
                  "requires": {"model": "qwen3.6:35b-a3b-xl", "mode": "gpu0-main-q4"},
-                 "candidate_gpus": [1, 2, 3, 4, 5], "context_cap": 262144,
+                 "candidate_gpus": candidates, "min_worker_vram_mib": 6000,
+                 "context_cap": 262144,
                  "runtime": "shared-kv-chat", "route_kind": "per-chat-turns"})
     return rows
 
@@ -86,7 +93,7 @@ def main():
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--json", action="store_true", help="machine-readable list")
     p.add_argument("--chat-id")
-    p.add_argument("--gpu", type=int, help="1060 GPU index for an attached chat; default selects a free one")
+    p.add_argument("--gpu", type=int, help="eligible worker GPU index for an attached chat; default selects a free one")
     p.add_argument("--message")
     p.add_argument("--max-tokens", type=int, default=128)
     a = p.parse_args()
