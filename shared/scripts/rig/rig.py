@@ -1477,7 +1477,7 @@ def main() -> int:
     s.add_argument("--spec", help="remote, one profile: required manager load spec (JSON: model, gguf_path, ctx_size, tensor_split, ...)")
     s.set_defaults(fn=cmd_start)
     s = sub.add_parser("shared-kv", help="control the loaded shared-weight chat service")
-    s.add_argument("action", choices=("status", "attach", "detach", "turn"))
+    s.add_argument("action", choices=("status", "start", "attach", "detach", "turn"))
     s.add_argument("--chat-id")
     s.add_argument("--message")
     s.add_argument("--max-tokens", type=int)
