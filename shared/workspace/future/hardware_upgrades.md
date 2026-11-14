@@ -25,17 +25,16 @@ and software support before buying.
 | Motherboard | ASUS B250 Mining Expert (19× PCIe slots: 1× x16, 18× x1) |
 | CPU | Intel i7-7700K (4 cores / 8 threads, 4.2 GHz, LGA 1151) |
 | RAM | 2× 16GB DDR4-2133 UDIMM (32GB total, non-ECC) |
-| PCIe generation | CPU x16 at Gen3; chipset x1 risers at Gen2; C17/C18 behind a Gen1 x1 switch |
+| PCIe generation | Gen2, set board-wide in BIOS (2026-10-19; Gen3 logged riser link replays) |
 | PSU | Dual/triple PSU capable, ~2,200W total capacity |
 
 | GPU | Type | VRAM | Slot | Role | Models |
 |-----|------|------|------|------|--------|
 | 0 | RTX 3090 Ti | 24GB | x16 | Brain | 26B–35B models (Qwen3.6, Gemma-4 26B/31B) |
-| 1, 3–5 | GTX 1060 | 6GB each | x1 risers | Workers | 3B–7B single, 14B split (pairs of 2) |
-| 2 | GTX 1070 | 8GB | x1 riser | Worker | Single or split model tests |
+| 1–5 | GTX 1060 | 6GB each | x1 risers | Workers | 3B–7B single, 14B split (pairs of 2) |
 
 Strengths: 19 PCIe slots, dual/triple PSU, proven stable, can hold many worker GPUs.
-Limits: 32GB RAM (2 slots maxed), one x16 slot, 2017 platform.
+Limits: x1 risers for workers (fine for decode, slower loads), 32GB RAM (2 slots maxed), 2017 platform.
 
 **CPU workers (<worker-ip>–17) — Orange Pi Prime fleet**
 
@@ -257,104 +256,6 @@ Note: NVLink is available on RTX 3090 but NOT on 3090 Ti, 4090, or 5090. All 40/
 | 2× RTX 5090 PCIe 5.0 | 64GB | ~40-60 (est) | ~$7,200 (street, ~$4,000 MSRP) | Fastest consumer 70B when prices drop |
 | 1× RTX 5090 | 32GB | n/a (70B doesn't fit) | ~$3,600 | Fastest for ≤30B (~180 tok/s on 7B) |
 
-### GPU VRAM capacity per rated board watt (checked 2026-11-09)
-
-This is a capacity and power-screening table, not a model-speed ranking or a shopping list. **W/GB = manufacturer maximum board power divided by physical VRAM; lower is better for this one metric.** The power column is a rating, not measured inference draw. Peak memory bandwidth is included because it can matter for decode, but it does not predict tokens/s on its own. Host power, idle draw, power limits, cooling, price, model fit, and runtime support also matter. A multi-card total is not one seamless VRAM pool; split models have per-card overhead and placement constraints.
-
-| Card | VRAM | Rated board power | W/GB | Peak memory bandwidth | Capacity/power note |
-|------|-----:|------------------:|-----:|----------------------:|---------------------|
-| GTX 1060 6GB | 6 GB | 120 W | 20.00 | 192 GB/s | Existing worker card; reference specification |
-| GTX 1070 | 8 GB | 150 W | 18.75 | 256 GB/s | Existing worker-farm comparison |
-| RTX 3090 | 24 GB | 350 W | 14.58 | 936 GB/s | Older 24GB build option; NVLink capable |
-| RTX 3090 Ti | 24 GB | 450 W | 18.75 | 1,008 GB/s | Current rig card; its configured 350W cap is separate from this rating |
-| RTX A5000 | 24 GB ECC | 230 W | 9.58 | 768 GB/s | Active cooling; one standard PCIe 8-pin |
-| RTX A5500 | 24 GB ECC | 230 W | 9.58 | 768 GB/s | Active cooling; one standard PCIe 8-pin |
-| Quadro P6000 | 24 GB | 250 W | 10.42 | 432 GB/s | Older Pascal card; active cooling; one standard PCIe 8-pin |
-| Tesla M10 | 4 × 8 GB | 225 W for board | 7.03 across 32 GB | 83 GB/s per GPU | Four separate Maxwell GPUs, not one 32GB pool; 1× PCIe 8-pin, passive cooling, CUDA `sm_50` build needed |
-| RTX 3060 12GB | 12 GB | 170 W | 14.17 | 360 GB/s | Existing 12GB worker option |
-| RTX 4060 Ti 16GB | 16 GB | 165 W | 10.31 | 288 GB/s | Older 16GB baseline |
-| RTX 5060 Ti 16GB | 16 GB | 180 W | 11.25 | 448 GB/s | Use the 16GB variant, not the 8GB one |
-| RTX 5070 Ti | 16 GB | 300 W | 18.75 | 896 GB/s | More bandwidth than 5060 Ti, same VRAM |
-| RTX 5080 | 16 GB | 360 W | 22.50 | 960 GB/s | Faster memory, limited capacity per watt |
-| RTX 5090 | 32 GB | 575 W | 17.97 | 1,792 GB/s | Largest current GeForce VRAM in this comparison |
-| Tesla V100S 32GB PCIe | 32 GB HBM2 | 250 W | 7.81 | 1,134 GB/s | Used price watch (~US$800-1,200 seen Nov 2026); passive cooling and 32GB BAR1 BIOS mapping required |
-| A100 40GB PCIe | 40 GB HBM2 | 250 W | 6.25 | 1,555 GB/s | Older data-center accelerator; passive cooling requires server airflow |
-| A100 80GB PCIe | 80 GB HBM2e | 300 W | 3.75 | 1,935 GB/s | Older data-center accelerator; passive cooling requires server airflow |
-| A800 40GB Active | 40 GB HBM2 | 240 W | 6.00 | 1,555 GB/s | Active-cooled workstation accelerator; check used availability |
-| RTX A6000 (Ampere) | 48 GB ECC | 300 W | 6.25 | 768 GB/s | Active-cooled 48GB workstation card; `sm_86` |
-| A40 | 48 GB ECC | 300 W | 6.25 | 696 GB/s | Older data-center card; passive cooling requires directed airflow |
-| L40 | 48 GB ECC | 300 W | 6.25 | 864 GB/s | Ada data-center card; passive cooling requires directed airflow |
-| L40S | 48 GB ECC | 350 W | 7.29 | 864 GB/s | Ada data-center card; passive cooling requires directed airflow |
-| RTX 6000 Ada | 48 GB ECC | 300 W | 6.25 | 960 GB/s | Active-cooled 48GB workstation card; `sm_89` |
-| RTX PRO 2000 Blackwell | 16 GB ECC | 70 W | 4.38 | 288 GB/s | Low-power workstation option |
-| RTX PRO 4000 Blackwell SFF | 24 GB ECC | 70 W | 2.92 | 432 GB/s | Very low board rating; half-height, dual-slot |
-| RTX PRO 4000 Blackwell | 24 GB ECC | 145 W | 6.04 | 672 GB/s | Single-slot; NVIDIA's comparison page lists 145W (another product page lists 140W) |
-| RTX PRO 4500 Blackwell | 32 GB ECC | 200 W | 6.25 | 896 GB/s | 32GB at a lower rating than RTX 5090 |
-| RTX PRO 5000 Blackwell | 48 GB ECC | 300 W | 6.25 | 1,344 GB/s | High single-card capacity |
-| RTX PRO 5000 Blackwell 72GB | 72 GB ECC | 300 W | 4.17 | 1,344 GB/s | Same rated power as 48GB variant |
-| RTX PRO 5500 Blackwell | 84 GB ECC | up to 600 W | 7.14 | 1,398 GB/s | Preliminary published specification |
-| RTX PRO 6000 Blackwell Max-Q | 96 GB ECC | 300 W | 3.13 | 1,792 GB/s | Highest single-card capacity here at 300W |
-| RTX PRO 6000 Blackwell | 96 GB ECC | 600 W | 6.25 | 1,792 GB/s | Full-power workstation version |
-
-The 24GB/70W PRO 4000 SFF and 96GB/300W PRO 6000 Max-Q look strongest on **rated watts per GB**, while the 5090 has much higher bandwidth than the 16GB GeForce cards. This is an inference from specifications, not a measured LLM result. The 70W SFF card is not an automatic swap into an x1-riser farm: check slot power, riser wiring, form factor, airflow, driver, and llama.cpp support first. Before buying, compare actual board prices and run the same model, context, batch size, and power cap to measure tokens/s and joules/token.
-
-Specification sources: [GTX 1060 reference specs](https://www.nvidia.com/en-us/geforce/news/nvidia-geforce-gtx-1060/), [GTX 1070 reference specs](https://images.nvidia.com/aem-dam/Solutions/design-visualization/technologies/turing-architecture/NVIDIA-Turing-Architecture-Whitepaper.pdf), [RTX 3090/3090 Ti reference bandwidth](https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf), [RTX 3060 bandwidth](https://www.nvidia.com/en-us/geforce/news/game-on-you-asked-we-answered-qa/), [RTX 4060 Ti bandwidth](https://www.nvidia.com/en-us/geforce/news/rtx-40-series-vram-video-memory-explained/), [NVIDIA GeForce comparison](https://www.nvidia.com/en-us/geforce/graphics-cards/compare/) (RTX 30/40/50 memory and power), [NVIDIA A100 datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf) (PCIe 40/80GB), [NVIDIA RTX PRO desktop comparison](https://www.nvidia.com/en-in/products/workstations/professional-desktop-gpus/) (PRO memory and power), [RTX PRO 2000 specifications](https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-2000/), [RTX PRO 4000 SFF datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/data-center/rtx-pro-4000-blackwell/workstation-datasheet-blackwell-rtx-pro-4000-gtc25s-nvidia-3662515-r6.pdf), [RTX PRO 4500 datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/data-center/rtx-pro-4500-blackwell/workstation-datasheet-blackwell-rtx-pro-4500-we-nvidia-us-5108623-web.pdf), [RTX PRO 5000 specifications](https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-5000/), [RTX PRO 5500 specifications](https://www.nvidia.com/en-in/products/workstations/professional-desktop-gpus/rtx-pro-5500/), and [RTX PRO 6000 Max-Q specifications](https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-6000-max-q/). This table does not refresh the April 2026 prices or estimated tokens/s elsewhere in this document.
-
-### GPU upgrade watchlist for the present B250 rig
-
-The B250 Mining Expert has one CPU x16 slot (occupied by the 3090 Ti), eighteen x1 slots, and a 32GB RAM limit. A card's fit on this rig depends on PCIe enumeration, BIOS address resources, driver and CUDA support, power, and cooling. No candidate below has been installed or verified here.
-
-Watch used **RTX A6000 48GB**, **RTX 6000 Ada 48GB**, **A40 48GB**, **L40/L40S 48GB**, **Tesla V100S 32GB PCIe**, and **Tesla M10 (4 × 8GB)** for current-rig possibilities. **A100 40/80GB PCIe** is better planned with a newer host; A100 SXM modules are not PCIe cards. **A800 40GB Active** requires at least 40GB host RAM under NVIDIA's installation guide, above this board's 32GB maximum. Passive cards need directed airflow even in an open frame.
-
-**Current B250 / 32GB RAM compatibility screen (planning, no card installed):**
-
-| Candidate | Present rig | Reason / condition |
-|-----------|-------------|--------------------|
-| RTX A6000 48GB, RTX 6000 Ada 48GB | Best current-rig candidates | Workstation cards default to a 256MB BAR1 address window and appear on the current 580.159.03 supported-products list. The 32GB system RAM is not an inherent 48GB GPU limit. Ada requires adding `sm_89` to the runtime image; RTX A6000 uses the image's existing `sm_86`. |
-| Tesla M10 (4 × 8GB) | Conditional current-rig candidate | Four separate Maxwell GPUs, not a shared 32GB pool. Requires a CUDA `sm_50` runtime build, one PCIe 8-pin lead, directed airflow, and verification of four-GPU enumeration on this motherboard. |
-| Tesla V100S 32GB PCIe | Conditional current-rig candidate; strong price watch | NVIDIA lists it on driver 580.159.03, and CUDA 12.9 supports Volta `sm_70`, but the runtime image needs that target added. The card requires a 32GB BAR1 address window that may challenge the older B250 BIOS. It is a 250W passively cooled PCIe card with a CPU/EPS 8-pin socket; check the specific card's cooling, power adapter, BIOS mapping, and PCIe fit. The 32GB system RAM is not an automatic exclusion. |
-| A40 48GB, L40/L40S 48GB | Conditional; prefer a proven host before purchase | These server cards default to display-off mode with a 64GB BAR1 address window, which an older B250 BIOS may not map. NVIDIA's display-mode tool documents a 256MB BAR1 display-on mode, but mode change and boot on this exact board are untested. They also need directed cooling. |
-| A100 40GB/80GB PCIe | Plan a newer server/workstation host | The PCIe cards request 64GB/128GB BAR1 windows respectively, and NVIDIA does not qualify A100 on ordinary consumer motherboards. The 32GB physical RAM is not itself a published A100 prohibition; BIOS resource mapping and server airflow are the stronger blockers. |
-| A800 40GB Active | New host required under NVIDIA's published minimum | Its guide requires host RAM at least equal to 40GB GPU memory (80GB recommended) and support for a 64GB BAR1 mapping; the B250 is limited to 32GB RAM. |
-| RTX PRO 5000/6000 Blackwell 48-96GB | Separate host if keeping the GTX 1060/1070 on this rig | Blackwell needs NVIDIA's open kernel module while Pascal requires the proprietary module. Removing every Pascal card could allow a Blackwell trial on this board, but BIOS, power, and x16-slot fit remain unverified; a newer host is the sensible plan for these cards. |
-
-BAR1 is a PCIe *address window*, not an equal amount of physical system RAM. The compatibility labels are planning guidance, not a successful boot test on this specific motherboard. Sources: [ASUS B250 manual](https://dlcdnet.asus.com/pub/ASUS/mb/LGA1151/B250_MINING_EXPERT/E13594_B250_MINING_EXPERT_UM_V2_WEB.pdf) (32GB maximum), [NVIDIA display-mode guide](https://developer.download.nvidia.com/display-mode-selector-tool/NVIDIA-Display-Mode-Selector-Tool-User-Guide_v08_Feb24.pdf) (workstation versus server BAR1 defaults), [A100 40GB](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/A100-PCIE-Prduct-Brief.pdf) and [80GB](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/PB-10577-001_v02.pdf) product briefs (BAR1 sizes), [A800 installation guide](https://images.nvidia.com/aem-dam/en-zz/Solutions/design-visualization/quadro-product-literature/proviz-a800-40gb-active-online-qsg-210x148mm-20231026-r11.pdf) (host requirements), [NVIDIA A100 motherboard guidance](https://forums.developer.nvidia.com/t/a100-pcie-isnt-recognized-by-bios/198546), [current driver supported chips](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/README/supportedchips.html), and [kernel-module compatibility](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/README/kernel_open.html).
-
-V100S evidence: [NVIDIA's V100S datasheet](https://images.nvidia.com/content/technologies/volta/pdf/volta-v100-datasheet-update-us-1165301-r5.pdf) (memory, bandwidth, power, cooling), [NVIDIA V100S product brief copy](https://www.trungtammaychu.vn/content_trungtammaychu/upload/files/NVIDIA%20V100s%20Product%20Brief.pdf) (32GB BAR1 and CPU 8-pin socket), [CUDA 12.9 Volta target](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-compiler-driver-nvcc/index.html), [US$800 refurbished ask](https://www.reddit.com/r/homelabsales/comments/1viap5p/fs_usamn_nvidia_tesla_v100s_32gb_pcie_gpu_740x/), and [US$1,195 used ask](https://www.ebay.com/itm/236869701835). Distinguish V100S PCIe from older V100 PCIe and V100 SXM2; pricing here is asking, not verified completed sales.
-
-**Auxiliary power connectors for the reference cards:**
-
-The standard PCIe 6+2 leads used by consumer GPUs plug directly into the RTX A5000, RTX A5500, Quadro P6000, and Tesla M10 reference cards. These cards can also draw power through the PCIe slot; verify the x1 riser power feed and each cable before using a 225–250W card. [NVIDIA workstation power guide](https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/workstation-power-guidelines.pdf), [Tesla M10 brief](https://images.nvidia.com/content/pdf/tesla/Tesla-M10-Product-Brief.pdf).
-
-| Card | Card socket | Fit with existing PCIe 6/8-pin PSU leads |
-|------|-------------|-------------------------------------------|
-| RTX A5000, RTX A5500, Quadro P6000, Tesla M10 | One PCIe 8-pin | Direct fit for a standard GPU PCIe 6+2 plug; check slot/riser power separately |
-| RTX A6000, A40, A100 40GB/80GB PCIe | One CPU/EPS 8-pin | Requires a PSU CPU/EPS 8-pin lead or the correct GPU PCIe 8-pin-to-CPU 8-pin adapter; PCIe 8-pin and CPU 8-pin have different pinouts |
-| Tesla V100S 32GB PCIe | One CPU/EPS 8-pin | NVIDIA's product brief supports a CPU 8-pin cable or its specified adapter fed by GPU PCIe 6/8-pin leads; do not plug a PCIe lead directly into the CPU/EPS socket |
-| A800 40GB Active | One PCIe CEM5 16-pin | NVIDIA's installation guide calls for its included adapter and two separate PCIe 8-pin PSU cables |
-| L40 | One PCIe CEM5 16-pin | Native compatible 16-pin cable, or NVIDIA-documented CPU 8-pin-to-16-pin adapter with correct sense wiring |
-| L40S | One 16-pin | Confirm the exact card's approved 16-pin cable/adapter and PSU capacity before purchase |
-| RTX 6000 Ada | One PCIe CEM5 16-pin | NVIDIA's installation guide calls for its included adapter and two separate PCIe 8-pin PSU cables |
-
-Do not put a GPU PCIe 8-pin plug directly into a CPU/EPS 8-pin socket. Check the exact card and adapter included with a used listing; verify total PSU capacity for the card plus all remaining GPUs and fans. NVIDIA's [A800 installation guide](https://images.nvidia.com/aem-dam/en-zz/Solutions/design-visualization/quadro-product-literature/proviz-a800-40gb-active-online-qsg-210x148mm-20231026-r11.pdf) has inconsistent wording in its equipment table (one 8-pin) and installation step (two separate 8-pin leads), so inspect the actual included adapter before planning cables.
-
-Connector sources: [RTX A5000 datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/products/workstations/nvidia-rtx-a5000-datasheet.pdf), [RTX A5500 datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/products/workstations/nvidia-rtx-a5500-datasheet.pdf), [Quadro P6000 datasheet](https://images.nvidia.com/content/pdf/quadro/data-sheets/192152-NV-DS-Quadro-P6000-US-12Sept-NV-FNL-WEB.pdf), [Tesla M10 brief](https://images.nvidia.com/content/pdf/tesla/Tesla-M10-Product-Brief.pdf), [RTX A6000 power guidelines](https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/workstation-power-guidelines.pdf), [A40 datasheet](https://images.nvidia.com/content/Solutions/data-center/a40/nvidia-a40-datasheet.pdf), [A100 40GB product brief](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/A100-PCIE-Prduct-Brief.pdf), [A100 80GB product brief](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/PB-10577-001_v02.pdf), [L40 product brief](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/datasheets/L-40/product-brief-L40.pdf), [L40S specifications](https://www.nvidia.com/en-us/data-center/l40s/), and [RTX 6000 Ada installation guide](https://images.nvidia.com/aem-dam/Solutions/design-visualization/quadro-product-literature/proviz-rtx-6000-ada-gen-online-qsg-210x148mm-20230118-r9.pdf).
-
-Watchlist specifications: [A800 40GB Active](https://www.nvidia.com/en-us/products/workstations/a800/), [RTX A6000](https://www.nvidia.com/en-us/products/workstations/rtx-a6000/), [A40](https://www.nvidia.com/en-us/data-center/a40/), [L40](https://www.nvidia.com/en-au/data-center/l40/), [L40S](https://www.nvidia.com/en-us/data-center/l40s/), [RTX 6000 Ada](https://www.nvidia.com/en-us/products/workstations/rtx-6000/), [Tesla M10 datasheet](https://images.nvidia.com/content/pdf/grid/data-sheet/nvidia-m10-datasheet.pdf), and [ASUS B250 Mining Expert manual](https://dlcdnets.asus.com/pub/ASUS/mb/LGA1151/B250_MINING_EXPERT/E13594_B250_MINING_EXPERT_UM_V2_WEB.pdf).
-
-### Driver and CUDA fit with the current rig (checked 2026-11-09)
-
-The live rig scan on 2026-11-13 reports driver **580.159.03**, four GTX 1060 6GB cards plus one GTX 1070 8GB (`sm_61`), and one RTX 3090 Ti (`sm_86`). Its `modinfo -F license nvidia` returns `NVIDIA`, confirming the proprietary Linux kernel module. The CUDA **12.9.2** llama runtime image is built only for architectures `61;86` (see `shared/scripts/llama_runtime/Dockerfile`). Driver version, kernel-module flavor, and CUDA build targets are separate requirements.
-
-| Card family | With GTX 1060/1070 on this Linux host? | With RTX 3090 Ti on a separate Linux host? | Runtime build target |
-|-------------|--------------------------------------|-------------------------------------------|---------------------|
-| A100 40/80GB, A800 40GB Active, A40, RTX A6000, L40/L40S, RTX 6000 Ada | Driver family permits the proprietary 580 module; hardware and product-specific setup still need checking | Yes, with a suitable 580 driver | `sm_80` for A100/A800; `sm_86` for A40/RTX A6000; `sm_89` for L40/L40S/RTX 6000 Ada |
-| GeForce RTX 50 and listed RTX PRO Blackwell cards (including PRO 5000 48/72GB and PRO 6000 96GB) | **No.** Blackwell needs the open module, Pascal needs the proprietary module, and both cannot load in one Linux kernel | **Yes in principle.** Both Blackwell and the 3090 Ti can use the open 580 module | `sm_120` for these Blackwell cards; retain `sm_86` for the 3090 Ti |
-
-NVIDIA's [580.159.03 supported-products list](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/README/supportedchips.html) includes the 1060/1070, 3090 Ti, RTX 5090, PRO 5000 48/72GB, and PRO 6000 96GB. **That list alone does not imply that Pascal and Blackwell work together:** the [same driver's kernel-module chapter](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/README/kernel_open.html) says proprietary supports through pre-Blackwell, open supports Turing and newer, and the two flavors are mutually exclusive. NVIDIA's [architecture matrix](https://docs.nvidia.com/datacenter/tesla/drivers/cuda-toolkit-driver-and-architecture-matrix.html) marks R580 as the final Pascal driver branch and CUDA 12.x as its final toolkit family; [CUDA 12.9.2's compiler](https://docs.nvidia.com/cuda/archive/12.9.2/cuda-compiler-driver-nvcc/index.html) can target both `sm_61` and `sm_120`. The present `61;86` image already includes the Ampere `sm_86` target used by RTX A6000/A40; it needs a rebuild to add `sm_80` for A100/A800, `sm_89` for Ada, or `sm_120` for Blackwell. A new Blackwell/3090 host can use an open 580 driver and a `86;120` build while leaving the Pascal rig on proprietary 580 and `61;86`.
-
-The newly listed RTX PRO 5500 Blackwell (84GB) is **not present** in the exact 580.159.03 supported-products list checked here. Verify its device ID and minimum driver from NVIDIA before planning it on a 580 host. No new card was installed or runtime-tested by this review.
-
 ### Platform choice: TRX50 vs WRX90
 
 | | TRX50 (Threadripper) | WRX90 (Threadripper Pro) |
@@ -540,7 +441,7 @@ GPU shopping for the worker farm (April 2026 used prices):
 | RTX 2060 6GB | 6GB | ~$125 | $20.83 | ~35-40 | ~160W | Faster but 2× price, same VRAM as 1060 |
 | RTX 3060 12GB | 12GB | ~$250 | $20.83 | ~35 | ~170W | Best per-card capacity but 4× price of 1070 |
 
-The April 2026 $65 estimate made GTX 1070 8GB a candidate for filling slots. Recheck current used prices before using this budget.
+GTX 1070 8GB at $65 is the sweet spot for filling slots. PCIe x1 risers are fine — model loads once at startup, then inference runs entirely within VRAM. The 7700K just manages HTTP endpoints.
 
 **Total system cost (incremental from current):**
 
