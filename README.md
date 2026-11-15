@@ -11,6 +11,7 @@ which doc owns what. Then, by topic:
 
 | Doc | For |
 |---|---|
+| [EXTERNAL_REPOS.md](EXTERNAL_REPOS.md) | outside runtimes and source projects, local revisions, and update checks |
 | [shared/workspace/quickstart.md](shared/workspace/quickstart.md) | submit, monitor and kill a plan |
 | [shared/workspace/PLAN_FORMAT.md](shared/workspace/PLAN_FORMAT.md) | how plans are written (including goal-driven plans) |
 | [shared/workspace/architecture.md](shared/workspace/architecture.md) | system design |
