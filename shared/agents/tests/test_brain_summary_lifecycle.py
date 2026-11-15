@@ -16,6 +16,7 @@ from brain_summary import BrainSummaryMixin
 
 class MockBrainSummaryLifecycle(BrainSummaryMixin):
     def __init__(self, root: Path):
+        self.shared_path = root
         self.queue_path = root / "tasks" / "queue"
         self.processing_path = root / "tasks" / "processing"
         self.complete_path = root / "tasks" / "complete"
@@ -41,6 +42,14 @@ class MockBrainSummaryLifecycle(BrainSummaryMixin):
 
 
 class BrainSummaryLifecycleTests(unittest.TestCase):
+    def test_completed_batch_updates_recent_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = MockBrainSummaryLifecycle(Path(tmp))
+            self.assertTrue(brain._refresh_batch_summary("batch-1", status="complete"))
+            rows = json.loads((Path(tmp) / "brain" / "recent_batches.json").read_text(encoding="utf-8"))
+            self.assertEqual(rows[0]["batch_id"], "batch-1")
+            self.assertEqual(rows[0]["status"], "complete")
+
     def test_record_batch_interrupted_writes_event_and_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             brain = MockBrainSummaryLifecycle(Path(tmp))

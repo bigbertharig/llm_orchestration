@@ -10,12 +10,13 @@ import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
-from . import Controls, summarize
+from . import Controls
+from .status import activity, diagnostics, snapshot
 
 DEFAULT_SOCKET = Path("/run/llm-orchestration/api.sock")
-ACTIONS = frozenset({"start_plan", "resume_plan", "kill_plan", "kill_all_active",
+ACTIONS = frozenset({"submit_prepared", "kill_plan", "kill_all_active",
                      "batch_outputs", "cleanup_stale", "requeue_worker"})
 MAX_BODY_BYTES = 1_048_576
 _action_lock = threading.Lock()
@@ -31,12 +32,10 @@ def _context():
 def _run_action(action: str, body: dict):
     shared, config = _context()
     controls = Controls(shared, config)
-    if action == "start_plan":
-        return controls.start_plan(str(body.get("plan_name") or ""), str(body.get("config_json") or ""),
-                                   str(body.get("plan_scope") or "shoulders"), str(body.get("starter_file") or ""),
-                                   str(body.get("repo_path") or ""), str(body.get("repo_url") or ""),
-                                   str(body.get("claimed_behavior") or ""), str(body.get("inline_query_text") or ""))
-    if action in ("resume_plan", "kill_plan", "batch_outputs"):
+    if action == "submit_prepared":
+        return controls.submit_prepared(str(body.get("plan_name") or ""), str(body.get("plan_scope") or ""),
+                                        str(body.get("starter_file") or ""), body.get("config"))
+    if action in ("kill_plan", "batch_outputs"):
         return getattr(controls, action)(str(body.get("batch_id") or ""))
     if action == "requeue_worker":
         return controls.requeue_worker(str(body.get("worker") or ""))
@@ -57,14 +56,26 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        path = urlsplit(self.path).path
+        parsed = urlsplit(self.path)
+        path = parsed.path
         try:
             if path == "/health":
                 result = {"ok": True, "api_version": 1}
             elif path == "/v1/orchestration/status":
-                result = summarize(*_context())
-            elif path == "/v1/orchestration/options":
-                result = Controls(*_context()).options()
+                result = snapshot(*_context())
+            elif path == "/v1/orchestration/diagnostics":
+                result = diagnostics(*_context())
+            elif path == "/v1/orchestration/activity":
+                query = parse_qs(parsed.query)
+                batch_id = query.get("batch_id", [""])[0]
+                if not batch_id or len(batch_id) > 160:
+                    return self._reply(400, {"error": "batch_id required"})
+                try:
+                    after = int(query.get("after", ["0"])[0])
+                    limit = int(query.get("limit", ["100"])[0])
+                    result = activity(_context()[0], batch_id, after, limit)
+                except ValueError as exc:
+                    return self._reply(400, {"error": str(exc)})
             else:
                 return self._reply(404, {"error": "unknown endpoint"})
             self._reply(200, result)

@@ -37,11 +37,15 @@ from typing import Any, Dict, List, Optional, Set
 
 TICK_INTERVAL = 3  # seconds between scheduler ticks
 SHARED_ROOT = Path(os.environ.get("CAMPAIGN_SHARED_ROOT", "/mnt/shared"))
-TUNING_PROFILES_PATH = SHARED_ROOT / "plans" / "shoulders" / "benchmarking" / "model_tuning_profiles.json"
+AGENTS_DIR = Path(__file__).resolve().parents[2] / "agents"
+TUNING_PROFILES_PATH = AGENTS_DIR / "model_tuning_profiles.json"
 SUITE_CONTRACTS_PATH = SHARED_ROOT / "plans" / "shoulders" / "benchmarking" / "docker" / "suite_contracts.json"
 MODELS_CATALOG_PATH = SHARED_ROOT / "agents" / "models.catalog.json"
 HISTORY_ROOT = SHARED_ROOT / "logs" / "benchmarks" / "campaigns" / "history"
 BENCHMARKING_SCRIPTS = SHARED_ROOT / "plans" / "shoulders" / "benchmarking"
+if str(AGENTS_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENTS_DIR))
+import orchestration_model_library as model_library
 # The rig manager (llm-gateway docs/MANAGER.md) on the Pi, reached with rigctl over ssh like the lanes.
 MANAGER_HOST = os.environ.get("HARNESS_HOST", "pi")
 RIGCTL = os.environ.get("HARNESS_RIGCTL", "~/llm-gateway/tools/rigctl.py")
@@ -398,18 +402,7 @@ def runtime_identity_error(block: "BlockState", runtime: Runtime, observed: Opti
 # Config Lookups
 # ---------------------------------------------------------------------------
 
-_tuning_cache: Optional[Dict] = None
 _catalog_cache: Optional[Dict] = None
-
-
-def _load_tuning_profiles() -> Dict:
-    global _tuning_cache
-    if _tuning_cache is None:
-        if TUNING_PROFILES_PATH.exists():
-            _tuning_cache = json.loads(TUNING_PROFILES_PATH.read_text(encoding="utf-8"))
-        else:
-            _tuning_cache = {}
-    return _tuning_cache
 
 
 def _load_catalog() -> Dict:
@@ -430,27 +423,13 @@ def _norm(v: str) -> str:
 
 
 def _lookup_tuning(model_id: str) -> Optional[Dict]:
-    """Resolve a model ID, including aliases, in tuning profiles."""
-    profiles = _load_tuning_profiles()
-    models = profiles.get("models", {})
-    profiles_module_path = BENCHMARKING_SCRIPTS / "scripts" / "active"
-    if str(profiles_module_path) not in sys.path:
-        sys.path.insert(0, str(profiles_module_path))
-    from model_profiles import resolve_profile
-
-    resolved = resolve_profile(models, model_id)
-    return resolved[1] if resolved else None
+    """Use the benchmark-resolved profile imported with orchestration's model snapshot."""
+    return model_library.load_snapshot()["resolved_tuning_profiles"].get(model_id)
 
 
 def registry_gguf(model_id: str, profile: Optional[str] = None) -> str:
     """The archive GGUF the model library names for a model (the manager loads the same file)."""
-    library_dir = BENCHMARKING_SCRIPTS / "scripts" / "active"
-    if str(library_dir) not in sys.path:
-        sys.path.insert(0, str(library_dir))
-    import model_library
-
-    registry = model_library.load_registry(BENCHMARKING_SCRIPTS / "model_registry.json")
-    return str(model_library.resolve(model_id, profile or "default", registry)["gguf_path"])
+    return str(model_library.resolve(model_id, profile or "default")["gguf_path"])
 
 
 def resolve_block_config(block: Dict, defaults: Dict) -> Dict:
@@ -626,6 +605,7 @@ def build_suite_cmd(block: BlockState, runtime: Runtime) -> List[str]:
             "-v", f"{SHARED_ROOT}:{SHARED_ROOT}",
             "-v", f"{suite_log_root}:/results",
             "-v", f"{BENCHMARKING_SCRIPTS}:/benchmark-scripts:ro",
+            "-v", f"{TUNING_PROFILES_PATH}:/benchmark-scripts/model_tuning_profiles.json:ro",
             # One EvalPlus scoring at a time on the rig (bench-code run.sh; peaks of 4.7 GB RAM each).
             "-v", "/run/lock:/host-lock",
             "-e", "BENCH_EVAL_LOCK=/host-lock/bench-evalplus.lock",

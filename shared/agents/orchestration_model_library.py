@@ -22,6 +22,8 @@ def load_snapshot(path: Path = SNAPSHOT_PATH) -> dict[str, Any]:
         raise RuntimeError(f"unsupported orchestration model library schema in {path}")
     if not isinstance(data.get("registry", {}).get("models"), dict) or not isinstance(data.get("roles", {}).get("roles"), dict):
         raise RuntimeError(f"incomplete orchestration model library at {path}")
+    if not isinstance(data.get("resolved_tuning_profiles"), dict):
+        raise RuntimeError(f"missing resolved tuning profiles in orchestration model library at {path}")
     return data
 
 

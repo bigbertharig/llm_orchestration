@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
@@ -177,6 +178,23 @@ class BrainSummaryMixin:
             failure_reason=failure_reason,
         )
         write_run_summary(history_dir, summary)
+        if status in {"complete", "failed"}:
+            index_path = self.shared_path / "brain" / "recent_batches.json"
+            try:
+                recent = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else []
+                if not isinstance(recent, list):
+                    recent = []
+                completed_at = datetime.now().isoformat()
+                recent = [row for row in recent if isinstance(row, dict) and row.get("batch_id") != batch_id]
+                recent.insert(0, {"batch_id": batch_id, "plan": (batch_meta or self.active_batches.get(batch_id, {})).get("plan"),
+                                  "status": status, "completed_at": completed_at, "batch_dir": str(history_dir)})
+                recent = recent[:100]
+                index_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = index_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(recent), encoding="utf-8")
+                os.replace(tmp, index_path)
+            except (OSError, ValueError, TypeError):
+                pass
         self._append_batch_event(
             batch_id,
             "summary_refreshed",

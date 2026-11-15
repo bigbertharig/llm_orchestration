@@ -24,6 +24,11 @@ from typing import Any
 from filelock import FileLock
 
 
+DEFAULT_CLAIM_TTL_S = 600
+MAX_CLAIM_TTL_S = 3600
+BOOT_ID = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+
+
 class StateError(RuntimeError):
     """kind: invalid | conflict | not_found | ownership | state"""
 
@@ -56,6 +61,13 @@ class HardwareState:
         self.claims_lock = FileLock(str(self.claims_path) + ".lock", timeout=10)
         (root / "gpus").mkdir(parents=True, exist_ok=True)
         self._seed_from_mirror()
+        # A reboot kills the processes holding automated reservations. Clear their
+        # previous-boot records and mirror the result before readers can see them.
+        with self.claims_lock:
+            claims = self._read_claims()
+            if any(self._expired(claim) for claim in claims):
+                self._write_claims(claims)
+                self.mirror()
 
     # ---------------------------------------------------------------- mirror
 
@@ -87,14 +99,16 @@ class HardwareState:
     # A claim takes cards out of the shared pool: only leases naming it get them. It may be placed on
     # cards that are still leased (the holder keeps them until it releases), which is how a split
     # reserves its cards while it waits for them (docs: llm-gateway MANAGER.md, "Reservations").
-    # With ttl_s the claim lapses unless its owner renews it, so a dead run frees its cards; without
-    # one it is permanent until removed.
+    # Every claim has a bounded TTL and is tied to the rig boot. Long-running
+    # owners renew it; a dead owner or reboot cannot reserve cards indefinitely.
 
     @staticmethod
     def _expired(claim: dict[str, Any], now: datetime | None = None) -> bool:
+        if claim.get("boot_id") != BOOT_ID:
+            return True
         expires = claim.get("expires_at")
         if not expires:
-            return False
+            return True
         try:
             when = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
         except ValueError:
@@ -103,11 +117,10 @@ class HardwareState:
 
     @staticmethod
     def _expiry(ttl_s: int | None) -> str | None:
-        if not ttl_s:
-            return None
-        if int(ttl_s) <= 0:
-            raise StateError("invalid", "ttl_s must be positive")
-        return (datetime.now(timezone.utc) + timedelta(seconds=int(ttl_s))).isoformat(
+        ttl = DEFAULT_CLAIM_TTL_S if ttl_s is None else int(ttl_s)
+        if not 0 < ttl <= MAX_CLAIM_TTL_S:
+            raise StateError("invalid", f"ttl_s must be 1..{MAX_CLAIM_TTL_S}")
+        return (datetime.now(timezone.utc) + timedelta(seconds=ttl)).isoformat(
             timespec="seconds").replace("+00:00", "Z")
 
     def _read_claims(self) -> list[dict[str, Any]]:
@@ -139,7 +152,8 @@ class HardwareState:
         ids = sorted({int(g) for g in gpu_ids})
         if not name or not ids:
             raise StateError("invalid", "a claim needs a name and at least one GPU")
-        expires = self._expiry(ttl_s)
+        ttl = DEFAULT_CLAIM_TTL_S if ttl_s is None else int(ttl_s)
+        expires = self._expiry(ttl)
         with self.claims_lock:
             claims = self.claims()
             if any(c["name"] == name for c in claims):
@@ -149,9 +163,8 @@ class HardwareState:
                 if overlap:
                     raise StateError("conflict", f"GPU {overlap} already claimed by {c['name']}")
             claim = {"name": name, "gpu_ids": ids, "note": note, "by": by, "at": _now(),
-                     "owner": str(owner or by or "").strip()}
-            if expires:
-                claim.update(ttl_s=int(ttl_s), expires_at=expires)
+                     "owner": str(owner or by or "").strip(), "boot_id": BOOT_ID,
+                     "ttl_s": ttl, "expires_at": expires}
             if purpose:
                 claim["purpose"] = purpose
             if model:
@@ -195,9 +208,7 @@ class HardwareState:
                 raise StateError("not_found", f"no claim {name} (expired or removed)")
             if owner and match.get("owner") and match["owner"] != owner:
                 raise StateError("ownership", f"claim {name} is owned by {match['owner']}, not {owner}")
-            ttl = int(ttl_s or match.get("ttl_s") or 0)
-            if not ttl:
-                return match  # permanent claim: nothing to renew
+            ttl = int(ttl_s if ttl_s is not None else match.get("ttl_s", DEFAULT_CLAIM_TTL_S))
             match.update(ttl_s=ttl, expires_at=self._expiry(ttl), renewed_at=_now())
             self._write_claims(claims)
         self.mirror()

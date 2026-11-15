@@ -7,8 +7,6 @@ import argparse
 import hashlib
 import json
 import os
-import subprocess
-import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,27 +18,38 @@ DEFAULT_SOURCE = SHARED / "plans" / "shoulders" / "benchmarking"
 SNAPSHOT = AGENTS / "model_library.json"
 CATALOG = AGENTS / "models.catalog.json"
 ACCESS = AGENTS / "model_access.json"
-SOURCES = ("model_registry.json", "model_roles.json", "load_recipes.json", "models.catalog.json")
+TUNING = AGENTS / "model_tuning_profiles.json"
+SOURCE_NAME = "model_library_export.json"
 
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def build(source: Path) -> tuple[dict, dict, dict]:
-    for name in SOURCES:
-        if not (source / name).is_file():
-            raise ValueError(f"model-library source missing: {source / name}")
-    checker = source / "scripts" / "active" / "model_library.py"
-    checked = subprocess.run([sys.executable, str(checker), "check"], cwd=source,
-                             capture_output=True, text=True, check=False)
-    if checked.returncode:
-        raise ValueError(f"benchmarking library check failed: {checked.stderr.strip() or checked.stdout.strip()}")
-    registry, roles, recipes, catalog = (read_json(source / name) for name in SOURCES)
+def rendered(value: dict) -> str:
+    return json.dumps(value, indent=2, ensure_ascii=True) + "\n"
+
+
+def build(source: Path) -> tuple[dict, dict, dict, dict]:
+    artifact = read_json(source / SOURCE_NAME)
+    if artifact.get("schema") != "gpu-rig-model-library/1":
+        raise ValueError("unsupported benchmarking model library export")
+    payload = {key: value for key, value in artifact.items() if key != "source_sha256"}
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                       ensure_ascii=True).encode("utf-8")).hexdigest()
+    if digest != artifact.get("source_sha256"):
+        raise ValueError("benchmarking model library export hash mismatch")
+    registry, roles, recipes, catalog, tuning = (artifact[key] for key in
+        ("registry", "roles", "load_recipes", "models_catalog", "tuning_profiles"))
+    resolved_tuning = artifact["resolved_tuning_profiles"]
     if registry.get("schema") != "model-registry/1" or roles.get("schema") != "model-roles/1":
         raise ValueError("unsupported benchmarking registry or roles schema")
     if recipes.get("schema_version") != 1 or not isinstance(recipes.get("recipes"), dict):
         raise ValueError("unsupported benchmarking load-recipes schema")
+    if not isinstance(tuning.get("models"), dict):
+        raise ValueError("benchmarking tuning profiles have no models")
+    if not isinstance(resolved_tuning, dict) or set(resolved_tuning) != set(tuning["models"]):
+        raise ValueError("benchmarking resolved tuning profiles are incomplete")
     models = registry.get("models")
     if not isinstance(models, dict) or not models:
         raise ValueError("benchmarking registry has no models")
@@ -50,16 +59,13 @@ def build(source: Path) -> tuple[dict, dict, dict]:
     for recipe_id, recipe in recipes["recipes"].items():
         if recipe.get("model") not in models:
             raise ValueError(f"recipe {recipe_id} names an unknown model")
-    digest = hashlib.sha256()
-    for name in SOURCES:
-        digest.update(name.encode("utf-8") + b"\0")
-        digest.update((source / name).read_bytes())
     snapshot = {
         "schema": "orchestration-model-library/1",
-        "source_sha256": digest.hexdigest(),
+        "source_sha256": artifact["source_sha256"],
         "registry": registry,
         "roles": roles,
         "load_recipes": recipes,
+        "resolved_tuning_profiles": resolved_tuning,
     }
     # The local interactive model list is a planning projection, not a ready roster.
     access = {
@@ -68,7 +74,7 @@ def build(source: Path) -> tuple[dict, dict, dict]:
                          if entry.get("status") == "active" and not entry.get("in_testing")
                          and "interactive" in entry.get("profiles", {})),
     }
-    return snapshot, catalog, access
+    return snapshot, catalog, access, tuning
 
 
 def changes(old: dict, new: dict) -> dict[str, list[str]]:
@@ -80,13 +86,14 @@ def changes(old: dict, new: dict) -> dict[str, list[str]]:
     }
 
 
-def report(snapshot: dict, catalog: dict, access: dict) -> dict:
+def report(snapshot: dict, catalog: dict, access: dict, tuning: dict) -> dict:
     try:
         old = read_json(SNAPSHOT)
         old_catalog = read_json(CATALOG)
         old_access = read_json(ACCESS)
+        old_tuning = read_json(TUNING)
     except (OSError, ValueError):
-        old, old_catalog, old_access = {}, {}, {}
+        old, old_catalog, old_access, old_tuning = {}, {}, {}, {}
     old_comparable = {key: value for key, value in old.items() if key != "imported_at"}
     return {
         "source_sha256": snapshot["source_sha256"],
@@ -95,11 +102,16 @@ def report(snapshot: dict, catalog: dict, access: dict) -> dict:
         "roles": changes(old.get("roles", {}).get("roles", {}), snapshot["roles"]["roles"]),
         "load_recipes": changes(old.get("load_recipes", {}).get("recipes", {}),
                                 snapshot["load_recipes"]["recipes"]),
-        "catalog_changed": old_catalog != catalog,
+        "catalog_changed": old_catalog != catalog or CATALOG.read_text(encoding="utf-8") != rendered(catalog),
         "interactive_models_changed": old_access != access,
+        "tuning_profiles_changed": old_tuning != tuning,
         "runtime_image_changed": old.get("registry", {}).get("runtime_image") != snapshot["registry"].get("runtime_image"),
         "orchestration_defaults_changed": old.get("registry", {}).get("orchestration_defaults") != snapshot["registry"].get("orchestration_defaults"),
-        "pending": not old.get("imported_at") or old_comparable != snapshot or old_catalog != catalog or old_access != access,
+        "pending": (not old.get("imported_at") or old_comparable != snapshot or old_catalog != catalog
+                    or old_access != access or old_tuning != tuning or
+                    SNAPSHOT.read_text(encoding="utf-8") != rendered({**snapshot, "imported_at": old.get("imported_at")})
+                    or CATALOG.read_text(encoding="utf-8") != rendered(catalog)
+                    or TUNING.read_text(encoding="utf-8") != rendered(tuning)),
     }
 
 
@@ -143,11 +155,11 @@ def main() -> int:
     parser.add_argument("--source", type=Path, default=Path(os.getenv("BENCHMARKING_ROOT", DEFAULT_SOURCE)))
     args = parser.parse_args()
     try:
-        snapshot, catalog, access = build(args.source.resolve())
-        summary = report(snapshot, catalog, access)
+        snapshot, catalog, access, tuning = build(args.source.resolve())
+        summary = report(snapshot, catalog, access, tuning)
         if args.action == "sync" and summary["pending"]:
             snapshot["imported_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            write_files({SNAPSHOT: snapshot, CATALOG: catalog, ACCESS: access})
+            write_files({SNAPSHOT: snapshot, CATALOG: catalog, ACCESS: access, TUNING: tuning})
             summary["pending"] = False
             summary["synced"] = True
         print(json.dumps(summary, indent=2))

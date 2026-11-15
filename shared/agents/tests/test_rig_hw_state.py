@@ -105,15 +105,34 @@ class HardwareStateTests(unittest.TestCase):
             hs.renew_claim("wait")
         self.assertEqual(ctx.exception.kind, "not_found")
 
-    def test_a_claim_without_ttl_is_permanent_and_kill_drops_claims_on_cards(self):
+    def test_a_claim_without_ttl_gets_bounded_default_and_kill_drops_claims_on_cards(self):
         hs = self.make()
         claim = hs.add_claim("bench", [0])
-        self.assertNotIn("expires_at", claim)
-        self.assertEqual(hs.renew_claim("bench"), claim)
+        self.assertEqual(claim["ttl_s"], hw_state.DEFAULT_CLAIM_TTL_S)
+        self.assertEqual(claim["boot_id"], hw_state.BOOT_ID)
+        self.assertIn("expires_at", claim)
+        self.assertIn("renewed_at", hs.renew_claim("bench"))
         hs.add_claim("pair", [4, 5])
         dropped = hs.remove_claims_on([5])
         self.assertEqual([c["name"] for c in dropped], ["pair"])
         self.assertEqual([c["name"] for c in hs.claims()], ["bench"])
+
+    def test_previous_boot_and_legacy_claims_are_removed_on_startup_and_mirrored(self):
+        hs = self.make()
+        hs.add_claim("old-boot", [0])
+        record = json.loads(hs.claims_path.read_text())
+        record["claims"][0]["boot_id"] = "previous-boot"
+        record["claims"].append({"name": "legacy", "gpu_ids": [1]})
+        hs.claims_path.write_text(json.dumps(record))
+        restarted = self.make()
+        self.assertEqual(restarted.claims(), [])
+        self.assertEqual(self.mirrored("claims.json")["claims"], [])
+
+    def test_claim_ttl_cannot_exceed_one_hour(self):
+        hs = self.make()
+        with self.assertRaises(hw_state.StateError) as ctx:
+            hs.add_claim("too-long", [0], ttl_s=hw_state.MAX_CLAIM_TTL_S + 1)
+        self.assertEqual(ctx.exception.kind, "invalid")
 
     def test_release_checks_the_owner(self):
         hs = self.make()

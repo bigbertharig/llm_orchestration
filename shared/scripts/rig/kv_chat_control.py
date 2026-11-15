@@ -8,9 +8,11 @@ import fcntl
 import json
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +24,8 @@ IMAGE = "4bfa1cb0a955"
 CONTAINER = "qwen35-kv-chat-service"
 PARENT_CLAIM = "qwen35-kv-main"
 MODEL_ID = "qwen3.6:35b-a3b-xl"
+CLAIM_TTL_S = 300
+CLAIM_RENEW_S = 60
 
 
 def run(argv, *, check=True):
@@ -57,7 +61,7 @@ def claim(name, gpu, note):
     ctl = controller()
     run(["rig", "claim", "add", name, "--gpus", str(gpu), "--by", "orchestration",
          "--owner", ctl, "--controller", ctl, "--purpose", "chat",
-         "--model", MODEL_ID, "--note", note])
+         "--model", MODEL_ID, "--ttl", str(CLAIM_TTL_S), "--note", note])
 
 
 def release(name):
@@ -90,6 +94,53 @@ def container_running():
     return run(["docker", "inspect", "-f", "{{.State.Running}}", CONTAINER], check=False).stdout.strip() == "true"
 
 
+def clear_orphan_claims():
+    """Clear this service's claims only when its container is not running."""
+    if container_running():
+        return
+    claims = json.loads(run(["rig", "claim", "list"]).stdout)["claims"]
+    for item in claims:
+        if (item.get("model") == MODEL_ID and item.get("purpose") == "chat"
+                and (item["name"] == PARENT_CLAIM or item["name"].startswith("qwen35-kv-chat-"))):
+            release(item["name"])
+
+
+def renew_claims_once(instance_id: str) -> bool:
+    """Renew only this live service instance; release its claims if the container died."""
+    with locked():
+        st = state()
+        if not st or st.get("instance_id") != instance_id:
+            return False
+        if not container_running():
+            for name in st["claims"].values():
+                release(name)
+            STATE.unlink(missing_ok=True)
+            return False
+        ctl = controller()
+        for name in st["claims"].values():
+            run(["rig", "claim", "renew", name, "--ttl", str(CLAIM_TTL_S), "--controller", ctl])
+        return True
+
+
+def stop_unrenewable_service(instance_id: str):
+    """Do not leave a running container behind after its reservations lapse."""
+    with locked():
+        st = state()
+        if not st or st.get("instance_id") != instance_id:
+            return
+        run(["docker", "stop", CONTAINER], check=False)
+        for name in st["claims"].values():
+            release(name)
+        STATE.unlink(missing_ok=True)
+
+
+def launch_renewer(instance_id: str):
+    with (STATE.parent / "kv_chat_claim_renewer.log").open("a", encoding="utf-8") as log:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "renew-loop",
+                          "--instance-id", instance_id], stdin=subprocess.DEVNULL,
+                         stdout=log, stderr=log, start_new_session=True)
+
+
 def worker_cards() -> list[dict]:
     """Discover cards with enough VRAM for a Q4 worker chat; prefer smaller cards."""
     output = run(["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used",
@@ -109,13 +160,28 @@ def worker_cards() -> list[dict]:
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("start", "attach", "detach", "turn", "status", "stop"))
+    p.add_argument("action", choices=("start", "attach", "detach", "turn", "status", "stop", "renew-loop"))
     p.add_argument("--port", type=int, default=11524)
     p.add_argument("--chat-id")
     p.add_argument("--gpu", type=int)
     p.add_argument("--message")
     p.add_argument("--max-tokens", type=int, default=128)
+    p.add_argument("--instance-id")
     args = p.parse_args()
+    if args.action == "renew-loop":
+        if not args.instance_id: p.error("renew-loop needs --instance-id")
+        last_success = time.monotonic()
+        while True:
+            time.sleep(CLAIM_RENEW_S)
+            try:
+                if not renew_claims_once(args.instance_id): return
+                last_success = time.monotonic()
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(f"claim renewal failed: {exc}", file=sys.stderr, flush=True)
+                if time.monotonic() - last_success >= CLAIM_TTL_S - CLAIM_RENEW_S:
+                    stop_unrenewable_service(args.instance_id)
+                    return
+        return
     if args.action == "turn":
         st = state()
         if not st or not healthy(st["port"]): p.error("35B shared-weight service is not ready")
@@ -134,8 +200,17 @@ def main():
                               "chats": chats, "claims": st["claims"]}, indent=2)); return
         if args.action == "start":
             if st and container_running() and healthy(st["port"]):
+                if not st.get("instance_id"):
+                    st["instance_id"] = uuid.uuid4().hex
+                    save(st)
+                    launch_renewer(st["instance_id"])
                 print(json.dumps({"status": "ready", "port": st["port"], "already_running": True})); return
+            if st and not container_running():
+                for name in st["claims"].values(): release(name)
+                STATE.unlink(missing_ok=True)
+                st = None
             if st or container_running(): p.error("stale service state or container; inspect and stop it first")
+            clear_orphan_claims()
             if not (1024 <= args.port <= 65535): p.error("port must be 1024..65535")
             if not MODEL.is_file() or not (BUILD / "bin/llama-kv-chat-server").is_file():
                 p.error("model hotset or KV server binary missing; build the runtime first")
@@ -160,11 +235,14 @@ def main():
                     time.sleep(1)
                 else: raise RuntimeError("KV server did not become ready within 120 seconds")
                 st = {"model": MODEL_ID, "mode": "gpu0-main-q4", "port": args.port,
+                      "instance_id": uuid.uuid4().hex,
                       "container": CONTAINER, "claims": {"main": PARENT_CLAIM}}
                 save(st)
+                launch_renewer(st["instance_id"])
             except Exception:
                 run(["docker", "stop", CONTAINER], check=False)
                 release(PARENT_CLAIM)
+                STATE.unlink(missing_ok=True)
                 raise
             print(json.dumps({"status": "ready", "port": args.port, "main_chat": "main"})); return
         if args.action == "stop":

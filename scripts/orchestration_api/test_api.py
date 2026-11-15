@@ -18,19 +18,20 @@ class Connection(http.client.HTTPConnection):
         self.sock.connect(self.path)
 
 
-def test_versioned_status_options_and_action_contract(tmp_path, monkeypatch):
+def test_versioned_status_and_prepared_job_contract(tmp_path, monkeypatch):
     class FakeControls:
         def __init__(self, shared, config):
             assert shared == tmp_path and config == {"marker": 1}
 
-        def options(self):
-            return {"plans": ["p"]}
+        def submit_prepared(self, plan_name, plan_scope, starter_file, config):
+            return {"submitted": [plan_name, plan_scope, starter_file, config]}
 
         def kill_plan(self, batch_id):
             return {"message": f"killed {batch_id}"}
 
     monkeypatch.setattr(api, "_context", lambda: (tmp_path, {"marker": 1}))
-    monkeypatch.setattr(api, "summarize", lambda shared, config: {"counts": {"queue": 2}})
+    monkeypatch.setattr(api, "snapshot", lambda shared, config: {"active_batch_count": 2})
+    monkeypatch.setattr(api, "diagnostics", lambda shared, config: {"ok": True, "checks": []})
     monkeypatch.setattr(api, "Controls", FakeControls)
     path = tmp_path / "api.sock"
     server = api.Server(str(path), api.Handler)
@@ -49,8 +50,13 @@ def test_versioned_status_options_and_action_contract(tmp_path, monkeypatch):
 
     try:
         assert request("GET", "/health") == (200, {"ok": True, "api_version": 1})
-        assert request("GET", "/v1/orchestration/status") == (200, {"counts": {"queue": 2}})
-        assert request("GET", "/v1/orchestration/options") == (200, {"plans": ["p"]})
+        assert request("GET", "/v1/orchestration/status") == (200, {"active_batch_count": 2})
+        assert request("GET", "/v1/orchestration/diagnostics") == (200, {"ok": True, "checks": []})
+        assert request("GET", "/v1/orchestration/options")[0] == 404
+        assert request("POST", "/v1/orchestration/actions/submit_prepared", {
+            "plan_name": "p", "plan_scope": "shoulders", "config": {"RUN_MODE": "fresh"}
+        }) == (200, {"submitted": ["p", "shoulders", "", {"RUN_MODE": "fresh"}]})
+        assert request("POST", "/v1/orchestration/actions/start_plan", {})[0] == 404
         assert request("POST", "/v1/orchestration/actions/kill_plan", {"batch_id": "b1"}) == (200, {"message": "killed b1"})
         assert request("POST", "/v1/orchestration/actions/rm_rf", {})[0] == 404
         assert request("POST", "/v1/orchestration/actions/kill_plan", [1])[0] == 400
