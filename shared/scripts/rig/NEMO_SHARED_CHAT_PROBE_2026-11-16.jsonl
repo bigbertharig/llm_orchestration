@@ -1,0 +1,4 @@
+{"start": {"chats": [{"chat_id": "child5", "context_cap": 262144, "gpu": 5, "used_tokens": 66}, {"chat_id": "main", "context_cap": 262144, "gpu": 0, "used_tokens": 64}]}, "message_bytes": 61999}
+{"fill": "main", "used_tokens": 37280, "seconds": 340.12}
+{"fill": "child5", "used_tokens": 37282, "seconds": 435.85}
+{"concurrent": [{"chat_id": "main", "gpu": 0, "generated_tokens": 16, "used_tokens": 37314, "finish_reason": "length", "decode_tok_s": 33.54277378391308}, {"chat_id": "child5", "gpu": 5, "generated_tokens": 16, "used_tokens": 37317, "finish_reason": "length", "decode_tok_s": 28.730807957204842}], "end": {"chats": [{"chat_id": "child5", "context_cap": 262144, "gpu": 5, "used_tokens": 37317}, {"chat_id": "main", "context_cap": 262144, "gpu": 0, "used_tokens": 37314}]}}

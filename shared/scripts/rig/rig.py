@@ -996,7 +996,8 @@ def status_payload() -> dict:
                 with urllib.request.urlopen(f"http://127.0.0.1:{item['port']}/chats", timeout=2) as response:
                     chats = json.load(response).get("chats", [])
             kv = {"status": "ready" if ready else "down", "model": item["model"],
-                  "port": item["port"], "mode": item["mode"], "chats": chats}
+                  "port": item["port"], "mode": item["mode"],
+                  "instance_id": item.get("instance_id"), "chats": chats}
         except (OSError, ValueError, KeyError, urllib.error.URLError):
             kv = {"status": "down"}
     g = gpu_check()
@@ -1444,6 +1445,7 @@ def cmd_boot(_args) -> int:
 def cmd_shared_kv(args) -> int:
     """Delegate shared-chat lifecycle to the rig-side controller; keep its claims authoritative."""
     command = [sys.executable, str(Path(__file__).resolve().with_name("kv_chat_control.py")), args.action]
+    if args.model: command += ["--model", args.model]
     if args.chat_id: command += ["--chat-id", args.chat_id]
     if args.message is not None: command += ["--message", args.message]
     if args.max_tokens is not None: command += ["--max-tokens", str(args.max_tokens)]
@@ -1477,7 +1479,8 @@ def main() -> int:
     s.add_argument("--spec", help="remote, one profile: required manager load spec (JSON: model, gguf_path, ctx_size, tensor_split, ...)")
     s.set_defaults(fn=cmd_start)
     s = sub.add_parser("shared-kv", help="control the loaded shared-weight chat service")
-    s.add_argument("action", choices=("status", "start", "attach", "detach", "turn"))
+    s.add_argument("action", choices=("status", "start", "attach", "detach", "turn", "stop"))
+    s.add_argument("--model", choices=("qwen3.6:35b-a3b-xl", "nemotron-3.5-bolt:74b-a9b"))
     s.add_argument("--chat-id")
     s.add_argument("--message")
     s.add_argument("--max-tokens", type=int)
