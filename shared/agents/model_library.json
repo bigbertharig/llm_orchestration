@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "e9c1dc65156d9261843385fb17ba6740683b3413c44e0ea6f48955512979888e",
+  "source_sha256": "3880a55208bc6e8b0bd41f9a88b367d4ad15aba66ae4f4ea622e3ad86236311c",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -2751,6 +2751,26 @@
           "results/runtime_experiments/kv_expert_chat_20261107/README.md",
           "results/runtime_experiments/kv_matched_placement_20261107/README.md"
         ]
+      },
+      "nemotron74_shared_kv_http_v1": {
+        "model": "nemotron-3.5-bolt:74b-a9b",
+        "status": "validated",
+        "procedure": "shared_kv_http_v1",
+        "placement": {
+          "weights": [
+            "gpu0"
+          ],
+          "experts": [
+            "gpu_workers"
+          ],
+          "chat_state": [
+            "gpu0",
+            "gpu_workers"
+          ]
+        },
+        "evidence": [
+          "results/runtime_experiments/nemotron_shared_kv_http_20261116/README.md"
+        ]
       }
     }
   },
@@ -4660,5 +4680,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-15T20:59:48+00:00"
+  "imported_at": "2026-11-18T19:53:02+00:00"
 }
