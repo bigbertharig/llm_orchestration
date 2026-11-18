@@ -1,8 +1,16 @@
 # LLM Orchestration — Context (Short)
 
-Addresses: these docs use role placeholders (`<pi-ip>`, `<rig-ip>`, `<router-ip>`, `<worker-ip>`, `<desktop-ip>`, `<rig-subnet>`) instead of our real ones. The real addresses, the MAC reservations and the ssh config are in the local site inventory (`shared/workspace/local/inventory.md`, not committed). Scripts carry the real values.
+## Scope and ownership
 
-Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
+Examples use role placeholders for addresses; operational values are supplied by local configuration and are not documented here.
+
+This repository owns prepared-plan execution and the rig-side runtime that carries out admitted work: the brain sequences tasks, GPU and CPU workers execute them, and plans define the workload. The rig runtime reports its state through orchestration status and diagnostics.
+
+Benchmarking owns model research, registry and role assignments, suites, and result evidence. The Gateway Manager currently handles admission, placement, leases, and published ready routes; the rig-side orchestration layer enforces hardware rules and executes admitted work. Complete reservations and placement are moving into the orchestration boundary. See the [cross-repo contract](https://github.com/bigbertharig/benchmarking/blob/main/CROSS_REPO_CONTRACT.md), [Manager guide](https://github.com/bigbertharig/llm-gateway/blob/main/docs/MANAGER.md), and benchmarking's [integration playbook](https://github.com/bigbertharig/benchmarking/blob/main/NEW_MODEL_INTEGRATION.md).
+
+## How to use this context
+
+Use the operator docs below for the current workflow. The implementation and audit documents are dated snapshots: their target sections describe planned architecture, and their historical status should be checked against the current operator docs and code before acting.
 
 ## Read First
 - `workspace/quickstart.md` (submit, monitor, kill plan)
@@ -51,24 +59,24 @@ Purpose: Brain orchestrates tasks; GPU/CPU workers execute; plans define work.
 ## Shared Storage Topology (Current)
 
 - The shared drive (4TB WD, later a NAS) is attached to the Pi at `<pi-ip>` and exported over NFS
-  (`/media/bryan/shared`, `root_squash,anonuid=1000,anongid=1000` to `<rig-subnet>`). The Pi is the network
+  (`<pi-shared-root>`, `root_squash,anonuid=1000,anongid=1000` to `<rig-subnet>`). The Pi is the network
   leader: storage and time (chrony serves the LAN; the rig syncs only from the Pi).
 - The rig mounts it at `/mnt/shared` (NFS automount, soft, 10 min idle timeout). The rig itself is
   self-contained for idle/remote mode: code, config, model library and the NVMe model cache are rig-local
   (`~/llm_orchestration`, `/data/model-hotset`); the share holds the canonical model archive
   and the orchestration/bench stack files.
 - Rig-local path convention: `/mnt/shared/...`
-- Pi/operator path convention: `/media/bryan/shared/...`
-- CPU worker path convention: usually `/media/bryan/shared/...` (some hosts may expose `/mnt/shared/...`)
+- Pi/operator path convention: `<pi-shared-root>/...`
+- CPU worker path convention: usually `<pi-shared-root>/...` (some hosts may expose `/mnt/shared/...`)
 - The same files are reached through different mount prefixes depending on where the command runs.
 
 Path rule:
 - if a command executes on the rig itself, prefer `/mnt/shared/...`
-- if a command executes on the Pi at `<pi-ip>`, prefer `/media/bryan/shared/...`
+- if a command executes on the Pi at `<pi-ip>`, prefer `<pi-shared-root>/...`
 - if a wrapper proxies work to the rig, pass shared paths that can be normalized to rig-visible paths
 
 Operational rule:
-- Scripts that run on CPU workers must resolve shared root dynamically (`/media/bryan/shared` vs `/mnt/shared`) instead of hardcoding one path.
+- Scripts that run on CPU workers must resolve shared root dynamically (`<pi-shared-root>` vs `/mnt/shared`) instead of hardcoding one path.
 - If CPU workers disappear from dashboard, first verify worker shared mount points resolve to rig `<rig-ip>` and are actually mounted.
 
 ## Architecture — Who Does What
@@ -106,7 +114,7 @@ Use the rig side for:
 
 The laptop side is still fine for:
 - reading shared history folders
-- reviewing logs and summaries on `/media/bryan/shared/`
+- reviewing logs and summaries on `<pi-shared-root>/`
 - editing repo code/docs
 
 Rule of thumb:
@@ -190,13 +198,13 @@ Submit path notes:
 - config values that refer to files the rig must open should resolve to rig-visible shared paths
 - accepted shared aliases are normalized by the wrapper:
   - `~/llm_orchestration/shared/...`
-  - `/media/bryan/shared/...`
+  - `<pi-shared-root>/...`
   - `/mnt/shared/...`
 
 Use the dashboard as the other normal front door:
 
 ```bash
-/media/bryan/shared/scripts/start_dashboard.sh
+<pi-shared-root>/scripts/start_dashboard.sh
 ```
 
 Controls:
@@ -225,15 +233,15 @@ Read-only batch review can be done from either the rig or the laptop.
 Summarize one batch with the shared review tool:
 
 ```bash
-python3 /media/bryan/shared/scripts/summarize_history_run.py \
-  --history-dir /media/bryan/shared/plans/<shoulder-or-arm>/<plan_name>/history/<batch_id>
+python3 <pi-shared-root>/scripts/summarize_history_run.py \
+  --history-dir <pi-shared-root>/plans/<shoulder-or-arm>/<plan_name>/history/<batch_id>
 ```
 
 Roll up many historical batches with the repo script:
 
 ```bash
 python3 ~/llm_orchestration/scripts/rollup_history.py \
-  /media/bryan/shared/plans/<shoulder-or-arm>/<plan_name>/history
+  <pi-shared-root>/plans/<shoulder-or-arm>/<plan_name>/history
 ```
 
 Optional runtime-focused diagnostics for one batch:
@@ -247,9 +255,9 @@ heartbeats, but local runtime port probes and GPU telemetry will be degraded.
 #   python3 /mnt/shared/scripts/batch_runtime_diag.py --batch-id <batch_id> --shared-path /mnt/shared
 #
 # laptop-side fallback:
-python3 /media/bryan/shared/scripts/batch_runtime_diag.py \
+python3 <pi-shared-root>/scripts/batch_runtime_diag.py \
   --batch-id <batch_id> \
-  --shared-path /media/bryan/shared
+  --shared-path <pi-shared-root>
 ```
 
 Where results land:
