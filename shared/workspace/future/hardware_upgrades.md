@@ -1,6 +1,6 @@
 # Hardware Upgrades
 
-*Consolidated: 2026-11-02*
+*Updated: 2026-11-13*
 *Status: Research and future planning; no purchase decision*
 
 This is the planning document for hardware build options, worker upgrades,
@@ -8,11 +8,10 @@ compact CPU/LLM boxes, and the supporting performance evidence. Current model
 loads and measured speeds remain owned by the benchmarking repository. The
 distributed work guide owns workflow and task routing.
 
-The current direction discussed on 2026-11-02 is the planned 7x GTX 1070
-upgrade to the main rig and a separate compact CPU worker that could also host
-a side LLM. The older nine-card GTX 1070 and Threadripper scenarios below are dated
-planning snapshots, not the current purchase list. Recheck prices, fit, power,
-and software support before buying.
+The current planning direction is to keep the mining board as a small-worker box
+and build a separate DDR4 host for the owned 3090 Ti plus future 3090-class or
+larger GPUs. The November price table below is the current buying snapshot.
+Hardware assignments and purchase timing remain experimental.
 
 ---
 
@@ -25,7 +24,7 @@ and software support before buying.
 | Motherboard | ASUS B250 Mining Expert (19× PCIe slots: 1× x16, 18× x1) |
 | CPU | Intel i7-7700K (4 cores / 8 threads, 4.2 GHz, LGA 1151) |
 | RAM | 2× 16GB DDR4-2133 UDIMM (32GB total, non-ECC) |
-| PCIe generation | Gen2, set board-wide in BIOS (2026-10-19; Gen3 logged riser link replays) |
+| PCIe generation | CPU x16 at Gen3; chipset x1 risers at Gen2; C17/C18 behind a Gen1 x1 switch |
 | PSU | Dual/triple PSU capable, ~2,200W total capacity |
 
 | GPU | Type | VRAM | Slot | Role | Models |
@@ -34,7 +33,7 @@ and software support before buying.
 | 1–5 | GTX 1060 | 6GB each | x1 risers | Workers | 3B–7B single, 14B split (pairs of 2) |
 
 Strengths: 19 PCIe slots, dual/triple PSU, proven stable, can hold many worker GPUs.
-Limits: x1 risers for workers (fine for decode, slower loads), 32GB RAM (2 slots maxed), 2017 platform.
+Limits: 32GB RAM (2 slots maxed), one x16 slot, 2017 platform.
 
 **CPU workers (<worker-ip>–17) — Orange Pi Prime fleet**
 
@@ -44,7 +43,7 @@ Limits: x1 risers for workers (fine for decode, slower loads), 32GB RAM (2 slots
 | CPU | 4× Cortex-A53 per node |
 | RAM | 2GB |
 | Storage | 30GB SD |
-| Shared drive | Mounted at /media/bryan/shared |
+| Shared drive | Mounted at <pi-shared-root> |
 
 Too constrained for LLM inference. Current viable uses:
 - **Embedding generation** — `nomic-embed-text` (~270MB) for RAG indexing, 8× parallel throughput
@@ -59,7 +58,7 @@ Too constrained for LLM inference. Current viable uses:
 | Board | Raspberry Pi 5 Model B |
 | CPU | 4× Cortex-A76 |
 | RAM | 8GB |
-| llama.cpp | Built at `/home/bryan/llama.cpp/build/bin/llama-server` |
+| llama.cpp | Built at `<llama.cpp-checkout>/build/bin/llama-server` |
 
 Can run 3B–7B models on CPU. Measured performance:
 
@@ -127,112 +126,15 @@ Four distinct worker architectures, each with different cost/performance tradeof
 | **Power draw** | ~3W/node | ~8-12W/node | ~120W/GPU | ~200-300W total |
 | **Noise/heat** | Passive | Fan, low heat | Fans, significant heat | Fan, moderate heat |
 
-### Cost reality (April 2026 pricing)
+### Cost and workload note
 
-DRAM prices have spiked due to AI infrastructure demand. This changes the math significantly.
-
-| Config | Unit cost | Total cost | LLM memory | Aggregate 7B tok/s |
-|--------|----------|-----------|------------|-------------------|
-| 8× Orange Pi Prime (2GB) | ~$30 | **~$240** | 0 (no LLM) | 0 |
-| 8× Pi 5 (8GB) | ~$180 | **~$1,440** | 8× 8GB = 64GB | ~12 tok/s |
-| 8× Pi 5 (16GB) | ~$300 | **~$2,400** | 8× 16GB = 128GB | ~12 tok/s |
-| 1× RTX 3060 12GB (used) | ~$250 | **~$250** | 12GB VRAM | ~35 tok/s |
-| 5× RTX 3060 12GB (used) | ~$250 | **~$1,250** | 60GB VRAM | ~175 tok/s |
-| 1× RTX 4060 Ti 16GB (used) | ~$280 | **~$280** | 16GB VRAM | ~40 tok/s |
-| 1× DGX Spark (128GB) | ~$4,700 | **~$4,700** | 128GB unified | ~50-80 tok/s |
-
-Notes: Pi costs don't include power supplies, SD cards, cases, or switch (~$50-100 for a cluster). GPU costs don't include a host system. DGX Spark is self-contained.
-
-### The honest tradeoff
-
-**CPU LLM swarm (Pi cluster) vs GPU workers:**
-
-The Pi cluster's only advantage is parallelism — 8 independent streams vs 1 GPU. But the economics are brutal:
-
-- 8× Pi 5 16GB ($2,400) gives 128GB distributed RAM at ~12 tok/s aggregate for 7B models
-- 5× RTX 3060 12GB ($1,250) gives 60GB VRAM at ~175 tok/s aggregate — **14× faster at half the price**
-- A single RTX 3060 ($250) is faster than all 8 Pis combined for any single request
-
-The Pi swarm only wins when:
-- You have >8 concurrent requests sustained (rare outside batch jobs)
-- You need physical distribution (edge deployment, separate locations)
-- You already own the hardware and GPUs aren't an option
-- Power budget matters (8 Pis = ~96W vs 5 GPUs = ~600W + host)
-
-For a home lab adding LLM capacity, **GPUs are strictly better per dollar**.
-
-**CPU LLM swarm vs unified memory box:**
-
-If the goal is "lots of RAM for models," a memory box is better in every dimension:
-
-- DGX Spark ($4,700) gives 128GB unified at ~50-80 tok/s — **same memory as 8× Pi 5 16GB but 4-7× faster, runs 200B models, multiple models concurrently**
-- Pi cluster can't do what a memory box can (large models, true concurrent serving)
-- Pi cluster does what a memory box can't: survive partial failure, distribute geographically
-
-The 8× Pi 5 16GB cluster at $2,400 is the worst middle ground — too expensive for script work, too slow for serious inference, not enough memory per node for large models. It's half the cost of a DGX Spark but delivers a fraction of the capability.
-
-**Where each tier actually makes sense:**
-
-| Tier | Sweet spot | Avoid when... |
-|------|-----------|--------------|
-| CPU script (Orange Pi) | Cheap parallel task execution, embeddings, data prep. Already deployed, costs nothing to keep. | You need LLM inference of any kind. |
-| CPU LLM (Pi 5) | Edge deployment where GPU isn't an option. Dev/test. Single Pi as overflow, not a cluster. | Building a cluster for throughput — GPUs win. |
-| GPU workers | Primary LLM inference. Best tok/s per dollar. Proven, well-understood. | Models exceed VRAM (>7B on 6GB, >14B on 12GB, >30B on 24GB). |
-| Memory box (DGX Spark) | Replacing the entire rig. Running many models concurrently. Brain + workers on one box. Future consolidation. | Budget < $4,700. Need for distributed/edge deployment. |
+The current price and build table is below the driver section. The worker tiers above describe roles and memory architecture; purchasing choices should use the November table.
 
 ---
 
-## Hardware upgrade options compared (April 2026 pricing)
+## Split-card platform notes
 
-Five realistic paths for expanding inference capacity, each with different tradeoffs.
-
-**1. AMD Ryzen AI Max+ 395 mini PC (128GB unified) — ~$2,800**
-
-Best budget memory box. x86 architecture means existing scripts, Docker images, and Python packages work unmodified. No CUDA (uses ROCm/Vulkan), so bench containers would need adaptation.
-
-| Model size | Generation tok/s | Notes |
-|-----------|-----------------|-------|
-| 7B Q4 | ~40 | Comparable to a 3090 |
-| 14B Q4 | ~20-25 (est) | Slower than discrete GPU |
-| 70B Q4 | ~4.5 | Slow but it runs at all |
-
-Multiple vendors (Framework Desktop, GMKtec, Minisforum, Beelink). Not locked to one ecosystem. ~300 GB/s memory bandwidth.
-
-**2. NVIDIA DGX Spark (128GB unified) — $4,700**
-
-Full CUDA stack but ARM architecture — Docker images need ARM64 rebuilds. MoE models are the killer app (~89 tok/s for 30B MoE). Dense models are slow due to 273 GB/s bandwidth (lower than AMD). Thermal throttling on sustained loads. Locked to DGX OS. Even at scale, the bandwidth wall doesn't go away — a [16× DGX Spark cluster ($75k, 2TB unified)](https://www.reddit.com/r/LocalLLaMA/comments/1sz0lyk/16x_dgx_sparks_what_should_i_run/) still maxes out at ~20 tok/s generation because each token is bottlenecked by per-node memory bandwidth, not aggregate capacity.
-
-| Model size | Generation tok/s | Notes |
-|-----------|-----------------|-------|
-| 8B FP8 | ~20.5 (batch 1) | Scales to ~368 with batching |
-| 20B MoE (MXFP4) | ~49.7 | MoE is the sweet spot |
-| 30B MoE | ~89 | Excellent |
-| 70B FP8 dense | ~2.7 | Nearly unusable |
-
-**3. Mac Studio M3 Ultra (192-256GB) — $4,000-$8,000+**
-
-Highest memory bandwidth (819 GB/s) means fastest 70B inference of any memory box. But macOS only — no Linux, no Docker GPU passthrough, no CUDA. The entire orchestration stack would need rework. Apple pulled the 512GB config due to DRAM costs. ARM architecture.
-
-| Model size | Generation tok/s | Notes |
-|-----------|-----------------|-------|
-| 7B Q4 | ~40-50 (est) | Good |
-| 14B Q4 | ~25-30 | Good |
-| 70B Q4 | ~14 | Best of any memory box |
-
-**4. Threadripper build with dual GPUs (recommended upgrade path)**
-
-A purpose-built inference rig: Threadripper CPU, large DDR5 RAM pool, 2× high-end GPUs, full CUDA/x86/Docker compatibility, zero porting from current stack.
-
-### Why build instead of buying a memory box
-
-All memory boxes (DGX Spark, Mac Studio, AMD Max+ mini PCs) have soldered RAM — what you buy is what you get forever. A Threadripper build lets you start with 128GB and scale to 1TB. GPUs swap out as better cards arrive. At every price point, the build wins on speed and flexibility.
-
-| Budget | Build option | 70B tok/s | Memory box alternative | 70B tok/s | Verdict |
-|--------|-------------|----------|----------------------|----------|---------|
-| ~$5k | TRX50 + 2× 3090 + 128GB | ~16 | DGX Spark 128GB | 2.7 | Build is **6× faster** |
-| ~$5k | TRX50 + 2× 3090 + 128GB | ~16 | Mac Studio M4 Max 128GB | ~7 | Build is **2× faster** |
-| ~$8k | WRX90 + 2× 3090 + 128GB | ~16 | Mac Studio M3 Ultra 256GB | ~14 | Build is faster + upgradeable |
-| ~$10k | WRX90 + 2× 3090 + 512GB | ~16 + MoE | Mac Studio M3 Ultra 256GB | ~14 | Build has 2× the RAM |
+The PCIe and hardware specifications below remain useful for design. Current buying prices and build totals are in the November 2026 section after the driver notes.
 
 ### PCIe bandwidth for split models
 
@@ -247,90 +149,163 @@ LLM inference is memory-bandwidth-bound, not interconnect-bound. During token ge
 
 Note: NVLink is available on RTX 3090 but NOT on 3090 Ti, 4090, or 5090. All 40/50 series consumer cards are PCIe only. Buy 3090s while used stock exists.
 
-### GPU options
+### GPU purchase focus
 
-| Config | VRAM | 70B Q4 tok/s | Cost (GPUs only) | Notes |
-|--------|------|-------------|-----------------|-------|
-| 2× RTX 3090 + NVLink | 48GB | ~16 | ~$1,400 used | Best value for 70B |
-| 2× RTX 3090 PCIe only | 48GB | ~12-14 | ~$1,400 used | Still 3-5× faster than any memory box |
-| 2× RTX 5090 PCIe 5.0 | 64GB | ~40-60 (est) | ~$7,200 (street, ~$4,000 MSRP) | Fastest consumer 70B when prices drop |
-| 1× RTX 5090 | 32GB | n/a (70B doesn't fit) | ~$3,600 | Fastest for ≤30B (~180 tok/s on 7B) |
+For the new 100–300B host, plan around the already-owned 3090 Ti and additional RTX 3090-class or larger cards. The lower-capacity cards in the specification table are reference hardware, not a new-rig shopping list.
 
-### Platform choice: TRX50 vs WRX90
+### GPU VRAM capacity per rated board watt (checked 2026-11-09)
 
-| | TRX50 (Threadripper) | WRX90 (Threadripper Pro) |
-|--|----------------------|--------------------------|
-| **RAM slots** | 4 | **8** |
-| **Memory channels** | 4 (~150-200 GB/s) | **8 (~300-400 GB/s)** |
-| **Max RAM** | 1TB (4× 256GB) | **2TB** (8× 256GB) |
-| **PCIe 5.0 x16 slots** | 2-3 | **7** |
-| **Mobo price** | ~$600-900 | ~$1,200-1,500 |
-| **Cheapest CPU** | 7960X 24-core (~$1,200-1,500) | 7965WX 24-core (~$3,500-4,000) |
-| **CPU+Mobo** | ~$1,800-2,400 | ~$4,700-5,500 |
+This is a capacity and power-screening table, not a model-speed ranking or a shopping list. **W/GB = manufacturer maximum board power divided by physical VRAM; lower is better for this one metric.** The power column is a rating, not measured inference draw. Peak memory bandwidth is included because it can matter for decode, but it does not predict tokens/s on its own. Host power, idle draw, power limits, cooling, price, model fit, and runtime support also matter. A multi-card total is not one seamless VRAM pool; split models have per-card overhead and placement constraints.
 
-For GPU inference only (models in VRAM), extra channels don't matter — the CPU is just a bus driver. For hybrid MoE offloading (expert weights in RAM), 8-channel DDR5 at ~300-400 GB/s matches or beats a DGX Spark's 273 GB/s. That's where WRX90 earns its premium.
+| Card | VRAM | Rated board power | W/GB | Peak memory bandwidth | Capacity/power note |
+|------|-----:|------------------:|-----:|----------------------:|---------------------|
+| GTX 1060 6GB | 6 GB | 120 W | 20.00 | 192 GB/s | Existing worker card; reference specification |
+| GTX 1070 | 8 GB | 150 W | 18.75 | 256 GB/s | Existing worker-farm comparison |
+| RTX 3090 | 24 GB | 350 W | 14.58 | 936 GB/s | Older 24GB build option; NVLink capable |
+| RTX 3090 Ti | 24 GB | 450 W | 18.75 | 1,008 GB/s | Current rig card; its configured 350W cap is separate from this rating |
+| Tesla M10 | 4 × 8 GB | 225 W for board | 7.03 across 32 GB | 83 GB/s per GPU | Four separate Maxwell GPUs, not one 32GB pool; 1× PCIe 8-pin, passive cooling, CUDA `sm_50` build needed |
+| RTX 3060 12GB | 12 GB | 170 W | 14.17 | 360 GB/s | Existing 12GB worker option |
+| RTX 4060 Ti 16GB | 16 GB | 165 W | 10.31 | 288 GB/s | Older 16GB baseline |
+| RTX 5060 Ti 16GB | 16 GB | 180 W | 11.25 | 448 GB/s | Use the 16GB variant, not the 8GB one |
+| RTX 5070 Ti | 16 GB | 300 W | 18.75 | 896 GB/s | More bandwidth than 5060 Ti, same VRAM |
+| RTX 5080 | 16 GB | 360 W | 22.50 | 960 GB/s | Faster memory, limited capacity per watt |
+| RTX 5090 | 32 GB | 575 W | 17.97 | 1,792 GB/s | Largest current GeForce VRAM in this comparison |
+| Tesla V100S 32GB PCIe | 32 GB HBM2 | 250 W | 7.81 | 1,134 GB/s | Used passive card; passive cooling and 32GB BAR1 BIOS mapping required |
+| A100 40GB PCIe | 40 GB HBM2 | 250 W | 6.25 | 1,555 GB/s | Older data-center accelerator; passive cooling requires server airflow |
+| A100 80GB PCIe | 80 GB HBM2e | 300 W | 3.75 | 1,935 GB/s | Older data-center accelerator; passive cooling requires server airflow |
+| A800 40GB Active | 40 GB HBM2 | 240 W | 6.00 | 1,555 GB/s | Active-cooled workstation accelerator; check used availability |
+| RTX A6000 (Ampere) | 48 GB ECC | 300 W | 6.25 | 768 GB/s | Active-cooled 48GB workstation card; `sm_86` |
+| A40 | 48 GB ECC | 300 W | 6.25 | 696 GB/s | Older data-center card; passive cooling requires directed airflow |
+| L40 | 48 GB ECC | 300 W | 6.25 | 864 GB/s | Ada data-center card; passive cooling requires directed airflow |
+| L40S | 48 GB ECC | 350 W | 7.29 | 864 GB/s | Ada data-center card; passive cooling requires directed airflow |
+| RTX 6000 Ada | 48 GB ECC | 300 W | 6.25 | 960 GB/s | Active-cooled 48GB workstation card; `sm_89` |
+| RTX PRO 2000 Blackwell | 16 GB ECC | 70 W | 4.38 | 288 GB/s | Low-power workstation option |
+| RTX PRO 4000 Blackwell SFF | 24 GB ECC | 70 W | 2.92 | 432 GB/s | Very low board rating; half-height, dual-slot |
+| RTX PRO 4000 Blackwell | 24 GB ECC | 145 W | 6.04 | 672 GB/s | Single-slot; NVIDIA's comparison page lists 145W (another product page lists 140W) |
+| RTX PRO 4500 Blackwell | 32 GB ECC | 200 W | 6.25 | 896 GB/s | 32GB at a lower rating than RTX 5090 |
+| RTX PRO 5000 Blackwell | 48 GB ECC | 300 W | 6.25 | 1,344 GB/s | High single-card capacity |
+| RTX PRO 5000 Blackwell 72GB | 72 GB ECC | 300 W | 4.17 | 1,344 GB/s | Same rated power as 48GB variant |
+| RTX PRO 5500 Blackwell | 84 GB ECC | up to 600 W | 7.14 | 1,398 GB/s | Preliminary published specification |
+| RTX PRO 6000 Blackwell Max-Q | 96 GB ECC | 300 W | 3.13 | 1,792 GB/s | Highest single-card capacity here at 300W |
+| RTX PRO 6000 Blackwell | 96 GB ECC | 600 W | 6.25 | 1,792 GB/s | Full-power workstation version |
 
-TRX50 has 4 slots — all populated from day one. To upgrade RAM, you replace sticks. WRX90 has 8 slots — start with 4, add 4 more later.
+The 24GB/70W PRO 4000 SFF and 96GB/300W PRO 6000 Max-Q look strongest on **rated watts per GB**, while the 5090 has much higher bandwidth than the 16GB GeForce cards. This is an inference from specifications, not a measured LLM result. The 70W SFF card is not an automatic swap into an x1-riser farm: check slot power, riser wiring, form factor, airflow, driver, and llama.cpp support first. Before buying, compare actual board prices and run the same model, context, batch size, and power cap to measure tokens/s and joules/token.
 
-Key CPU point: during LLM inference the CPU is mostly idle. A 24-core and 64-core Threadripper on the same board have identical memory bandwidth and identical inference performance. The CPU doesn't do the math — it manages the PCIe bus and HTTP server. Save the money for GPUs and RAM. CPU-heavy parallel work (scripts, data prep) goes to the Orange Pi swarm.
+Specification sources: [GTX 1060 reference specs](https://www.nvidia.com/en-us/geforce/news/nvidia-geforce-gtx-1060/), [GTX 1070 reference specs](https://images.nvidia.com/aem-dam/Solutions/design-visualization/technologies/turing-architecture/NVIDIA-Turing-Architecture-Whitepaper.pdf), [RTX 3090/3090 Ti reference bandwidth](https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf), [RTX 3060 bandwidth](https://www.nvidia.com/en-us/geforce/news/game-on-you-asked-we-answered-qa/), [RTX 4060 Ti bandwidth](https://www.nvidia.com/en-us/geforce/news/rtx-40-series-vram-video-memory-explained/), [NVIDIA GeForce comparison](https://www.nvidia.com/en-us/geforce/graphics-cards/compare/) (RTX 30/40/50 memory and power), [NVIDIA A100 datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf) (PCIe 40/80GB), [NVIDIA RTX PRO desktop comparison](https://www.nvidia.com/en-in/products/workstations/professional-desktop-gpus/) (PRO memory and power), [RTX PRO 2000 specifications](https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-2000/), [RTX PRO 4000 SFF datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/data-center/rtx-pro-4000-blackwell/workstation-datasheet-blackwell-rtx-pro-4000-gtc25s-nvidia-3662515-r6.pdf), [RTX PRO 4500 datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/data-center/rtx-pro-4500-blackwell/workstation-datasheet-blackwell-rtx-pro-4500-we-nvidia-us-5108623-web.pdf), [RTX PRO 5000 specifications](https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-5000/), [RTX PRO 5500 specifications](https://www.nvidia.com/en-in/products/workstations/professional-desktop-gpus/rtx-pro-5500/), and [RTX PRO 6000 Max-Q specifications](https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-6000-max-q/). The current price table is below the driver section; rated watts and peak bandwidth are specifications, not measured model speeds.
 
-Boards confirmed: ASUS Pro WS TRX50-SAGE WiFi (~$850), Gigabyte TRX50 AERO D (~$750), ASRock TRX50 WS (~$650). WRX90: ASUS Pro WS WRX90E-SAGE SE (~$1,350), ASRock WRX90 WS EVO (~$1,200). All support DDR5 RDIMM and multiple PCIe 5.0 x16 slots.
+### GPU upgrade watchlist for the present B250 rig
 
-### RAM strategy (April 2026 DRAM crisis pricing)
+The B250 Mining Expert has one CPU x16 slot (occupied by the 3090 Ti), eighteen x1 slots, and a 32GB RAM limit. A card's fit on this rig depends on PCIe enumeration, BIOS address resources, driver and CUDA support, power, and cooling. No candidate below has been installed or verified here.
 
-DDR5 RDIMM prices have roughly tripled since 2024 due to AI-driven fab demand. Expect relief in 2027.
+Watch used **RTX A6000 48GB**, **RTX 6000 Ada 48GB**, **A40 48GB**, **L40/L40S 48GB**, **Tesla V100S 32GB PCIe**, and **Tesla M10 (4 × 8GB)** for current-rig possibilities. **A100 40/80GB PCIe** is better planned with a newer host; A100 SXM modules are not PCIe cards. **A800 40GB Active** requires at least 40GB host RAM under NVIDIA's installation guide, above this board's 32GB maximum. Passive cards need directed airflow even in an open frame.
 
-**TRX50 (4 slots, must choose tier at build time):**
+**Current B250 / 32GB RAM compatibility screen (planning, no card installed):**
 
-| Config | Sticks | Total | Est. cost | Upgrade path |
-|--------|--------|-------|-----------|-------------|
-| 4× 32GB RDIMM | 4 (full) | 128GB | ~$800-1,200 | Replace all 4 to grow |
-| 4× 64GB RDIMM | 4 (full) | 256GB | ~$2,800-3,600 | Replace all 4 for 512GB |
-| 4× 128GB RDIMM | 4 (full) | 512GB | ~$6,000-8,000+ | Max practical |
+| Candidate | Present rig | Reason / condition |
+|-----------|-------------|--------------------|
+| RTX A6000 48GB, RTX 6000 Ada 48GB | Best current-rig candidates | Workstation cards default to a 256MB BAR1 address window and appear on the current 580.159.03 supported-products list. The 32GB system RAM is not an inherent 48GB GPU limit. Ada requires adding `sm_89` to the runtime image; RTX A6000 uses the image's existing `sm_86`. |
+| Tesla M10 (4 × 8GB) | Conditional current-rig candidate | Four separate Maxwell GPUs, not a shared 32GB pool. Requires a CUDA `sm_50` runtime build, one PCIe 8-pin lead, directed airflow, and verification of four-GPU enumeration on this motherboard. |
+| Tesla V100S 32GB PCIe | Conditional current-rig candidate; strong price watch | NVIDIA lists it on driver 580.159.03, and CUDA 12.9 supports Volta `sm_70`, but the runtime image needs that target added. The card requires a 32GB BAR1 address window that may challenge the older B250 BIOS. It is a 250W passively cooled PCIe card with a CPU/EPS 8-pin socket; check the specific card's cooling, power adapter, BIOS mapping, and PCIe fit. The 32GB system RAM is not an automatic exclusion. |
+| A40 48GB, L40/L40S 48GB | Conditional; prefer a proven host before purchase | These server cards default to display-off mode with a 64GB BAR1 address window, which an older B250 BIOS may not map. NVIDIA's display-mode tool documents a 256MB BAR1 display-on mode, but mode change and boot on this exact board are untested. They also need directed cooling. |
+| A100 40GB/80GB PCIe | Plan a newer server/workstation host | The PCIe cards request 64GB/128GB BAR1 windows respectively, and NVIDIA does not qualify A100 on ordinary consumer motherboards. The 32GB physical RAM is not itself a published A100 prohibition; BIOS resource mapping and server airflow are the stronger blockers. |
+| A800 40GB Active | New host required under NVIDIA's published minimum | Its guide requires host RAM at least equal to 40GB GPU memory (80GB recommended) and support for a 64GB BAR1 mapping; the B250 is limited to 32GB RAM. |
+| RTX PRO 5000/6000 Blackwell 48-96GB | Separate host if keeping the GTX 1060/1070 on this rig | Blackwell needs NVIDIA's open kernel module while Pascal requires the proprietary module. Removing every Pascal card could allow a Blackwell trial on this board, but BIOS, power, and x16-slot fit remain unverified; a newer host is the sensible plan for these cards. |
 
-**WRX90 (8 slots, can grow incrementally):**
+BAR1 is a PCIe *address window*, not an equal amount of physical system RAM. The compatibility labels are planning guidance, not a successful boot test on this specific motherboard. Sources: [ASUS B250 manual](https://dlcdnet.asus.com/pub/ASUS/mb/LGA1151/B250_MINING_EXPERT/E13594_B250_MINING_EXPERT_UM_V2_WEB.pdf) (32GB maximum), [NVIDIA display-mode guide](https://developer.download.nvidia.com/display-mode-selector-tool/NVIDIA-Display-Mode-Selector-Tool-User-Guide_v08_Feb24.pdf) (workstation versus server BAR1 defaults), [A100 40GB](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/A100-PCIE-Prduct-Brief.pdf) and [80GB](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/PB-10577-001_v02.pdf) product briefs (BAR1 sizes), [A800 installation guide](https://images.nvidia.com/aem-dam/en-zz/Solutions/design-visualization/quadro-product-literature/proviz-a800-40gb-active-online-qsg-210x148mm-20231026-r11.pdf) (host requirements), [NVIDIA A100 motherboard guidance](https://forums.developer.nvidia.com/t/a100-pcie-isnt-recognized-by-bios/198546), [current driver supported chips](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/README/supportedchips.html), and [kernel-module compatibility](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/README/kernel_open.html).
 
-| Config | Sticks | Total | Est. cost | Upgrade path |
-|--------|--------|-------|-----------|-------------|
-| 4× 32GB (half populated) | 4 of 8 | 128GB | ~$800-1,200 | Add 4 more sticks |
-| 8× 32GB (all slots) | 8 of 8 | 256GB | ~$1,600-2,400 | Replace with 64GB sticks |
-| 4× 64GB (half populated) | 4 of 8 | 256GB | ~$2,800-3,600 | Add 4 more sticks |
-| 8× 64GB (all slots) | 8 of 8 | 512GB | ~$5,600-7,200 | Replace with 128GB sticks |
-| 8× 128GB | 8 of 8 | 1TB | ~$12,000+ | Max practical |
+V100S evidence: [NVIDIA's V100S datasheet](https://images.nvidia.com/content/technologies/volta/pdf/volta-v100-datasheet-update-us-1165301-r5.pdf) (memory, bandwidth, power, cooling), [NVIDIA V100S product brief copy](https://www.trungtammaychu.vn/content_trungtammaychu/upload/files/NVIDIA%20V100s%20Product%20Brief.pdf) (32GB BAR1 and CPU 8-pin socket), [CUDA 12.9 Volta target](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-compiler-driver-nvcc/index.html). Distinguish V100S PCIe from older V100 PCIe and V100 SXM2.
 
-Starting with 128GB (4× 32GB, ~$1,000) is the pragmatic choice — covers 70B on GPU with room for context. Add or replace sticks when DRAM prices normalize.
+**Auxiliary power connectors for the reference cards:**
 
-### Full build cost (April 2026)
+| Card | Card socket | Fit with existing PCIe 6/8-pin PSU leads |
+|------|-------------|-------------------------------------------|
+| RTX A6000, A40, A100 40GB/80GB PCIe | One CPU/EPS 8-pin | Requires a PSU CPU/EPS 8-pin lead or the correct GPU PCIe 8-pin-to-CPU 8-pin adapter; PCIe 8-pin and CPU 8-pin have different pinouts |
+| Tesla V100S 32GB PCIe | One CPU/EPS 8-pin | NVIDIA's product brief supports a CPU 8-pin cable or its specified adapter fed by GPU PCIe 6/8-pin leads; do not plug a PCIe lead directly into the CPU/EPS socket |
+| A800 40GB Active | One PCIe CEM5 16-pin | NVIDIA's installation guide calls for its included adapter and two separate PCIe 8-pin PSU cables |
+| L40 | One PCIe CEM5 16-pin | Native compatible 16-pin cable, or NVIDIA-documented CPU 8-pin-to-16-pin adapter with correct sense wiring |
+| L40S | One 16-pin | Confirm the exact card's approved 16-pin cable/adapter and PSU capacity before purchase |
+| RTX 6000 Ada | One PCIe CEM5 16-pin | NVIDIA's installation guide calls for its included adapter and two separate PCIe 8-pin PSU cables |
 
-**TRX50 build (value path):**
+Do not put a GPU PCIe 8-pin plug directly into a CPU/EPS 8-pin socket. Check the exact card and adapter included with a used listing; verify total PSU capacity for the card plus all remaining GPUs and fans. NVIDIA's [A800 installation guide](https://images.nvidia.com/aem-dam/en-zz/Solutions/design-visualization/quadro-product-literature/proviz-a800-40gb-active-online-qsg-210x148mm-20231026-r11.pdf) has inconsistent wording in its equipment table (one 8-pin) and installation step (two separate 8-pin leads), so inspect the actual included adapter before planning cables.
 
-| Component | Spec | Est. price |
-|-----------|------|-----------|
-| CPU | Threadripper 7960X (24-core) | ~$1,300 |
-| Motherboard | TRX50 (ASUS/Gigabyte/ASRock) | ~$750 |
-| RAM | 4× 32GB DDR5 RDIMM (128GB) | ~$1,000 |
-| GPUs | 2× RTX 3090 (used) | ~$1,400 |
-| PSU | 1500-1600W | ~$250 (or secondhand) |
-| Case, NVMe, cooling | — | ~$350 |
-| **Total** | | **~$5,050** |
+Connector sources: [RTX A6000 power guidelines](https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/workstation-power-guidelines.pdf), [A40 datasheet](https://images.nvidia.com/content/Solutions/data-center/a40/nvidia-a40-datasheet.pdf), [A100 40GB product brief](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/A100-PCIE-Prduct-Brief.pdf), [A100 80GB product brief](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/PB-10577-001_v02.pdf), [L40 product brief](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/datasheets/L-40/product-brief-L40.pdf), [L40S specifications](https://www.nvidia.com/en-us/data-center/l40s/), and [RTX 6000 Ada installation guide](https://images.nvidia.com/aem-dam/Solutions/design-visualization/quadro-product-literature/proviz-rtx-6000-ada-gen-online-qsg-210x148mm-20230118-r9.pdf).
 
-**WRX90 build (growth path):**
+Watchlist specifications: [A800 40GB Active](https://www.nvidia.com/en-us/products/workstations/a800/), [RTX A6000](https://www.nvidia.com/en-us/products/workstations/rtx-a6000/), [A40](https://www.nvidia.com/en-us/data-center/a40/), [L40](https://www.nvidia.com/en-au/data-center/l40/), [L40S](https://www.nvidia.com/en-us/data-center/l40s/), [RTX 6000 Ada](https://www.nvidia.com/en-us/products/workstations/rtx-6000/), [Tesla M10 datasheet](https://images.nvidia.com/content/pdf/grid/data-sheet/nvidia-m10-datasheet.pdf), and [ASUS B250 Mining Expert manual](https://dlcdnets.asus.com/pub/ASUS/mb/LGA1151/B250_MINING_EXPERT/E13594_B250_MINING_EXPERT_UM_V2_WEB.pdf).
 
-| Component | Spec | Est. price |
-|-----------|------|-----------|
-| CPU | Threadripper Pro 7965WX (24-core) | ~$3,800 |
-| Motherboard | WRX90 (ASUS/ASRock) | ~$1,350 |
-| RAM | 4× 32GB DDR5 RDIMM (128GB start) | ~$1,000 |
-| GPUs | 2× RTX 3090 (used) | ~$1,400 |
-| PSU | 1500-1600W | ~$250 (or secondhand) |
-| Case, NVMe, cooling | — | ~$350 |
-| **Total** | | **~$8,150** |
+### Driver and CUDA fit with the current rig (checked 2026-11-09)
 
-Both builds accept the same GPU and RAM upgrades later. The WRX90 premium (~$3,100) buys 8 RAM slots, 8 memory channels, and 7 PCIe x16 slots.
+The live rig reports driver **580.159.03**, five GTX 1060 6GB cards (`sm_61`), and one RTX 3090 Ti (`sm_86`). Its `modinfo -F license nvidia` returns `NVIDIA`, confirming the proprietary Linux kernel module. The CUDA **12.9.2** llama runtime image is built only for architectures `61;86` (see `shared/scripts/llama_runtime/Dockerfile`). Driver version, kernel-module flavor, and CUDA build targets are separate requirements.
+
+| Card family | With GTX 1060/1070 on this Linux host? | With RTX 3090 Ti on a separate Linux host? | Runtime build target |
+|-------------|--------------------------------------|-------------------------------------------|---------------------|
+| A100 40/80GB, A800 40GB Active, A40, RTX A6000, L40/L40S, RTX 6000 Ada | Driver family permits the proprietary 580 module; hardware and product-specific setup still need checking | Yes, with a suitable 580 driver | `sm_80` for A100/A800; `sm_86` for A40/RTX A6000; `sm_89` for L40/L40S/RTX 6000 Ada |
+| GeForce RTX 50 and listed RTX PRO Blackwell cards (including PRO 5000 48/72GB and PRO 6000 96GB) | **No.** Blackwell needs the open module, Pascal needs the proprietary module, and both cannot load in one Linux kernel | **Yes in principle.** Both Blackwell and the 3090 Ti can use the open 580 module | `sm_120` for these Blackwell cards; retain `sm_86` for the 3090 Ti |
+
+NVIDIA's [580.159.03 supported-products list](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/README/supportedchips.html) includes the 1060/1070, 3090 Ti, RTX 5090, PRO 5000 48/72GB, and PRO 6000 96GB. **That list alone does not imply that Pascal and Blackwell work together:** the [same driver's kernel-module chapter](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/README/kernel_open.html) says proprietary supports through pre-Blackwell, open supports Turing and newer, and the two flavors are mutually exclusive. NVIDIA's [architecture matrix](https://docs.nvidia.com/datacenter/tesla/drivers/cuda-toolkit-driver-and-architecture-matrix.html) marks R580 as the final Pascal driver branch and CUDA 12.x as its final toolkit family; [CUDA 12.9.2's compiler](https://docs.nvidia.com/cuda/archive/12.9.2/cuda-compiler-driver-nvcc/index.html) can target both `sm_61` and `sm_120`. The present `61;86` image already includes the Ampere `sm_86` target used by RTX A6000/A40; it needs a rebuild to add `sm_80` for A100/A800, `sm_89` for Ada, or `sm_120` for Blackwell. A new Blackwell/3090 host can use an open 580 driver and a `86;120` build while leaving the Pascal rig on proprietary 580 and `61;86`.
+
+The newly listed RTX PRO 5500 Blackwell (84GB) is **not present** in the exact 580.159.03 supported-products list checked here. Verify its device ID and minimum driver from NVIDIA before planning it on a 580 host. No new card was installed or runtime-tested by this review.
+
+## November 2026 build prices and capacity targets
+
+These are **US dollar asking prices checked November 13, 2026**, before tax, shipping, import fees, and testing. They are purchase-planning ranges, not completed-sale prices or speed measurements. Keep one current price column here; the older April build budgets and card shopping estimates have been removed. The existing 3090 Ti, PSUs, drives, and 4 × 8GB DDR4 UDIMMs are already owned. The UDIMMs cannot be mixed with the ECC RDIMMs required by the EPYC board.
+
+| Component | November 2026 price | Source and constraint |
+|---|---:|---|
+| Unlocked EPYC 7302P, used | $100–160 | [Used listings](https://www.ebay.com/sch/i.html?_nkw=amd+epyc+7302p&_sop=12); exclude Dell-locked CPUs unless board compatibility is established. |
+| Supermicro H12SSL-i, used/open box | $1,000–1,200 | [Used listings](https://www.ebay.com/sch/i.html?_nkw=supermicro+h12ssl-i&_sop=12); a CPU/board bundle was listed around $1,170. |
+| 8 × 32GB DDR4-3200 ECC RDIMM, 256GB total | $1,760–2,600 | [Module listings](https://www.ebay.com/sch/i.html?_nkw=samsung+32gb+ddr4+3200+rdimm&_sop=12) show roughly $220–325 each. Verify rank, part number, and board QVL. |
+| RTX 3090 24GB, used | $1,450–1,800 each | [Current listings](https://www.ebay.com/sch/i.html?_nkw=rtx+3090&_sop=12); [$1,649 median used ask](https://cresvament.com/prices/graphics-cards/rtx-3090) on Nov 13. Test memory, thermals, and power connectors. |
+| RTX A6000 48GB, used | $4,300–4,600 each | [Current listings](https://www.ebay.com/sch/i.html?_nkw=nvidia+rtx+a6000&_sop=12); capacity option, not the budget default. |
+| WRX80 motherboard, used | $1,100–1,650 | [Current listings](https://www.ebay.com/sch/i.html?_nkw=wrx80+motherboard&_sop=12); DDR4 workstation alternative when a suitable CPU bundle is available. |
+| Threadripper Pro 7965WX, used | $1,500–1,900 unlocked | [Current listings](https://www.ebay.com/sch/i.html?_nkw=threadripper+7965wx&_sop=12); Dell-locked parts can appear much cheaper. Requires DDR5 RDIMM/WRX90, not DDR4. |
+| WRX90 motherboard, used | $950–1,200 | [Current listings](https://www.ebay.com/sch/i.html?_nkw=asus+pro+ws+wrx90e-sage&_sop=12). |
+| DDR5-4800 ECC RDIMM, 32GB | roughly $800–1,050 each | [Current listings](https://www.ebay.com/sch/i.html?_nkw=ddr5+4800+ecc+rdimm&_sop=12); 256GB at eight channels is roughly $6,400–8,400 in RAM alone. |
+| DGX Spark, 128GB | about $6,950 | [November price check](https://physicalailab.io/en/nvidia-dgx-price-spark-station-b300/); fixed unified memory, separate from the expandable GPU-host route. |
+
+The [H12SSL-i specification](https://www.supermicro.com/en/products/motherboard/h12ssl-i) gives **8 DDR4 RDIMM slots, 2TB maximum, five PCIe 4.0 x16 slots and two x8 slots**. The EPYC 7302P is the cheapest practical entry here. WRX80 has more workstation-style slot layouts but current boards cost more. WRX90 adds DDR5 and PCIe 5.0, at a much higher memory cost today. These are platform choices, not claims that any listed CPU delivers a measured token rate.
+
+### Model-size planning
+
+Q4 storage is often around **0.55–0.7 GB per billion parameters**, but higher-precision tensors, n-gram tables, vision modules, and KV cache can increase the total. Actual files are the authority. Multiple GPUs do not form one automatic VRAM pool: the runtime must support the model architecture and split placement. RAM-resident experts also need CPU memory bandwidth and may be much slower than VRAM-resident ones.
+
+| Target | Approximate Q4 weights | Practical starting placement | Price with already-owned 3090 Ti |
+|---|---:|---|---:|
+| Around 100B, mostly VRAM | 55–70GB | 3090 Ti + 2–3 additional 3090s (72–96GB total VRAM); choose 3 for useful margin | **$5,800–9,400** new spend: EPYC board/CPU, 256GB RAM, 2–3 used GPUs; excludes cooling, chassis, extra PSU, tax |
+| Around 150B, mostly VRAM | 85–110GB | 3090 Ti + 4 additional 3090s (120GB total VRAM), with model-specific margin check | **$8,700–11,200** new spend on the same basis |
+| Around 200B, mostly VRAM | 110–145GB | Usually at least six 24GB cards (144GB aggregate), sometimes seven; check the actual quant and runtime buffers | **$10,100–13,000+** new spend for five additional 3090s; PSU and cooling costs rise materially |
+| Around 300B, VRAM + RAM | 165–210GB | Begin with 72–96GB VRAM and 256GB DDR4 RAM; put the hot path on GPU, then measure CPU expert traffic | Same **$5,800–9,400** entry build; capacity is plausible, speed is unproven and model dependent |
+
+Those totals use the ranges above and the owned 3090 Ti. They are arithmetic planning bands, not complete system quotations. More than three 3090-class cards needs deliberate spacing, risers, cooling, power cabling, and usually more than one PSU. At 250W per card, six cards alone are 1,500W before host power; that is not a one-circuit continuous-load plan. The current 1000W and 1250W PSUs can be reused only after the actual cable allocation and simultaneous-load limits are checked. Power limiting is an available experiment, not a substitute for a safe PSU and circuit budget.
+
+### Two independent DDR4 machine designs (planning, November 2026)
+
+These are separate machines, not an upgrade path from one to the other. Machine B uses two 1600W DC PSU outputs as the requested design constraint. AC wall draw is higher and the actual circuits must support that draw; a standard 120V/15A circuit has a lower continuous-load planning budget. All power figures below are estimates, not measured inference results.
+
+**Machine A — incremental four-GPU host on one 1600W PSU.** EPYC 7302P, H12SSL-i, owned RTX 3090 Ti, then up to three RTX 3090 24GB cards (96GB aggregate VRAM). Begin with one compatible 64GB ECC DDR4 RDIMM and add matching 64GB modules one at a time, one per memory channel, to 8 × 64GB = 512GB. Add GPUs one at a time as well; the intermediate VRAM capacities are 24/48/72/96GB. RAM-heavy inference has less memory bandwidth before all eight channels are populated. A starting power-cap experiment is 275W for the 3090 Ti and 225W per 3090: 950W for four GPUs plus a 250–300W host allowance = about 1,200–1,250W DC, or 1,330–1,390W at the wall assuming 90% PSU efficiency. Verify PSU input rating at 120V, individual card power-limit ranges, cabling, transients, and measured wall draw. The existing 8 × 32GB price row and model-target totals are comparison estimates, not prices for this 64GB-DIMM staged plan.
+
+**Machine B — seven or eight GPUs, 2TB DDR4, two 1600W PSUs on two dedicated circuits.** The single-socket EPYC H12SSL-i has five PCIe 4.0 x16 slots and two PCIe 4.0 x8 slots, not six x16 and one x8. Its motherboard takes a standard 24-pin ATX input plus two 8-pin CPU/EPS inputs, so the host itself does not require a proprietary PSU. Its 2TB ceiling requires 8 × 256GB supported 3DS RDIMM/LRDIMM modules; verify exact DIMMs against the board QVL. Dual-slot GPUs require suitable risers or open-frame mounting.
+
+Seven GPUs can use all seven slots directly: five x16 links and two x8 links. With seven 300W cards and an estimated 450W host, budget 2,550W DC. A four-GPU / three-GPU-plus-host split is 1,200W / 1,350W DC, within the two 1600W PSU outputs. Seven 24GB/48GB/96GB cards provide 168GB/336GB/672GB aggregate VRAM.
+
+**Eight GPUs can use this same board through bifurcation.** Its BIOS manual offers x8x8 mode on each x16 slot, and Supermicro confirms that all seven slots support bifurcation. A compatible x16-to-two-x8 adapter plus powered risers can turn one x16 connection into two separate x8 GPU connections. The resulting layout is **four x16 GPUs and four x8 GPUs**; the extra connection comes from dividing one x16 link. This is documented BIOS capability, not proof that a particular eight-GPU/riser combination has been validated. Check GPU enumeration, PCIe 4.0 signal integrity, BIOS address resources, cooling, and physical wiring before counting on it.
+
+At the full rated 300W of eight A6000, PRO 5000 72GB, or PRO 6000 Max-Q 96GB cards, GPU output is 2,400W. With the estimated 450W host, the system is **2,850W DC total**. Put five complete GPU/riser assemblies on one PSU (1,500W DC) and three assemblies plus host on the other (1,350W DC). Both fit below 1600W DC, with only 100W output margin on the five-card PSU; card transients and PSU cable capacity still need checking. At 90% efficiency the AC inputs are about **1,667W and 1,500W** respectively, so circuit capacity must be confirmed separately. Eight 24GB/48GB/72GB/96GB cards provide 192GB/384GB/576GB/768GB aggregate VRAM. Eight stock 350W RTX 3090s exceed this PSU plan and would need a power cap.
+
+A dedicated eight-GPU server such as Supermicro's H12DSG-O-CPU/AS-4124GS-TNR+ is an alternative when direct GPU connections or 32 DIMM slots are worth the proprietary system cost. It is not required merely to reach eight GPU connections on the H12SSL-i. Its included nominal 2000W modules deliver only 1000W each on 100–127V, so the server's PSU arrangement cannot be assumed equivalent to the two planned 1600W supplies.
+
+For Machine B, power each GPU and its powered riser from the same PSU, synchronize PSU startup, and never join PSU outputs. The 2TB memory capacity can hold very large quantized checkpoints, but acceptable token speed with RAM-resident experts remains an experiment.
+
+Sources: [H12SSL-i specifications](https://www.supermicro.com/en/products/motherboard/H12SSL-i), [H12SSL-i memory manual and bifurcation settings](https://www.supermicro.com/manuals/motherboard/EPYC7000/MNL-2314.pdf), [Supermicro bifurcation FAQ](https://www.supermicro.com/en/support/faqs/faq.php?faq=35490), [AMD EPYC 7002 memory guidance](https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/tuning-guides/amd-epyc-7002-tg-nginx.pdf), [Supermicro eight-GPU server specifications and AC-input derating](https://www.supermicro.com/en/aplus/system/4u/4124/as-4124gs-tnr_.php), [RTX A5000 specifications](https://www.nvidia.com/content/dam/en-zz/Solutions/products/workstations/nvidia-rtx-a5000-datasheet.pdf), and [RTX PRO 6000 Max-Q specifications](https://www.nvidia.com/content/dam/en-zz/Solutions/products/workstations/professional-desktop-gpus/rtx-pro-6000-max-q/workstation-datasheet-blackwell-rtx-pro-6000-max-q-nvidia-3519233.pdf).
+
+### Direction
+
+The **DDR4 EPYC board plus owned 3090 Ti** is the lowest-cost expandable foundation for the 100–300B experiments. For Machine A, begin with one 64GB ECC RDIMM and add matched 64GB sticks and 3090s in stages; 256GB RAM is reached with four sticks, while all eight channels and 512GB require eight. It gives proper PCIe links and a growing RAM pool for 300B hybrid placement. A 200B Q4 model fully in VRAM is a later, significantly more expensive stage. The existing B250 can remain a separate small-worker box; its 4 × 8GB DDR4 UDIMMs are useful elsewhere but not in the EPYC build. Keep the older performance measurements below as test evidence, not as price forecasts.
+
+---
 
 ### Power budget
 
-The CPU doesn't do inference work — it's infrastructure. During LLM inference the CPU draws ~50-80W, not its 350W TDP.
+The older two-GPU Threadripper example below assumes GPU-resident inference and light CPU work. It does not bound host power for RAM-resident experts or the 2TB designs above; use their separate host allowances and measure actual draw.
 
 | Component | Idle | LLM inference | Full stress (rare) |
 |-----------|------|--------------|-------------------|
@@ -346,112 +321,15 @@ A **1500-1600W PSU** covers dual 3090 inference comfortably. Dual 5090s (450W ea
 
 Residential power: 15A/120V circuit gives 1,440W continuous (80% rule). Dual-3090 inference at ~715W is well within limits. Dual-5090 inference at ~850-1,000W still fits on a 15A circuit. Full stress exceeding 1,200W needs a 20A circuit or a dedicated run. Keep the rig on its own circuit — don't share with other high-draw devices.
 
-### Running giant models (671B+ / 1T)
+### Larger-model outlook
 
-For reference — how models like DeepSeek R1 671B and Kimi K2 1T run at home.
-
-These are MoE (Mixture of Experts) models. Only a fraction of the model activates per token (37B of 671B for DeepSeek, 32B of 1T for Kimi). You need enough memory to store all experts, but effective bandwidth demand is similar to a 32-37B dense model.
-
-**Hybrid GPU+RAM offloading for MoE:**
-- VRAM holds attention layers + active expert path (the "hot" weights, ~32-37B)
-- System RAM holds the full expert pool (all 671B-1T of weights)
-- Router selects experts per token; popular experts stay cached in VRAM
-- GPU accelerates the hot path; RAM provides the capacity
-
-| Setup | RAM/VRAM | Model | tok/s | Cost |
-|-------|----------|-------|-------|------|
-| Dual EPYC, 384GB DDR5, CPU only | 384GB RAM | DeepSeek R1 671B IQ4_XS | ~5-8 | ~$2,000-6,000 |
-| 24GB GPU + 256GB RAM (hybrid) | 24GB VRAM + 256GB RAM | Kimi K2 1T 1.8-bit | ~10 | GPU + RAM cost |
-| Threadripper + 2× 3090 + 256GB | 48GB VRAM + 256GB RAM | 671B MoE Q4 hybrid | ~8-12 (est) | ~$6,000-9,000 |
-| Single H100 (80GB) | 80GB HBM3 | 671B — doesn't fit | — | $25,000-40,000 |
-| Single B200 (192GB) | 192GB HBM3e | 671B MoE | ~300+ | $30,000-50,000 |
-
-Datacenter GPUs (H100, H200, B200) have HBM memory at 3,350-8,000 GB/s bandwidth — 10-30× faster than DDR5. That's why cloud inference is fast and local is slow. Nobody buys these for home use.
-
-The Threadripper build's 256-512GB RAM pool makes it the most practical home platform for MoE hybrid offloading. The WRX90's 8-channel DDR5 at ~300-400 GB/s matches the DGX Spark's 273 GB/s for the RAM-resident expert reads.
-
-**5. Add RTX 3060 12GB cards to existing rig — $250 each**
-
-Drop-in replacement for 1060s. No new system needed. Each card runs 14B without splitting. ~35 tok/s on 7B. The boring option that works immediately.
-
-### Summary table
-
-| Option | Cost | Max model | 7B tok/s | 70B tok/s | Stack compat | Upgradeable | Best for |
-|--------|------|----------|---------|----------|-------------|-------------|---------|
-| AMD Max+ 395 (128GB) | ~$2,800 | ~70B | ~40 | ~4.5 | x86 ✓, no CUDA | No (soldered) | Budget memory box |
-| DGX Spark (128GB) | $4,700 | ~200B MoE | ~20 | ~2.7 | CUDA ✓, ARM ✗ | No (soldered) | MoE models only |
-| Mac Studio M3 Ultra (256GB) | ~$8,000 | ~200B+ | ~45 | ~14 | macOS only ✗ | No (soldered) | Standalone, no Linux |
-| TRX50 + 2× 3090 (128GB) | ~$5,050 | 70B (GPU), MoE hybrid | ~50 (1 GPU) | ~16 | Full compat ✓ | GPUs + RAM (replace) | Best value 70B |
-| WRX90 + 2× 3090 (128GB) | ~$8,150 | 70B (GPU), MoE hybrid | ~50 (1 GPU) | ~16 | Full compat ✓ | GPUs + RAM (add+replace) | Future-proof platform |
-| WRX90 + 2× 5090 (256GB) | ~$12,000+ | 70B+ (GPU), 671B MoE | ~180 (1 GPU) | ~40-60 | Full compat ✓ | GPUs + RAM (add+replace) | Ultimate home rig |
-| RTX 3060 12GB × 5 | $1,250 | ~14B per card | ~35 | n/a | Full compat ✓ | n/a (existing rig) | Cheapest, immediate |
-
-### Upgrade path recommendation
-
-Given current pricing, stack compatibility, and the system's needs:
-
-1. **Now: Keep current rig + Orange Pis.** The 3090 + 5× 1060 + 8× Orange Pi setup works. Don't buy Pi 5s for LLM inference.
-
-2. **Quick win: Add 1-2 RTX 3060 12GB cards.** Swap out 1-2 of the weakest 1060s. $250-500, immediate 14B capacity per card, no other changes needed.
-
-3. **Medium upgrade: TRX50 + 2× RTX 3090 + NVLink + 128GB.** ~$5,050 total. Runs 70B at ~16 tok/s — 6× faster than a DGX Spark. Full CUDA/x86/Docker compatibility. The 3090 is the last consumer card with NVLink — buy used while stock exists. Use this rig as the new brain, free the current 3090 for worker duty.
-
-4. **Big upgrade: WRX90 + 2× RTX 3090 + NVLink + 128GB.** ~$8,150 total. Same 70B performance, but 8 RAM slots (grow to 1TB), 8 memory channels (MoE hybrid ready), and 7 PCIe x16 slots (add more GPUs later). The 5-year platform.
-
-5. **GPU upgrade path: Swap 3090s for 5090s.** When RTX 5090 prices normalize from ~$3,600 to MSRP ~$2,000. 64GB VRAM, ~40-60 tok/s on 70B, ~180 tok/s on 7B. The GPUs swap into either platform.
-
-6. **RAM upgrade path: Add sticks as DRAM drops.** Current crisis pricing (~3× normal) expected to ease in 2027. On WRX90, start with 4× 32GB, add 4 more later. On TRX50, replace 4× 32GB with 4× 64GB when affordable.
-
-7. **Orange Pis stay.** CPU script workers (data prep, embeddings, file ops) remain on the swarm. The Threadripper CPU doesn't need to do this work — it's a bus driver for GPUs and RAM, not a compute node. The swarm handles parallel CPU tasks.
+The 100–300B target is the first stage. Bigger MoE checkpoints can use RAM or NVMe placement, but the existing benchmarks show sharply variable speed and cold-read penalties. Revisit 500B–1T designs after measuring 300B hybrid placement on the new host. The November table above is the current price source; no separate speculative cost totals are retained here.
 
 ---
 
-## Planned architecture: three-tier system
+## Planned architecture: separate GPU systems
 
-When a Threadripper brain rig is built, the existing B250 mining board becomes a dedicated GPU worker farm. Three tiers, each doing what its hardware is best at.
-
-```
-Brain rig (Threadripper)     — 70B models, complex reasoning, code review, orchestration
-GPU worker farm (B250)       — 14× 7B workers, bulk inference, parallel task execution
-CPU swarm (Orange Pi × 8)    — scripts, data prep, embeddings, file ops
-Control plane (Pi 5)         — operator console, single 3B overflow
-```
-
-| Tier | Hardware | Strength | Role | Power |
-|------|----------|----------|------|-------|
-| **Brain** | Threadripper + 2× 3090 NVLink, 128-256GB RAM | 70B at ~16 tok/s, MoE hybrid | Complex reasoning, orchestration decisions | ~700-800W |
-| **Worker farm** | B250 Mining Expert + 14× GTX 1070 8GB | 14 parallel 7B streams, ~420-490 aggregate tok/s | Bulk worker tasks, code gen, text extraction | ~2,200W |
-| **CPU swarm** | 8× Orange Pi Prime (2GB) | 8 parallel script workers, cheap, always-on | Data prep, embeddings, validation, file ops | ~24W |
-| **Control plane** | Pi 5 (8GB) | Operator console, single 3B model for testing | Control, monitoring, overflow | ~12W |
-
-**How the B250 becomes a worker farm:**
-
-1. Move the RTX 3090 to the new Threadripper brain rig
-2. Keep existing 5× GTX 1060 6GB (already owned)
-3. Add 9× GTX 1070 8GB at ~$65 each (~$585) to fill slots
-4. Total: 14 worker GPUs (5× 1060 + 9× 1070), 96GB distributed VRAM
-5. Triple PSU at ~2,200W handles 14 cards comfortably (14 × 150W = 2,100W + system)
-
-GPU shopping for the worker farm (April 2026 used prices):
-
-| Card | VRAM | Used price | $/GB | 7B tok/s | Power | Notes |
-|------|------|-----------|------|---------|-------|-------|
-| GTX 1060 6GB | 6GB | ~$59 | $9.83 | ~25-30 | ~120W | Already own 5 |
-| GTX 1070 8GB | 8GB | ~$65 | $8.13 | ~30-35 | ~150W | Best $/GB, 7B fits comfortably |
-| RTX 2060 6GB | 6GB | ~$125 | $20.83 | ~35-40 | ~160W | Faster but 2× price, same VRAM as 1060 |
-| RTX 3060 12GB | 12GB | ~$250 | $20.83 | ~35 | ~170W | Best per-card capacity but 4× price of 1070 |
-
-GTX 1070 8GB at $65 is the sweet spot for filling slots. PCIe x1 risers are fine — model loads once at startup, then inference runs entirely within VRAM. The 7700K just manages HTTP endpoints.
-
-**Total system cost (incremental from current):**
-
-| Component | Cost | Notes |
-|-----------|------|-------|
-| Threadripper brain rig (TRX50 path) | ~$3,650 | CPU + mobo + RAM + PSU + case (3090 moves from B250) |
-| 9× GTX 1070 8GB for worker farm | ~$585 | Fill B250 slots |
-| **Total new spend** | **~$4,235** | Current rig + Orange Pis + Pi 5 stay as-is |
-
-The system gains 70B brain capability + 14 parallel 7B workers while reusing all existing hardware. The orchestrator's task queue, heartbeat system, and model placement routing already support multi-rig — each rig mounts the NFS share and claims tasks independently.
+The B250 mining board can remain a small-worker system with the existing 1060/1070 cards. The proposed EPYC host would take the 3090 Ti and any future 3090-class or larger GPUs. The Pi remains the control plane. This is a design direction, not a fixed assignment or a purchase list.
 
 ---
 
@@ -493,14 +371,7 @@ Additional use cases:
 
 ### Swarm economics
 
-The value of CPU swarm is **parallelism, not speed**. Single-request latency is 10-15× worse than GPU. But:
-- 8 slow workers on a 1000-task queue finish in wall-clock time comparable to 1 fast GPU
-- Node failure is graceful (7/8 capacity vs 0/1)
-- No GPU driver issues, CUDA conflicts, or VRAM fragmentation
-- Scales linearly: add a Pi, add a worker
-- Pi 5 8GB costs ~$80. Eight = $640. One 1060 6GB used = ~$120. Different cost/perf curves.
-
-Break-even: if your workload sustains >8 concurrent requests, a Pi swarm matches GPU throughput-per-dollar. Below that, GPUs win on latency.
+The CPU swarm offers parallel script work and fault isolation. It is not the capacity path for a single 100–300B model. The earlier per-node price comparison has been removed; use the current component table above for buying decisions.
 
 ### Hybrid architecture (future target)
 
@@ -615,28 +486,9 @@ to available VRAM. The 3090+1060 split put 12.7GB on the 3090 and 3.3GB on the
 
 ---
 
-## Other large unified-memory options from the original March 2026 brainstorm
+## Unified-memory alternatives
 
-These notes are retained as earlier research. Availability, price, model fit,
-and throughput need a fresh check before they are used for a decision.
-
-### NVIDIA DGX Spark (GB10) — ~$4,700
-- 128GB unified memory (Grace Blackwell superchip)
-- 20-core ARM CPU
-- Can run models up to ~200B parameters
-- Multiple models concurrently: ~60GB combined model weight works well in parallel
-- Runs vLLM, TensorRT-LLM, SGLang natively
-
-### NVIDIA DGX Station (GB300) — price TBD
-- 748GB coherent memory
-- GB300 Grace Blackwell Ultra superchip
-- Up to 20 PFLOPS AI compute
-- Can run models up to 1 trillion parameters
-
-### Mac Studio M3 Ultra — ~$9,500 (512GB config)
-- 512GB unified memory, 80-core GPU
-- Bandwidth scales poorly — 512GB model needs 4x bandwidth of 128GB to maintain same tok/s
-- RDMA over Thunderbolt 5 (macOS Tahoe 26.2) enables multi-Mac clusters
+The compact-box table above has the October/November product prices. A 128GB unified-memory box may be useful as a separate experiment, but its fixed memory does not provide the 256GB RAM growth or multiple full-speed PCIe GPU slots targeted by the EPYC build. DGX Station and high-memory Mac Studio configurations require a fresh configured quote before a cost comparison.
 
 ---
 

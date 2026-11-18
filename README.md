@@ -1,10 +1,30 @@
 # LLM Orchestration Engine
 
-Parallel batch work on the local rig: a brain model reads a plan, creates tasks, and GPU and CPU workers
-claim and run them through a shared filesystem (no message broker). This repo also holds the rig-side
-hardware layer that every mode runs under.
+The rig-side hardware layer and existing parallel batch engine for the local rig. It observes capacity, enforces hardware rules, controls runtime lifecycle, and runs a brain/worker task queue over a shared filesystem. Gateway's Manager still handles some admission and placement; complete reservations and placement are moving to this boundary. New user-facing work organization belongs in Gateway.
 
-## Start here
+The live admission path reserves a request's configured capacity until release; observed unused tokens are not free capacity for another request. See the [rig hardware layer](shared/scripts/rig/README.md) for the operational contract.
+
+## Project map
+
+This project runs local model and agent workloads across a Pi control host, an isolated GPU rig, and optional CPU workers. The four repositories have different jobs:
+
+| Repository | Responsibility |
+|---|---|
+| [llm-gateway](https://github.com/bigbertharig/llm-gateway) | Operator-facing dashboard, conversations, model API, tool policy, and work coordination. Its existing Manager code still bridges some hardware operations. |
+| [llm_orchestration](https://github.com/bigbertharig/llm_orchestration) | Hardware-facing admission, placement, reservations, model lifecycle, telemetry, and the existing parallel batch engine. |
+| [benchmarking](https://github.com/bigbertharig/benchmarking) | Measured model and runtime evidence, model registry and roles, load recipes, evaluation suites, and results. |
+| [llm-harness](https://github.com/bigbertharig/llm-harness) | Experimental agent loop, context and session contracts, tool adapters, and harness comparisons. No candidate harness has been promoted as the gateway's work engine. |
+
+Benchmarking publishes reviewed evidence; Gateway imports it and presents work to the operator; the rig-side Orchestration layer enforces hardware rules. Harness experiments consume prepared Gateway model routes. Gateway's current Manager still handles some admission and placement. Complete hardware reservations and placement are moving to Orchestration, so the target ownership and current code differ during the migration.
+
+## Read this repo
+
+- [System context](shared/workspace/CONTEXT.md): where components run and which guide owns each topic.
+- [Rig hardware layer](shared/scripts/rig/README.md): observation, guard, runtime and admission controls.
+- [Operator quickstart](shared/workspace/quickstart.md): the existing plan and batch workflow.
+- [Private API](scripts/orchestration_api/README.md): the status/control interface consumed by Gateway.
+
+## Documentation index
 
 [shared/workspace/CONTEXT.md](shared/workspace/CONTEXT.md) is the entry point: what runs where, the modes,
 which doc owns what. Then, by topic:
@@ -22,17 +42,11 @@ which doc owns what. Then, by topic:
 Docs use role placeholders for addresses (`<pi-ip>`, `<rig-ip>`, `<worker-ip>`, ...); the real values are
 in a local, uncommitted inventory (`shared/workspace/local/inventory.md`). Scripts carry the real values.
 
-## The four repos
-
-| Repo | Owns | Start at |
-|---|---|---|
-| [llm-gateway](https://github.com/bigbertharig/llm-gateway) | the machines and the API: rig manager (leases, placement, model loads, runs), the OpenAI-compatible gateway, the dashboard, `rigctl` | `docs/MANAGER.md` |
-| **llm_orchestration** (this one) | parallel batch work (brain, workers, plans), rig hardware scripts, CPU workers, and a private status/control API consumed by the gateway dashboard | `shared/workspace/CONTEXT.md`, `scripts/orchestration_api/README.md` |
-| [benchmarking](https://github.com/bigbertharig/benchmarking) | which models are good: model registry and roles, suites, campaigns, results | `NEW_MODEL_INTEGRATION.md`, `MODEL_LIBRARY.md` |
-| [llm-harness](https://github.com/bigbertharig/llm-harness) | one model in an interactive loop (no code yet) | `README.md` |
-
-The model each role uses comes from benchmarking's registry and roles; GPU allocation is the rig manager's
-(llm-gateway). This repo's brain and workers run as one rig mode among others.
+The model each role uses comes from benchmarking's registry and roles. Gateway currently requests and admits model work through its Manager. The rig-side
+layer enforces hardware rules and reports live state. The target contract moves
+complete-capacity reservation and placement decisions here, with Gateway
+consuming the resulting route and receipt. Its brain and workers run as one rig
+mode among others.
 
 ## Machines
 
@@ -78,7 +92,7 @@ The Git checkout is the canonical source tree. Its `shared/` directory is a vers
 the shared drive, not the live mount, except on the Pi:
 
 - source: `~/llm_orchestration/shared`
-- live on the Pi: `/media/bryan/shared` (on the Pi, `~/llm_orchestration/shared` is a bind mount of the
+- live on the Pi: `<shared-drive-root>` (on the Pi, `~/llm_orchestration/shared` is a bind mount of the
   drive, so edits there are live at once)
 - live on the GPU rig: `/mnt/shared`; the rig's own checkout is a separate copy on local disk, and its
   brain and GPU agents run from it (`git pull --ff-only pi main` there to update)
@@ -86,8 +100,8 @@ the shared drive, not the live mount, except on the Pi:
 Compare source with the live drive, and deploy changed tracked files without deleting runtime files:
 
 ```bash
-python3 scripts/sync_shared_source.py --live-root /media/bryan/shared            # compare
-python3 scripts/sync_shared_source.py --live-root /media/bryan/shared --apply    # deploy
+python3 scripts/sync_shared_source.py --live-root <shared-drive-root>            # compare
+python3 scripts/sync_shared_source.py --live-root <shared-drive-root> --apply    # deploy
 ```
 
 The sync always excludes `shared/core/**` and `shared/agents/permissions/**`. Machine-specific configs and
