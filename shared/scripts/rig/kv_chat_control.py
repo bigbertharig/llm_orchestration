@@ -62,6 +62,8 @@ QWEN_CANDIDATE, MODEL_LIBRARY_SHA256 = imported_candidate(
                             "shared_parent_reserve_mib": 416},
         "max_attached_chats": 6,
     })
+QWEN_HEADLESS_CANDIDATE, _ = imported_candidate(
+    "qwen35_headless_worker_pool", {"max_attached_chats": 0})
 NEMO_CANDIDATE, _ = imported_candidate(
     "nemotron74_shared_1060", {
         "memory_estimate": {"fixed_compute_mib": 6, "kv_mib_at_262144": 2048,
@@ -80,6 +82,15 @@ NEMO_CONTEXT_OVERHEAD_MIB = int(NEMO_MEMORY["fixed_compute_mib"])
 NEMO_KV_TOKENS_PER_MIB = MAX_CONTEXT_CAP // int(NEMO_MEMORY["kv_mib_at_262144"])
 NEMO_SHARED_GPU0_MIB = int(NEMO_MEMORY["shared_parent_mib_per_chat"])
 NEMO_MAX_CHILDREN = int(NEMO_CANDIDATE["max_attached_chats"])
+
+
+def max_worker_chats(model_id: str, mode: str | None = None) -> int:
+    """Enforce the imported measured chat count for this service layout."""
+    if model_id == NEMO_ID:
+        return NEMO_MAX_CHILDREN
+    candidate = (QWEN_HEADLESS_CANDIDATE if mode == "gpu0-worker-pool-q4"
+                 else QWEN_CANDIDATE)
+    return int(candidate["max_attached_chats"])
 
 
 def parent_reserve_mib(model_id: str) -> int:
@@ -330,7 +341,8 @@ def available_worker_cards(model_id: str, context_cap: int, chats: list[dict],
                            inventory: list[dict], claims: list[dict],
                            reservations: dict | None = None,
                            owned_claims: set[str] | None = None,
-                           parent_free_mib: int | None = None) -> list[dict]:
+                           parent_free_mib: int | None = None,
+                           mode: str | None = None) -> list[dict]:
     """Use the same admission predicate for status and attach."""
     reservations = reservations or {}
     owned_claims = owned_claims or set()
@@ -339,7 +351,7 @@ def available_worker_cards(model_id: str, context_cap: int, chats: list[dict],
     workers = [receipt for chat_id, receipt in reservations.items() if chat_id != "main"]
     shared_parent_mib = (NEMO_SHARED_GPU0_MIB if model_id == NEMO_ID
                          else QWEN_SHARED_GPU0_MIB)
-    if (model_id == NEMO_ID and len(workers) >= NEMO_MAX_CHILDREN) or (
+    if len(workers) >= max_worker_chats(model_id, mode) or (
             parent_free_mib is not None
             and parent_free_mib < shared_parent_mib + parent_reserve_mib(model_id)):
         return []
@@ -364,9 +376,11 @@ def capacity_report(model_id: str, default_context: int, chats: list[dict],
     parent_free = parent_gpu_free_mib()
     available = available_worker_cards(
         model_id, default_context, chats, inventory, claims,
-        st.get("reservations", {}), claim_names(st), parent_free)
+        st.get("reservations", {}), claim_names(st), parent_free,
+        st.get("mode"))
     workers = [receipt for chat_id, receipt in st.get("reservations", {}).items()
                if chat_id != "main"]
+    limit = max_worker_chats(model_id, st.get("mode"))
     cards = []
     worker_reserve = worker_reserve_mib(model_id)
     for card in inventory:
@@ -387,15 +401,12 @@ def capacity_report(model_id: str, default_context: int, chats: list[dict],
     target_slots = sum(max(0, observed_free_mib(card) - worker_reserve)
                        // estimated_worker_mib(model_id, default_context)
                        for card in inventory)
-    available_slots = min(parent_slots, target_slots)
-    if model_id == NEMO_ID:
-        available_slots = min(available_slots, max(0, NEMO_MAX_CHILDREN - len(workers)))
+    available_slots = min(parent_slots, target_slots, max(0, limit - len(workers)))
     return {"status": "observed", "context_capacity": default_context,
             "free_gpu_ids": [card["gpu"] for card in available],
             "free_gpu_count": len(available),
             "available_chat_slots": available_slots,
-            "max_attached_chats": (NEMO_MAX_CHILDREN if model_id == NEMO_ID else
-                                   len(workers) + available_slots),
+            "max_attached_chats": limit,
             "shared_gpu0_free_mib": parent_free,
             "shared_gpu0_mib_per_chat": shared_parent_mib,
             "shared_gpu0_reserve_mib": parent_reserve_mib(model_id),
@@ -602,7 +613,7 @@ def main():
             available = available_worker_cards(st["model"], context_cap,
                                                value["chats"], candidates, claims,
                                                st.get("reservations", {}), claim_names(st),
-                                               parent_gpu_free_mib())
+                                               parent_gpu_free_mib(), st.get("mode"))
             selected = available[0]["gpu"] if available else None
             if selected is None:
                 p.error(f"no admissible placement for a {context_cap}-token attached chat")
