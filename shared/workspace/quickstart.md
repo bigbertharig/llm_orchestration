@@ -1,6 +1,6 @@
 # Quick Start Guide
 
-This is the operator quickstart for the orchestration system. It documents the one supported workflow used by plans, the brain, and the dashboard.
+This guide covers the **legacy brain/worker plan and batch workflow**. It remains useful for existing jobs, but it is not the default path for dashboard chat or Gateway-managed model loads. For current hardware observation, admission, and runtime control, start with [the rig hardware layer](../scripts/rig/README.md) and [the repository README](../../README.md). The rules below apply to legacy plan jobs.
 
 For deeper detail, see [CONTEXT.md](CONTEXT.md), [architecture.md](architecture.md), [PLAN_FORMAT.md](PLAN_FORMAT.md), and [brain-behavior.md](brain-behavior.md).
 
@@ -13,7 +13,7 @@ For deeper detail, see [CONTEXT.md](CONTEXT.md), [architecture.md](architecture.
 3. Let the brain decide when worker models load and unload through `meta` tasks.
 4. Treat manual runtime processes (for example `docker run llama-server`), manual task JSON insertion, and direct agent submit paths as debug-only recovery tools.
 
-If a workflow bypasses queue-driven `meta` tasks, it is not the normal path.
+Within legacy plan jobs, queue-driven `meta` tasks are the normal path. Gateway-managed chat loads use the separate admitted rig-runtime path.
 
 ---
 

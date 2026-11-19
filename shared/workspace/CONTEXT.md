@@ -4,13 +4,13 @@
 
 Examples use role placeholders for addresses; operational values are supplied by local configuration and are not documented here.
 
-This repository owns prepared-plan execution and the rig-side runtime that carries out admitted work: the brain sequences tasks, GPU and CPU workers execute them, and plans define the workload. The rig runtime reports its state through orchestration status and diagnostics.
+This repository owns rig-side hardware observation, admission, reservations, model lifecycle, and the existing brain/worker plan engine. The brain and workers still execute legacy plan and batch jobs; new dashboard work organization belongs in Gateway. The rig reports hardware and batch state through its status and diagnostics interfaces.
 
-Benchmarking owns model research, registry and role assignments, suites, and result evidence. The Gateway Manager currently handles admission, placement, leases, and published ready routes; the rig-side orchestration layer enforces hardware rules and executes admitted work. Complete reservations and placement are moving into the orchestration boundary. See the [cross-repo contract](https://github.com/bigbertharig/benchmarking/blob/main/CROSS_REPO_CONTRACT.md), [Manager guide](https://github.com/bigbertharig/llm-gateway/blob/main/docs/MANAGER.md), and benchmarking's [integration playbook](https://github.com/bigbertharig/benchmarking/blob/main/NEW_MODEL_INTEGRATION.md).
+Benchmarking owns model research, registry and role assignments, suites, and result evidence. The Gateway Manager currently handles admission, placement, leases, and published ready routes; the rig-side orchestration layer enforces hardware rules and executes admitted work. Complete reservations and placement are moving into the orchestration boundary. See the [cross-repo contract](https://github.com/bigbertharig/benchmarking/blob/master/CROSS_REPO_CONTRACT.md), [Manager guide](https://github.com/bigbertharig/llm-gateway/blob/main/docs/MANAGER.md), and benchmarking's [integration playbook](https://github.com/bigbertharig/benchmarking/blob/master/NEW_MODEL_INTEGRATION.md).
 
 ## How to use this context
 
-Use the operator docs below for the current workflow. The implementation and audit documents are dated snapshots: their target sections describe planned architecture, and their historical status should be checked against the current operator docs and code before acting.
+For live model services, start with the rig hardware layer linked from the repository README. The quickstart and plan format below describe the existing legacy batch workflow. The implementation and audit documents are dated snapshots: their target sections describe planned architecture, and their historical status should be checked against the current operator docs and code before acting.
 
 ## Read First
 - `workspace/quickstart.md` (submit, monitor, kill plan)
