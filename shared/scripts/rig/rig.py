@@ -987,19 +987,12 @@ def status_payload() -> dict:
     kv_state = LOCAL / "brain" / "kv_chat_mode.json"
     if kv_state.exists():
         try:
-            item = json.loads(kv_state.read_text())
-            url = f"http://127.0.0.1:{item['port']}/health"
-            with urllib.request.urlopen(url, timeout=2) as response:
-                ready = json.load(response).get("model_loaded") is True
-            chats = []
-            if ready:
-                with urllib.request.urlopen(f"http://127.0.0.1:{item['port']}/chats", timeout=2) as response:
-                    chats = json.load(response).get("chats", [])
-            kv = {"status": "ready" if ready else "down", "model": item["model"],
-                  "port": item["port"], "mode": item["mode"],
-                  "instance_id": item.get("instance_id"), "chats": chats}
-        except (OSError, ValueError, KeyError, urllib.error.URLError):
-            kv = {"status": "down"}
+            result = subprocess.run(
+                [sys.executable, str(LOCAL / "scripts/rig/kv_chat_control.py"), "status"],
+                capture_output=True, text=True, timeout=8, check=True)
+            kv = json.loads(result.stdout)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            kv = {"status": "down", "reason": str(exc)}
     g = gpu_check()
     profiles = [
         {"id": pid, **{k: e.get(k) for k in ("model", "port", "gpus", "ctx_size", "state", "since", "from", "lease",
@@ -1450,6 +1443,8 @@ def cmd_shared_kv(args) -> int:
     if args.message is not None: command += ["--message", args.message]
     if args.max_tokens is not None: command += ["--max-tokens", str(args.max_tokens)]
     if args.gpu is not None: command += ["--gpu", str(args.gpu)]
+    if args.context_cap is not None: command += ["--context-cap", str(args.context_cap)]
+    if args.main_context_cap is not None: command += ["--main-context-cap", str(args.main_context_cap)]
     return subprocess.run(command, check=False).returncode
 
 
@@ -1485,6 +1480,8 @@ def main() -> int:
     s.add_argument("--message")
     s.add_argument("--max-tokens", type=int)
     s.add_argument("--gpu", type=int)
+    s.add_argument("--context-cap", type=int)
+    s.add_argument("--main-context-cap", type=int)
     s.set_defaults(fn=cmd_shared_kv)
     sub.add_parser("observe", help="JSON snapshot for the rig manager").set_defaults(fn=cmd_observe)
     s = sub.add_parser("why", help="why a runtime is down: exit, OOM, guard action, earlyoom")

@@ -52,15 +52,53 @@ class BrainPlanMixin:
         i = 0
         while i < len(tokens):
             tok = str(tokens[i]).strip()
-            if tok.startswith("--") and tok.endswith("-model") and i + 1 < len(tokens):
-                key = tok[2:]
-                val = str(tokens[i + 1]).strip()
+            key, separator, inline_value = tok.partition("=")
+            if key.startswith("--") and (key == "--model" or key.endswith("-model")):
+                val = inline_value.strip() if separator else (
+                    str(tokens[i + 1]).strip() if i + 1 < len(tokens) else ""
+                )
                 if val and not (val.startswith("{") and val.endswith("}")):
-                    out[key] = val
-                i += 2
+                    out[key[2:]] = val
+                i += 1 if separator else 2
                 continue
             i += 1
         return out
+
+    def _gateway_model_assignments(self, raw: Any, task_defs: List[Dict[str, Any]]) -> Dict[str, str]:
+        """Validate the optional gateway recommendation before creating any tasks."""
+        if not isinstance(raw, str) or not raw or len(raw) > 4000:
+            raise ValueError("GATEWAY_MODEL_ASSIGNMENTS must be a nonempty JSON string of at most 4000 characters")
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("GATEWAY_MODEL_ASSIGNMENTS is not valid JSON") from exc
+        if (not isinstance(payload, dict) or type(payload.get("schema")) is not int
+                or payload.get("schema") != 1 or not isinstance(payload.get("assignments"), dict)):
+            raise ValueError("GATEWAY_MODEL_ASSIGNMENTS must contain schema 1 and an assignments object")
+
+        by_id = {task["id"]: task for task in task_defs}
+        if len(by_id) != len(task_defs):
+            raise ValueError("Plan task IDs must be unique for gateway model assignments")
+        models: Dict[str, str] = {}
+        for task_id, assignment in payload["assignments"].items():
+            if not isinstance(task_id, str) or task_id not in by_id:
+                raise ValueError(f"Unknown gateway model assignment task ID: {task_id!r}")
+            task = by_id[task_id]
+            if task.get("executor") != "worker" or task.get("task_class") != "llm" or not task.get("llm_role"):
+                raise ValueError(f"Gateway model assignment requires a tagged worker llm task: {task_id}")
+            if not isinstance(assignment, dict):
+                raise ValueError(f"Invalid gateway model assignment for {task_id}")
+            model = assignment.get("model")
+            role = assignment.get("role")
+            if not isinstance(model, str) or not model or model not in self.model_tier_by_id:
+                raise ValueError(f"Unknown gateway model for {task_id}: {model!r}")
+            if not isinstance(role, str) or not role.strip():
+                raise ValueError(f"Missing gateway model role for {task_id}")
+            allowed_roles = {task["llm_role"], *task.get("llm_fallback_roles", [])}
+            if role not in allowed_roles:
+                raise ValueError(f"Gateway model role {role!r} is not declared for {task_id}")
+            models[task_id] = model
+        return models
 
     def _validate_split_llm_task_definition(self, task: Dict[str, Any]) -> Optional[str]:
         if task.get("task_class") != "llm":
@@ -352,6 +390,8 @@ Required JSON format:
         - **llm_min_tier**: 1  (optional, llm tasks only)
         - **llm_model**: qwen2.5:7b  (optional, llm tasks only)
         - **llm_placement**: single_gpu|split_gpu (optional, llm tasks only)
+        - **llm_role**: code_review (optional, gateway-selected worker llm tasks)
+        - **llm_fallback_roles**: code_generation, reasoning (optional)
         - **command**: `shell command here`
         - **depends_on**: task1, task2
         - **foreach**: manifest.videos  (optional - expands to N tasks)
@@ -383,6 +423,8 @@ Required JSON format:
                 "llm_min_tier": None,
                 "llm_model": None,
                 "llm_placement": None,
+                "llm_role": None,
+                "llm_fallback_roles": [],
             }
 
             for line in lines[1:]:
@@ -420,6 +462,12 @@ Required JSON format:
                         self.logger.warning(
                             f"Invalid llm_placement '{placement}' for {task_id}, ignoring"
                         )
+                elif line.startswith('- **llm_role**:'):
+                    task["llm_role"] = line.split(':', 1)[1].strip() or None
+                elif line.startswith('- **llm_fallback_roles**:'):
+                    task["llm_fallback_roles"] = [
+                        role.strip() for role in line.split(':', 1)[1].split(',') if role.strip()
+                    ]
                 elif line.startswith('- **depends_on**:'):
                     deps = line.split(':', 1)[1].strip()
                     if deps.lower() != 'none':
@@ -685,6 +733,21 @@ Required JSON format:
 
         # Parse plan.md directly
         task_defs = self.parse_plan_md(plan_content)
+        gateway_models = (
+            self._gateway_model_assignments(config["GATEWAY_MODEL_ASSIGNMENTS"], task_defs)
+            if "GATEWAY_MODEL_ASSIGNMENTS" in config else {}
+        )
+        for task_def in task_defs:
+            assigned_model = gateway_models.get(task_def["id"])
+            if not assigned_model:
+                continue
+            command = self._substitute_plan_variables(task_def["command"], variables)
+            explicit_models = self._extract_explicit_model_flags_from_command(command)
+            conflicts = {key: model for key, model in explicit_models.items() if model != assigned_model}
+            if conflicts:
+                raise ValueError(
+                    f"Gateway model assignment for {task_def['id']} conflicts with command model flags: {conflicts}"
+                )
 
         # Parse optional Goal section (backward-compatible)
         goal_spec = self._parse_goal_section(plan_content)
@@ -778,6 +841,11 @@ Required JSON format:
             llm_min_tier = self._substitute_plan_variables(task_def.get("llm_min_tier"), variables)
             llm_model = self._substitute_plan_variables(task_def.get("llm_model"), variables)
             llm_placement = self._substitute_plan_variables(task_def.get("llm_placement"), variables)
+            assigned_model = gateway_models.get(task_def["id"])
+            if assigned_model:
+                llm_model = assigned_model
+                llm_min_tier = self.model_tier_by_id[assigned_model]
+                llm_placement = str(self.model_meta_by_id.get(assigned_model, {}).get("placement", "")).strip() or None
 
             vram_estimate_mb, vram_estimate_source = self._resolve_task_vram_estimate(task_def, command)
 

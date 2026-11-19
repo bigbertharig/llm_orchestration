@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "e9c1dc65156d9261843385fb17ba6740683b3413c44e0ea6f48955512979888e",
+  "source_sha256": "92e9473e24a0673060a0b52cc23c109d9c0a6b07540ccd4d1095c0bf806e2f83",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -2751,6 +2751,148 @@
           "results/runtime_experiments/kv_expert_chat_20261107/README.md",
           "results/runtime_experiments/kv_matched_placement_20261107/README.md"
         ]
+      },
+      "nemotron74_shared_kv_http_v1": {
+        "model": "nemotron-3.5-bolt:74b-a9b",
+        "status": "validated",
+        "procedure": "shared_kv_http_v1",
+        "placement": {
+          "weights": [
+            "gpu0"
+          ],
+          "experts": [
+            "gpu_workers"
+          ],
+          "chat_state": [
+            "gpu0",
+            "gpu_workers"
+          ]
+        },
+        "evidence": [
+          "results/runtime_experiments/nemotron_shared_kv_http_20261116/README.md"
+        ]
+      }
+    }
+  },
+  "subagent_catalog": {
+    "schema_version": 1,
+    "about": "Candidate child routes. The manager resolves local placement; the harness runs bounded child sessions. Ready state is checked at request time.",
+    "candidates": {
+      "qwen35_shared_1060": {
+        "provider": "rig_shared_chat",
+        "model": "qwen3.6:35b-a3b-xl",
+        "mode": "gpu1060-chat-q4",
+        "requires": {
+          "model": "qwen3.6:35b-a3b-xl",
+          "mode": "gpu0-main-q4"
+        },
+        "agent_types": [
+          "coding",
+          "research"
+        ],
+        "context_cap": 262144,
+        "context_allocation": "dynamic_at_attach",
+        "context_min": 16384,
+        "context_default": 65536,
+        "memory_estimate": {
+          "fixed_compute_mib": 0,
+          "kv_mib_at_262144": 1958,
+          "admission_reserve_mib": 272,
+          "shared_parent_mib_per_chat": 74,
+          "shared_parent_reserve_mib": 416,
+          "method": "linear_q4_worker_allocation_plus_measured_parent_runtime_state"
+        },
+        "placement_policy": "spread_then_stack",
+        "max_attached_chats": 6,
+        "status": "experimental",
+        "evidence": "results/runtime_experiments/qwen35_q4_context_stacking_20261118/README.md"
+      },
+      "qwen35_headless_worker_pool": {
+        "provider": "rig_shared_chat",
+        "model": "qwen3.6:35b-a3b-xl",
+        "mode": "gpu1060-pool-chat-q4",
+        "requires": {
+          "model": "qwen3.6:35b-a3b-xl",
+          "mode": "gpu0-worker-pool-q4"
+        },
+        "agent_types": [
+          "coding",
+          "research"
+        ],
+        "context_cap": 262144,
+        "context_allocation": "dynamic_at_attach",
+        "context_min": 16384,
+        "context_default": 65536,
+        "memory_estimate": {
+          "fixed_compute_mib": 0,
+          "kv_mib_at_262144": 1958,
+          "admission_reserve_mib": 272,
+          "shared_parent_mib_per_chat": 74,
+          "shared_parent_reserve_mib": 416,
+          "method": "linear_q4_worker_allocation_plus_measured_parent_runtime_state"
+        },
+        "placement_policy": "spread_then_stack",
+        "max_attached_chats": 16,
+        "max_full_context_chats": 11,
+        "validated_gap_fill_contexts": [
+          240000,
+          240000,
+          240000,
+          240000,
+          249000
+        ],
+        "status": "experimental",
+        "evidence": "results/runtime_experiments/qwen35_q4_context_stacking_20261118/README.md"
+      },
+      "nemotron74_shared_1060": {
+        "provider": "rig_shared_chat",
+        "model": "nemotron-3.5-bolt:74b-a9b",
+        "mode": "gpu1060-chat-f16",
+        "requires": {
+          "model": "nemotron-3.5-bolt:74b-a9b",
+          "mode": "gpu0-main-f16-experts1234"
+        },
+        "agent_types": [
+          "coding",
+          "research"
+        ],
+        "context_cap": 262144,
+        "context_allocation": "dynamic_at_attach",
+        "context_min": 16384,
+        "context_default": 262144,
+        "memory_estimate": {
+          "fixed_compute_mib": 6,
+          "kv_mib_at_262144": 2048,
+          "admission_reserve_mib": 256,
+          "shared_parent_mib_per_chat": 182,
+          "method": "linear_f16_kv_plus_measured_per_context_parent_state"
+        },
+        "placement_policy": "spread_then_stack",
+        "max_attached_chats": 4,
+        "status": "experimental",
+        "evidence": "results/runtime_experiments/nemotron_f16_context_sweep_20261118/README.md"
+      },
+      "codex_terra": {
+        "provider": "codex",
+        "model": "gpt-5.6-terra",
+        "agent_types": [
+          "coding",
+          "research"
+        ],
+        "status": "candidate",
+        "availability": "check_codex_model_list",
+        "evidence": "Pi Codex app-server model/list, observed 2026-11-12"
+      },
+      "codex_luna": {
+        "provider": "codex",
+        "model": "gpt-5.6-luna",
+        "agent_types": [
+          "coding",
+          "research"
+        ],
+        "status": "candidate",
+        "availability": "check_codex_model_list",
+        "evidence": "Pi Codex app-server model/list, observed 2026-11-12"
       }
     }
   },
@@ -4660,5 +4802,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-15T20:59:48+00:00"
+  "imported_at": "2026-11-19T01:37:08+00:00"
 }

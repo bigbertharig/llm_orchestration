@@ -68,6 +68,10 @@ def catalog():
                  "kind": "model_load", "executable": True,
                  "chat_gpu": 0, "context_cap": 262144,
                  "runtime": "shared-kv-chat", "supports_mode": "gpu1060-chat-q4"})
+    rows.append({"model": "qwen3.6:35b-a3b-xl", "mode": "gpu0-worker-pool-q4",
+                 "kind": "model_load", "executable": True,
+                 "main_context_cap": 0, "context_cap": 0,
+                 "runtime": "shared-kv-chat", "supports_mode": "gpu1060-pool-chat-q4"})
     from kv_chat_control import worker_cards
     try:
         candidates = [card["gpu"] for card in worker_cards()]
@@ -77,8 +81,37 @@ def catalog():
                  "kind": "attached_chat", "executable": bool(candidates),
                  "requires": {"model": "qwen3.6:35b-a3b-xl", "mode": "gpu0-main-q4"},
                  "candidate_gpus": candidates, "min_worker_vram_mib": 6000,
-                 "context_cap": 262144,
+                 "context_cap": 262144, "context_min": 16384,
+                 "context_default": 65536, "context_allocation": "dynamic_at_attach",
+                 "placement_scope": "multi_gpu_then_shared_gpu_contexts",
                  "runtime": "shared-kv-chat", "route_kind": "per-chat-turns"})
+    rows.append({"model": "qwen3.6:35b-a3b-xl", "mode": "gpu1060-pool-chat-q4",
+                 "kind": "attached_chat", "executable": bool(candidates),
+                 "requires": {"model": "qwen3.6:35b-a3b-xl", "mode": "gpu0-worker-pool-q4"},
+                 "candidate_gpus": candidates, "min_worker_vram_mib": 6000,
+                 "context_cap": 262144, "context_min": 16384,
+                 "context_default": 65536, "context_allocation": "dynamic_at_attach",
+                 "placement_scope": "multi_gpu_then_shared_gpu_contexts",
+                 "runtime": "shared-kv-chat", "route_kind": "per-chat-turns"})
+    try:
+        nemo_candidates = [card["gpu"] for card in worker_cards("nemotron-3.5-bolt:74b-a9b")]
+    except (OSError, RuntimeError, subprocess.CalledProcessError):
+        nemo_candidates = []
+    rows.extend([
+        {"model": "nemotron-3.5-bolt:74b-a9b", "mode": "gpu0-main-f16-experts1234",
+         "kind": "model_load", "executable": True, "chat_gpu": 0,
+         "context_cap": 262144, "runtime": "shared-kv-chat",
+         "supports_mode": "gpu1060-chat-f16"},
+        {"model": "nemotron-3.5-bolt:74b-a9b", "mode": "gpu1060-chat-f16",
+         "kind": "attached_chat", "executable": bool(nemo_candidates),
+         "requires": {"model": "nemotron-3.5-bolt:74b-a9b",
+                      "mode": "gpu0-main-f16-experts1234"},
+         "candidate_gpus": nemo_candidates, "min_worker_vram_mib": 6000,
+         "context_cap": 262144, "context_min": 16384,
+         "context_default": 262144, "context_allocation": "dynamic_at_attach",
+         "placement_scope": "multi_gpu_then_shared_gpu_contexts",
+         "runtime": "shared-kv-chat", "route_kind": "per-chat-turns"},
+    ])
     return rows
 
 
@@ -96,6 +129,7 @@ def main():
     p.add_argument("--gpu", type=int, help="eligible worker GPU index for an attached chat; default selects a free one")
     p.add_argument("--message")
     p.add_argument("--max-tokens", type=int, default=128)
+    p.add_argument("--context-cap", type=int)
     a = p.parse_args()
     if a.action == "list":
         rows = catalog()
@@ -110,7 +144,12 @@ def main():
         p.error("show/start needs MODEL MODE")
     attached = next((row for row in catalog() if row["model"] == a.model and
                      row["mode"] == a.mode and row["kind"] == "attached_chat"), None)
-    shared_main = a.model == "qwen3.6:35b-a3b-xl" and a.mode == "gpu0-main-q4"
+    qwen_headless = (a.model == "qwen3.6:35b-a3b-xl" and
+                     a.mode == "gpu0-worker-pool-q4")
+    shared_main = ((a.model == "qwen3.6:35b-a3b-xl" and
+                    a.mode in ("gpu0-main-q4", "gpu0-worker-pool-q4")) or
+                   (a.model == "nemotron-3.5-bolt:74b-a9b" and
+                    a.mode == "gpu0-main-f16-experts1234"))
     if attached or shared_main:
         if a.action == "show":
             if attached:
@@ -126,9 +165,12 @@ def main():
             p.error("turn needs --chat-id and --message")
         action = ("attach" if a.action == "start" else "detach" if a.action == "stop" else a.action) if attached else a.action
         cmd = ["python3", str(Path(__file__).with_name("kv_chat_control.py")), action]
+        cmd += ["--model", a.model]
         if a.port: cmd += ["--port", str(a.port)]
+        if qwen_headless and a.action == "start": cmd += ["--main-context-cap", "0"]
         if a.chat_id: cmd += ["--chat-id", a.chat_id]
         if a.gpu is not None: cmd += ["--gpu", str(a.gpu)]
+        if a.context_cap is not None: cmd += ["--context-cap", str(a.context_cap)]
         if a.message is not None: cmd += ["--message", a.message]
         if a.action == "turn": cmd += ["--max-tokens", str(a.max_tokens)]
         if a.dry_run:

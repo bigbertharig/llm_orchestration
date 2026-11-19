@@ -22,8 +22,8 @@ When asked to "update a plan to the current/new plan format", do all of this:
 4. Normalize required sections, task fields, dependencies, outputs, and stale inputs.
 5. For every LLM task, check
    `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION_FOR_PLANS.md`.
-6. Update model inputs, `llm_model`, `llm_min_tier`, and `llm_placement` to match
-   the current best benchmark-backed model for each task role.
+6. Tag gateway-selected worker LLM tasks with `llm_role` (and optional
+   `llm_fallback_roles`); keep explicit model settings current for untagged tasks.
 7. Keep plan prompts role-specific; do not blindly copy benchmark prompts into
    plan scripts unless that prompt is actually the right task prompt.
 8. Validate commands for unresolved placeholders.
@@ -59,7 +59,7 @@ Important boundary:
   - This script includes stale launch-lock cleanup, deterministic load order, and split-runtime recovery.
   - Plans should not duplicate force-unload/restart/load-scan logic unless they truly require custom behavior.
 - For plan updates that touch LLM tasks, check the benchmarking selection guide
-  before choosing model inputs or `llm_model` fields:
+  before choosing `llm_role` tags or explicit model inputs for untagged tasks:
   `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION_FOR_PLANS.md`
 
 ---
@@ -123,6 +123,8 @@ Valid task fields are:
 - `llm_min_tier`
 - `llm_model`
 - `llm_placement`
+- `llm_role`
+- `llm_fallback_roles`
 - `vram_policy`
 - `vram_estimate_mb`
 
@@ -144,6 +146,8 @@ Fields valid only for `llm` tasks:
 - `llm_min_tier`
 - `llm_model`
 - `llm_placement`
+- `llm_role`
+- `llm_fallback_roles`
 
 Brain-owned LLM tasks:
 - A task may be `executor: brain` with `task_class: llm` when it requires the brain model.
@@ -342,7 +346,7 @@ Short description of what the plan does.
 ### process
 - **executor**: worker
 - **task_class**: llm
-- **llm_model**: model_id_here
+- **llm_role**: code_review
 - **command**: `python {PLAN_PATH}/scripts/process.py --batch-id {BATCH_ID} --item-id {ITEM.id}`
 - **depends_on**: prepare
 - **foreach**: {BATCH_PATH}/manifest.json:items
@@ -376,9 +380,16 @@ Short description of what the plan does.
 - **llm_min_tier**: 1
 - **llm_model**: model_id
 - **llm_placement**: single_gpu|split_gpu
+- **llm_role**: code_review
+- **llm_fallback_roles**: code_generation, reasoning
 - **vram_policy**: default|infer|fixed
 - **vram_estimate_mb**: 2048
 ```
+
+For worker LLM tasks, use `llm_role` with optional `llm_fallback_roles` for
+gateway selection, or keep explicit `llm_model`, `llm_min_tier`, and
+`llm_placement` for an untagged plan-pinned task. The shape above lists both
+alternatives for reference.
 
 ### Field Meanings
 
@@ -396,6 +407,8 @@ Short description of what the plan does.
 | `llm_min_tier` | Minimum model capability tier |
 | `llm_model` | Preferred model id |
 | `llm_placement` | Placement constraint for LLM tasks |
+| `llm_role` | Benchmark role used by the gateway to select a model at submission |
+| `llm_fallback_roles` | Ordered alternative benchmark roles when the primary has no fit or is busy |
 | `vram_policy` | How VRAM is estimated for script tasks |
 | `vram_estimate_mb` | Explicit VRAM estimate when fixed |
 
@@ -414,11 +427,30 @@ Use them anyway. They make plans easier to reason about and easier to audit.
 
 ### Model Selection Step
 
+Worker LLM tasks tagged with `llm_role` can receive a prepared model assignment
+from the gateway when the plan is submitted. The gateway supplies the selected
+model and role through `GATEWAY_MODEL_ASSIGNMENTS` in submission config. Brain
+validates the task ID, declared role, and model catalog entry, then uses the
+catalog tier and placement for the task and its later `foreach` or goal-driven
+copies. A plan without that config continues to use its existing `llm_model`,
+`llm_min_tier`, and `llm_placement` fields. Tasks without `llm_role` keep their
+plan-specified model even when other tasks in the same plan are assigned.
+
+For gateway-selected tasks, avoid hardcoded command model flags. A `--model`
+or `--*-model` flag that disagrees with the selected model stops submission.
+The selected model is recorded in task metadata for routing; legacy shell
+commands are not rewritten, and scripts that choose their own model may use a
+different one. Verify the actual model argument before migrating a shell task.
+The optional `llm_fallback_roles` list lets the
+gateway try other roles in order when the primary role has no fitting model or
+its fitting models are busy; if all fitting choices are busy, the gateway
+selects the first fitting model and waits.
+
 Every plan update that touches LLM work should include a model-selection pass:
 1. classify each LLM task by role, such as extraction, code generation, code review, deep reasoning, document QA, or final synthesis
 2. check `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION_FOR_PLANS.md`
-3. choose the best model per role, not one global worker model by habit
-4. set `llm_model`, `llm_min_tier`, and `llm_placement` explicitly for worker-owned LLM tasks
+3. set `llm_role` and any useful `llm_fallback_roles` for gateway-selected worker tasks; the gateway assigns their model, tier, and placement at submission
+4. keep `llm_model`, `llm_min_tier`, and `llm_placement` explicit for untagged worker tasks that use legacy plan-pinned selection
 5. leave `executor: brain` model choice to the active brain runtime
 
 Benchmark profiles and plan prompts are separate layers. Benchmarking tracks the
