@@ -39,7 +39,7 @@ no automatic swapping or cross-mode coordination. Upgrade later if usage changes
 2. Mode coexistence: deferred. Until decided, **one mode at a time** (start = stop the current one first).
 3. **Remote mode may use all GPUs**, including the 3090.
 4. **JSON is the single source** for published model profiles:
-   `plans/shoulders/benchmarking/model_task_library.json`. Human docs (MODEL_BEST_OF.md)
+   `plans/shoulders/benchmarking/model_task_library.json`. Human docs (MODEL_SELECTION.md)
    follow it, not the other way round.
 
 ## Target behavior

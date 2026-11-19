@@ -138,13 +138,13 @@ docker run --rm --network host ... bench-pipeline \
 Notes:
 - Models load over NFS from shared drive (30–60s first load)
 - Add `--reasoning-budget 0` for Qwen 3.6 family (doesn't work for all model families)
-- See [MODEL_RUNTIME_GUIDE.md](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_RUNTIME_GUIDE.md) for per-model runtime flags
+- See [MODEL_SELECTION.md](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_SELECTION.md) for per-model runtime flags
 
 ---
 
 ## Task Routing Matrix
 
-Which worker tier and model for each task type. Based on benchmark data from [MODEL_LIBRARY.md](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_LIBRARY.md).
+Which worker tier and model for each task type. Based on benchmark data from [MODEL_SELECTION.md](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_SELECTION.md).
 
 | Task type | Recommended tier | Model | Why | Fallback |
 |-----------|-----------------|-------|-----|----------|
@@ -164,7 +164,7 @@ Which worker tier and model for each task type. Based on benchmark data from [MO
 
 1. Identify the capability needed (code, reasoning, extraction, classification, scripted)
 2. Check [BENCHMARK_SCORES.md](https://github.com/bigbertharig/benchmarking/blob/master/BENCHMARK_SCORES.md) for which models score highest on the relevant benchmark
-3. Check [MODEL_LIBRARY.md](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_LIBRARY.md) "What Scores Mean for Real Tasks" to map benchmark → capability
+3. Check [MODEL_SELECTION.md](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_SELECTION.md) "What Scores Mean for Real Tasks" to map benchmark → capability
 4. Pick the cheapest tier that can run the model (worker GPU > brain GPU > CPU LLM)
 5. Update the job routing (`jobs`) or the role in [model_roles.json](https://github.com/bigbertharig/benchmarking/blob/master/model_roles.json), then run `scripts/active/model_library.py check`
 6. Test with a representative workload before committing to production routing
@@ -182,7 +182,7 @@ Which worker tier and model for each task type. Based on benchmark data from [MO
 | [history_summary_tools.md](history_summary_tools.md) | one-run and many-run reducers |
 | [cpu-worker-setup.md](cpu-worker-setup.md) | Orange Pi CPU worker provisioning and ops |
 | [hardware_upgrades.md](future/hardware_upgrades.md) | current hardware, benchmarks, upgrade scenarios, and unified-memory options |
-| [MODEL_LIBRARY.md](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_LIBRARY.md) | model selection, benchmark scores, best choices per task |
-| [MODEL_RUNTIME_GUIDE.md](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_RUNTIME_GUIDE.md) | per-model runtime flags, memory, compatibility |
+| [MODEL_SELECTION.md](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_SELECTION.md) | model selection, benchmark scores, best choices per task |
+| [MODEL_SELECTION.md](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_SELECTION.md) | per-model runtime flags, memory, compatibility |
 | [BENCHMARK_SCORES.md](https://github.com/bigbertharig/benchmarking/blob/master/BENCHMARK_SCORES.md) | raw benchmark score tables with timing |
 | [model_roles.json](https://github.com/bigbertharig/benchmarking/blob/master/model_roles.json) | model + settings per lane and job (routing), remote profiles |

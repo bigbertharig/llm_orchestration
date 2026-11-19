@@ -141,7 +141,9 @@ resumed it (`rig plan resume --controller ID`). The controller keeps a copy of t
 rig's plan is behind it (lost file), the controller writes it back (`rig plan restore`). Details:
 llm-gateway `docs/MANAGER.md` rule 1c.
 
-## The cards are whatever the scan finds (2026-10-25)
+## The cards are whatever the scan finds
+
+Run `rig scan` after a hardware change or on a new installation. It refreshes the one rig-owned inventory at `brain/hw/hardware_inventory.json` and prints the same schema, including physical index, UUID, VRAM, PCI bus, link, scan time, and errors. Benchmarking and controller deployments can import this artifact for a stable hardware description. They must use `rig observe` for live availability and admission; a saved inventory never grants capacity.
 
 The rig works with the cards `nvidia-smi` lists now, on any layout. A GPU fault blocks loads (nvidia-smi
 failing or reporting a card it cannot reach, which is a card off the bus: power-cycle), and so does seeing no

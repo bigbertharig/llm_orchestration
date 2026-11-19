@@ -27,10 +27,10 @@ For live model services, start with the rig hardware layer linked from the repos
 - `shared/plans/shoulders/benchmarking/README.md` (benchmark runtime usage and current runtime compatibility notes)
 
 ## Benchmarking Docs
-- `shared/plans/shoulders/benchmarking/MODEL_LIBRARY.md` (model selection hub — best choices, inventory, links)
-- `shared/plans/shoulders/benchmarking/MODEL_SELECTION_FOR_PLANS.md` (plan-facing model choices by task type)
+- `shared/plans/shoulders/benchmarking/MODEL_SELECTION.md` (model selection hub — best choices, inventory, links)
+- `shared/plans/shoulders/benchmarking/MODEL_SELECTION.md` (plan-facing model choices by task type)
 - `shared/plans/shoulders/benchmarking/BENCHMARK_SCORES.md` (pure score tables — pipeline, code, reasoning, knowledge)
-- `shared/plans/shoulders/benchmarking/MODEL_RUNTIME_GUIDE.md` (per-model runtime requirements, flags, memory, compatibility)
+- `shared/plans/shoulders/benchmarking/MODEL_SELECTION.md` (per-model runtime requirements, flags, memory, compatibility)
 - `shared/plans/shoulders/benchmarking/BENCHMARK_LESSONS_LEARNED.md` (tuning histories, debugging narratives, fix details)
 - `shared/plans/shoulders/benchmarking/docker/README.md` (Docker suite operator guide)
 - `shared/plans/shoulders/benchmarking/docker/SEQUENCED_TEST_SUITES.md` (campaign sequencer and thinking-model flags)

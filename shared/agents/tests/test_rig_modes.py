@@ -1,7 +1,10 @@
 import sys
 import unittest
+import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 AGENTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AGENTS.parent / "scripts" / "rig"))
@@ -9,6 +12,53 @@ import rig  # noqa: E402
 
 
 class ModeTests(unittest.TestCase):
+    def test_lease_admission_uses_live_smallest_fit_and_returns_specific_capacity(self):
+        cards = [{"index": 0, "total_mb": 24576, "used_mb": 0},
+                 {"index": 2, "total_mb": 8192, "used_mb": 0},
+                 {"index": 5, "total_mb": 6144, "used_mb": 0}]
+        state = Mock()
+        state.leases.return_value = []
+        state.claims.return_value = []
+        with patch.object(rig, "gpu_check", return_value={"ok": True, "visible": cards}), \
+             patch.object(rig, "llama_containers", return_value=[]), \
+             patch.object(rig, "live_ports", return_value={}):
+            chosen = rig.admit_lease_spec({"gpus_needed": [{"min_vram_mb": 20000},
+                                                         {"min_vram_mb": 5000}]}, state)
+            self.assertEqual(chosen["gpu_ids"], [0, 5])
+            self.assertEqual(chosen["ports"], [11434, 11439])
+            self.assertEqual(chosen["metadata"]["port"], 11434)
+            with self.assertRaisesRegex(rig.hw_state.StateError, "no capacity") as refused:
+                rig.admit_lease_spec({"gpus_needed": [{"min_vram_mb": 30000}]}, state)
+            self.assertEqual(refused.exception.kind, "capacity")
+
+    def test_lease_admission_rejects_busy_pinned_card_and_preserves_claim(self):
+        cards = [{"index": 2, "total_mb": 8192, "used_mb": 0}]
+        state = Mock()
+        state.leases.return_value = []
+        state.claims.return_value = [{"name": "bench", "gpu_ids": [2]}]
+        with patch.object(rig, "gpu_check", return_value={"ok": True, "visible": cards}), \
+             patch.object(rig, "llama_containers", return_value=[]), \
+             patch.object(rig, "live_ports", return_value={}):
+            with self.assertRaisesRegex(rig.hw_state.StateError, "claimed by bench"):
+                rig.admit_lease_spec({"gpu_ids": [2]}, state)
+            chosen = rig.admit_lease_spec({"gpu_ids": [2], "metadata": {"claim": "bench"}}, state)
+            self.assertEqual(chosen["gpu_ids"], [2])
+
+    def test_scan_saves_live_card_identity_without_a_fixed_card_count(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "hardware_inventory.json"
+            cards = [{"index": 3, "uuid": "GPU-example", "name": "Example GPU",
+                      "total_mb": 6144, "bus": "01:00.0", "link_gen": 3,
+                      "link_width": 8, "root_port": None, "via": []}]
+            scan = {"ok": True, "visible": cards, "errors": [], "changes": [],
+                    "since_boot": [], "config_not_present": [], "ids": [3]}
+            with patch.object(rig, "INVENTORY_PATH", path), patch.object(rig, "gpu_check", return_value=scan):
+                self.assertEqual(rig.cmd_scan(None), 0)
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["schema"], "rig-hardware-inventory/1")
+            self.assertEqual(saved["cards"][0]["uuid"], "GPU-example")
+            self.assertEqual(saved["cards"][0]["total_mb"], 6144)
+
     def test_use_picks_the_load_mode(self):
         self.assertEqual(rig.load_mode({"use": "benchmark"}), "bench")
         self.assertEqual(rig.load_mode({"use": "chat"}), "remote")

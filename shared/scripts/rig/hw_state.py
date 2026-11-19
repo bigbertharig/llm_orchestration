@@ -1,7 +1,7 @@
 """Rig-side GPU allocation record: leases and claims, kept and written by the rig itself.
 
-Controllers (the Pi manager today, possibly others later) decide placement and ask the rig to record
-it. The rig is the single writer, on its own disk, under the lease store's lock (not the rig mode
+The rig selects cards for fit-based lease requests and records them. An operator may still
+request explicit card IDs. The rig is the single writer, on its own disk, under the lease store's lock (not the rig mode
 lock, which a model load holds for minutes). So the record survives a lost network, does not depend
 on which controller is active, and two controllers cannot double-book a card.
 
@@ -247,7 +247,7 @@ class HardwareState:
             raise StateError("state", str(exc)) from exc
 
     def acquire(self, spec: dict[str, Any]) -> dict[str, Any]:
-        """Record a lease a controller placed. Refuses overlap with any lease, and claimed cards
+        """Record a rig-admitted lease. Refuses overlap with any lease, and claimed cards
         unless the spec names that claim (metadata.claim)."""
         gpu_ids = sorted({int(g) for g in spec.get("gpu_ids", [])})
         metadata = dict(spec.get("metadata") or {})

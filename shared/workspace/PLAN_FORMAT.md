@@ -21,7 +21,7 @@ When asked to "update a plan to the current/new plan format", do all of this:
 3. Preserve the plan's workflow intent and existing useful scripts.
 4. Normalize required sections, task fields, dependencies, outputs, and stale inputs.
 5. For every LLM task, check
-   `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION_FOR_PLANS.md`.
+   `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION.md`.
 6. Tag gateway-selected worker LLM tasks with `llm_role` (and optional
    `llm_fallback_roles`); keep explicit model settings current for untagged tasks.
 7. Keep plan prompts role-specific; do not blindly copy benchmark prompts into
@@ -60,7 +60,7 @@ Important boundary:
   - Plans should not duplicate force-unload/restart/load-scan logic unless they truly require custom behavior.
 - For plan updates that touch LLM tasks, check the benchmarking selection guide
   before choosing `llm_role` tags or explicit model inputs for untagged tasks:
-  `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION_FOR_PLANS.md`
+  `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION.md`
 
 ---
 
@@ -448,7 +448,7 @@ selects the first fitting model and waits.
 
 Every plan update that touches LLM work should include a model-selection pass:
 1. classify each LLM task by role, such as extraction, code generation, code review, deep reasoning, document QA, or final synthesis
-2. check `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION_FOR_PLANS.md`
+2. check `/mnt/shared/plans/shoulders/benchmarking/MODEL_SELECTION.md`
 3. set `llm_role` and any useful `llm_fallback_roles` for gateway-selected worker tasks; the gateway assigns their model, tier, and placement at submission
 4. keep `llm_model`, `llm_min_tier`, and `llm_placement` explicit for untagged worker tasks that use legacy plan-pinned selection
 5. leave `executor: brain` model choice to the active brain runtime

@@ -56,10 +56,8 @@ mode among others.
 
 ## Machines
 
-- **Pi** (`<pi-ip>`): control plane. Repo checkout, plan submission, llm-gateway, the dashboard; the 4 TB
-  shared drive is attached here and exported over NFS.
-- **GPU rig** (`<rig-ip>`): an RTX 3090 Ti (brain) and GTX 1060 6 GB worker cards, running `llama-server`
-  runtimes. It mounts the shared drive at `/mnt/shared` and keeps its own checkout of this repo.
+- **Controller** (`<controller-host>`): Gateway, dashboard, and model requests. Big Bertha runs this on a Pi; a single-host installation can run Gateway on the GPU host.
+- **GPU rig** (`<rig-host>`): its own code checkout and `llama-server` runtimes. Its GPUs are discovered by `rig scan` and `rig observe`; no published card count is a load requirement. Big Bertha also mounts a shared drive for legacy batch work and backup.
 - **CPU workers** (`<worker-ip>`): Orange Pi Prime boards (ARM64, 2 GB) that claim `task_class: cpu` work.
 
 ## Running it
@@ -94,8 +92,7 @@ and `history/` (batch runs). See [PLAN_FORMAT.md](shared/workspace/PLAN_FORMAT.m
 
 ## Source and live deployment
 
-The Git checkout is the canonical source tree. Its `shared/` directory is a versioned deployment image of
-the shared drive, not the live mount, except on the Pi:
+Each code-running host keeps its own checkout. The shared drive is optional for the hardware layer; Big Bertha also uses it for legacy batch coordination and as an extra copy. In this deployment, the Pi's `shared/` is a bind mount of that drive:
 
 - source: `~/llm_orchestration/shared`
 - live on the Pi: `<shared-drive-root>` (on the Pi, `~/llm_orchestration/shared` is a bind mount of the

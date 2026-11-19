@@ -30,6 +30,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from filelock import Timeout as FileLockTimeout
 
 # Rig-local tree: the checkout this file lives in (<LOCAL>/scripts/rig/rig.py). State, config,
 # catalog, profiles and the runtime script come from here, so idle/remote never need the network.
@@ -54,6 +55,9 @@ RUN_RUNTIME = LOCAL / "scripts" / "llama_runtime" / "run_runtime.sh"
 HW_STATE_ROOT = LOCAL / "brain" / "hw"
 # The cards seen at the last boot (index, UUID, bus), so a scan can say what changed; never a requirement.
 LAYOUT_PATH = HW_STATE_ROOT / "gpu_layout.json"
+# Explicit on-demand scan. Unlike the boot layout, this is refreshed whenever an
+# operator runs `rig scan`; consumers must check observed_at before using it.
+INVENTORY_PATH = HW_STATE_ROOT / "hardware_inventory.json"
 
 # Stack modes run startup.py under these systemd units (installed from ./systemd/).
 STACK_UNITS = {
@@ -295,6 +299,24 @@ def gpu_notes(g: dict) -> list[str]:
     if g["config_not_present"]:
         notes.append(f"orchestration config names GPU {g['config_not_present']}, not present on this rig")
     return notes
+
+
+def cmd_scan(_args) -> int:
+    """Refresh the rig-owned hardware inventory without changing leases or loads."""
+    g = gpu_check()
+    inventory = {
+        "schema": "rig-hardware-inventory/1",
+        "observed_at": now_iso(),
+        "boot_id": boot_id(),
+        "ok": g["ok"],
+        "errors": g["errors"],
+        "notes": gpu_notes(g),
+        "cards": [{k: card.get(k) for k in ("index", "uuid", "name", "total_mb", "bus",
+                                               "link_gen", "link_width", "root_port", "via")}
+                  for card in g["visible"]],
+    }
+    write_atomic(INVENTORY_PATH, json.dumps(inventory, indent=2) + "\n")
+    return emit({**inventory, "saved_to": str(INVENTORY_PATH)}, 0 if g["ok"] else EXIT_FAIL)
 
 
 def check_gpu_ids(gpus, g: dict | None = None) -> None:
@@ -1058,6 +1080,78 @@ def open_plan() -> hw_plan.Plan:
     return hw_plan.Plan(HW_STATE_ROOT)
 
 
+def admit_lease_spec(spec: dict, hs: hw_state.HardwareState) -> dict:
+    """Select cards from current rig state before the lease store records them.
+
+    The admission lock serializes fit decisions from current controllers. The
+    lease store still rejects overlaps from older explicit-card callers.
+    """
+    if bool(spec.get("gpus_needed")) == bool(spec.get("gpu_ids")):
+        raise hw_state.StateError("invalid", "give exactly one of gpus_needed or gpu_ids")
+    scan = gpu_check()
+    if not scan["ok"]:
+        raise hw_state.StateError("state", "GPU scan failed: " + "; ".join(scan["errors"]))
+    cards = scan["visible"]
+    leases, claims, containers = hs.leases(), hs.claims(), llama_containers()
+    requested_claim = (spec.get("metadata") or {}).get("claim")
+    if requested_claim and not any(c["name"] == requested_claim for c in claims):
+        raise hw_state.StateError("not_found", f"no claim {requested_claim}")
+    held = {int(g): lease for lease in leases for g in lease.get("gpu_ids", [])}
+    claimed = {int(g): claim for claim in claims for g in claim.get("gpu_ids", [])}
+    running = {int(g): container for container in containers for g in container.get("gpus", [])}
+    free, unavailable = [], {}
+    for card in cards:
+        index = card["index"]
+        if index in held:
+            unavailable[index] = f"leased by {held[index].get('controller')}/{held[index].get('owner')}"
+        elif index in running:
+            unavailable[index] = f"runtime {running[index].get('name')} is using it"
+        elif card.get("used_mb", 0) > 1000:
+            unavailable[index] = f"{card['used_mb']} MiB already in use"
+        elif index in claimed and claimed[index]["name"] != requested_claim:
+            unavailable[index] = f"claimed by {claimed[index]['name']}"
+        elif requested_claim and claimed.get(index, {}).get("name") != requested_claim:
+            unavailable[index] = f"outside claim {requested_claim}"
+        else:
+            free.append(card)
+    if spec.get("gpu_ids"):
+        ids = [int(g) for g in spec["gpu_ids"]]
+        if len(ids) != len(set(ids)) or not ids:
+            raise hw_state.StateError("invalid", "gpu_ids must be a nonempty set of card indices")
+        missing = [g for g in ids if g not in {card["index"] for card in free}]
+        if missing:
+            reasons = "; ".join(f"GPU {g}: {unavailable.get(g, 'not present')}" for g in missing)
+            raise hw_state.StateError("conflict", "GPU(s) not available: " + reasons)
+    else:
+        requirements = spec["gpus_needed"]
+        if not isinstance(requirements, list) or not requirements or any(
+                not isinstance(req, dict) or type(req.get("min_vram_mb")) is not int
+                or req["min_vram_mb"] < 1 or ("max_vram_mb" in req and
+                (type(req["max_vram_mb"]) is not int or req["max_vram_mb"] < req["min_vram_mb"]))
+                for req in requirements):
+            raise hw_state.StateError("invalid", "gpus_needed requires positive VRAM bounds per card")
+        pool = sorted(free, key=lambda card: (card["total_mb"], card["index"]))
+        chosen = {}
+        for pos, req in sorted(enumerate(requirements), key=lambda item: -item[1]["min_vram_mb"]):
+            match = next((card for card in pool if req["min_vram_mb"] <= card["total_mb"]
+                          <= req.get("max_vram_mb", 1 << 30)), None)
+            if match is None:
+                detail = "; ".join(f"GPU {g}: {why}" for g, why in sorted(unavailable.items()))
+                raise hw_state.StateError("capacity", f"no capacity for {requirements}; {detail or 'no matching free card'}")
+            chosen[pos] = match["index"]
+            pool.remove(match)
+        ids = [chosen[pos] for pos in range(len(requirements))]
+    port = 11434 + min(ids)
+    if port in live_ports():
+        raise hw_state.StateError("conflict", f"port {port} is already serving a runtime")
+    spec = dict(spec)
+    spec.pop("gpus_needed", None)
+    spec["gpu_ids"] = ids
+    spec["ports"] = [11434 + g for g in sorted(ids)]
+    spec["metadata"] = {**(spec.get("metadata") or {}), "port": port}
+    return spec
+
+
 def cmd_lease(args) -> int:
     """Lease record for controllers: list | acquire --spec JSON | renew | release. JSON out.
     Writes need --controller <active controller id> once a controller is registered (hw_plan)."""
@@ -1071,13 +1165,17 @@ def cmd_lease(args) -> int:
                 spec = json.loads(args.spec or "")
             except ValueError as exc:
                 raise hw_state.StateError("invalid", f"--spec is not JSON: {exc}") from exc
-            check_gpu_ids(spec.get("gpu_ids", []))
-            spec.setdefault("metadata", {})["controller_host"] = caller()
-            return emit({"lease": hs.acquire(spec)})
+            with hw_state.FileLock(str(HW_STATE_ROOT / "admission.lock"), timeout=10):
+                spec = admit_lease_spec(spec, hs)
+                spec["metadata"]["controller_host"] = caller()
+                lease = hs.acquire(spec)
+            return emit({"lease": lease})
         if args.action == "renew":
             return emit({"lease": hs.renew(args.lease_id, args.owner, args.ttl)})
         hs.release(args.lease_id, args.owner, args.force)
         return emit({"released": args.lease_id})
+    except FileLockTimeout:
+        return emit({"error": "rig admission is busy; retry the lease request", "kind": "conflict"}, EXIT_FAIL)
     except (hw_state.StateError, hw_plan.PlanError) as exc:
         return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
 
@@ -1484,6 +1582,7 @@ def main() -> int:
     s.add_argument("--main-context-cap", type=int)
     s.set_defaults(fn=cmd_shared_kv)
     sub.add_parser("observe", help="JSON snapshot for the rig manager").set_defaults(fn=cmd_observe)
+    sub.add_parser("scan", help="refresh and save the rig-owned hardware inventory").set_defaults(fn=cmd_scan)
     s = sub.add_parser("why", help="why a runtime is down: exit, OOM, guard action, earlyoom")
     s.add_argument("--port", type=int)
     s.add_argument("--container")

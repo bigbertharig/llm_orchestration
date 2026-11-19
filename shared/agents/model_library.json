@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "92e9473e24a0673060a0b52cc23c109d9c0a6b07540ccd4d1095c0bf806e2f83",
+  "source_sha256": "2ee59eaccf2d13cb6c05462c8d2ef6790a95c03e7e47a242f5848d6097d957f2",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -2490,7 +2490,7 @@
           "planning",
           "orchestration_brain"
         ],
-        "evidence": "MODEL_BEST_OF 2026-08-22 (qwen3.5:27b provisional); operator choice 2026-10-15"
+        "evidence": "20260813_limit5_all provisional review; operator choice 2026-10-15"
       },
       "brain_code": {
         "model": "qwen3-coder:30b-a3b",
@@ -2807,43 +2807,6 @@
         "status": "experimental",
         "evidence": "results/runtime_experiments/qwen35_q4_context_stacking_20261118/README.md"
       },
-      "qwen35_headless_worker_pool": {
-        "provider": "rig_shared_chat",
-        "model": "qwen3.6:35b-a3b-xl",
-        "mode": "gpu1060-pool-chat-q4",
-        "requires": {
-          "model": "qwen3.6:35b-a3b-xl",
-          "mode": "gpu0-worker-pool-q4"
-        },
-        "agent_types": [
-          "coding",
-          "research"
-        ],
-        "context_cap": 262144,
-        "context_allocation": "dynamic_at_attach",
-        "context_min": 16384,
-        "context_default": 65536,
-        "memory_estimate": {
-          "fixed_compute_mib": 0,
-          "kv_mib_at_262144": 1958,
-          "admission_reserve_mib": 272,
-          "shared_parent_mib_per_chat": 74,
-          "shared_parent_reserve_mib": 416,
-          "method": "linear_q4_worker_allocation_plus_measured_parent_runtime_state"
-        },
-        "placement_policy": "spread_then_stack",
-        "max_attached_chats": 16,
-        "max_full_context_chats": 11,
-        "validated_gap_fill_contexts": [
-          240000,
-          240000,
-          240000,
-          240000,
-          249000
-        ],
-        "status": "experimental",
-        "evidence": "results/runtime_experiments/qwen35_q4_context_stacking_20261118/README.md"
-      },
       "nemotron74_shared_1060": {
         "provider": "rig_shared_chat",
         "model": "nemotron-3.5-bolt:74b-a9b",
@@ -2893,6 +2856,43 @@
         "status": "candidate",
         "availability": "check_codex_model_list",
         "evidence": "Pi Codex app-server model/list, observed 2026-11-12"
+      },
+      "qwen35_headless_worker_pool": {
+        "provider": "rig_shared_chat",
+        "model": "qwen3.6:35b-a3b-xl",
+        "mode": "gpu1060-pool-chat-q4",
+        "requires": {
+          "model": "qwen3.6:35b-a3b-xl",
+          "mode": "gpu0-worker-pool-q4"
+        },
+        "agent_types": [
+          "coding",
+          "research"
+        ],
+        "context_cap": 262144,
+        "context_allocation": "dynamic_at_attach",
+        "context_min": 16384,
+        "context_default": 65536,
+        "memory_estimate": {
+          "fixed_compute_mib": 0,
+          "kv_mib_at_262144": 1958,
+          "admission_reserve_mib": 272,
+          "shared_parent_mib_per_chat": 74,
+          "shared_parent_reserve_mib": 416,
+          "method": "linear_q4_worker_allocation_plus_measured_parent_runtime_state"
+        },
+        "placement_policy": "spread_then_stack",
+        "max_attached_chats": 16,
+        "max_full_context_chats": 11,
+        "validated_gap_fill_contexts": [
+          240000,
+          240000,
+          240000,
+          240000,
+          249000
+        ],
+        "status": "experimental",
+        "evidence": "results/runtime_experiments/qwen35_q4_context_stacking_20261118/README.md"
       }
     }
   },
@@ -4802,5 +4802,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-19T01:37:08+00:00"
+  "imported_at": "2026-11-19T21:27:40+00:00"
 }
