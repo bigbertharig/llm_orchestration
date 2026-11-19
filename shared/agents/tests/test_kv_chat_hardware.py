@@ -72,11 +72,11 @@ class ReservationTests(unittest.TestCase):
         card = {"gpu": 1, "runtime_gpu": 1, "total_mib": 6144,
                 "used_mib": 78, "free_mib": 5988}
         reservations = {str(i): {"placement": {"gpus": [1]}}
-                        for i in range(6)}
+                        for i in range(5)}
         self.assertEqual(kv_chat_control.available_worker_cards(
             kv_chat_control.MODEL_ID, 16384, [], [card], [], reservations,
             parent_free_mib=490), [
-                {**card, "attached_chats": 6}])
+                {**card, "attached_chats": 5}])
         self.assertEqual(kv_chat_control.available_worker_cards(
             kv_chat_control.MODEL_ID, 16384, [], [card], [], reservations,
             parent_free_mib=489), [])
@@ -145,6 +145,35 @@ class ReservationTests(unittest.TestCase):
                 for i in range(kv_chat_control.NEMO_MAX_CHILDREN)}
         self.assertEqual(kv_chat_control.available_worker_cards(
             kv_chat_control.NEMO_ID, 16384, [], cards, [], full), [])
+
+    def test_qwen_main_and_headless_counts_are_gated_by_imported_recipes(self):
+        cards = [{"gpu": gpu, "runtime_gpu": gpu, "total_mib": 6144,
+                  "used_mib": 10, "free_mib": 6000} for gpu in range(1, 6)]
+        main_limit = kv_chat_control.max_worker_chats(
+            kv_chat_control.MODEL_ID, "gpu0-main-q4")
+        pool_limit = kv_chat_control.max_worker_chats(
+            kv_chat_control.MODEL_ID, "gpu0-worker-pool-q4")
+        self.assertEqual(main_limit, 6)
+        self.assertEqual(pool_limit, 16)
+        reservations = {str(i): {"placement": {"gpus": [1]}}
+                        for i in range(main_limit)}
+        self.assertEqual(kv_chat_control.available_worker_cards(
+            kv_chat_control.MODEL_ID, 16384, [], cards, [], reservations,
+            mode="gpu0-main-q4"), [])
+        self.assertTrue(kv_chat_control.available_worker_cards(
+            kv_chat_control.MODEL_ID, 16384, [], cards, [], reservations,
+            mode="gpu0-worker-pool-q4"))
+        reservations = {str(i): {"placement": {"gpus": [1]}}
+                        for i in range(pool_limit)}
+        self.assertEqual(kv_chat_control.available_worker_cards(
+            kv_chat_control.MODEL_ID, 16384, [], cards, [], reservations,
+            mode="gpu0-worker-pool-q4"), [])
+        st = {"mode": "gpu0-worker-pool-q4", "reservations": {}, "claims": {}}
+        with patch.object(kv_chat_control, "parent_gpu_free_mib", return_value=3000):
+            capacity = kv_chat_control.capacity_report(
+                kv_chat_control.MODEL_ID, 65536, [], cards, [], st)
+        self.assertEqual(capacity["available_chat_slots"], pool_limit)
+        self.assertEqual(capacity["max_attached_chats"], pool_limit)
 
     def test_qwen_reserves_full_requested_capacity_not_occupied_depth(self):
         small = kv_chat_control.estimated_worker_mib(kv_chat_control.MODEL_ID, 16384)
