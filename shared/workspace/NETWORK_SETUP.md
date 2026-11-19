@@ -56,11 +56,11 @@ but not more than the human operator.
 
 Authoritative shared drive:
 
-- `/media/bryan/shared`
+- `<pi-shared-root>`
 
 Repo-side bind mount:
 
-- `/home/bryan/llm_orchestration/shared`
+- `<orchestration-checkout>/shared`
 
 GPU-rig NFS mount:
 
@@ -82,11 +82,11 @@ This shared drive is the common substrate for:
 
 The control plane mounts the physical disk at:
 
-- `/media/bryan/shared`
+- `<pi-shared-root>`
 
 and bind-mounts it into the repo at:
 
-- `/home/bryan/llm_orchestration/shared`
+- `<orchestration-checkout>/shared`
 
 ### GPU Rig
 
@@ -152,8 +152,8 @@ not the primary operator workflow.
 
 Relevant startup entrypoints:
 
-- `/home/bryan/llm_orchestration/shared/agents/startup.py`
-- `/home/bryan/llm_orchestration/scripts/start_plan_mode.py`
+- `<orchestration-checkout>/shared/agents/startup.py`
+- `<orchestration-checkout>/scripts/start_plan_mode.py`
 
 ---
 
@@ -161,7 +161,7 @@ Relevant startup entrypoints:
 
 Shared archive storage:
 
-- `/media/bryan/shared/models/`
+- `<pi-shared-root>/models/`
 
 The shared drive is the archive/source of model assets. Local host runtime
 storage is the hot set.

@@ -1,5 +1,7 @@
 # System Architecture
 
+Status: legacy plan-engine architecture snapshot. For current Pi-hosted storage, access, and hardware ownership, use [CONTEXT](CONTEXT.md) and [network setup](NETWORK_SETUP.md).
+
 High-level overview of the LLM orchestration system. For implementation details, see [brain-behavior.md](brain-behavior.md).
 
 ---
@@ -189,7 +191,7 @@ Hardware is auto-discovered by `setup.py` and stored in `config.json`. The syste
 
 Run `python setup.py` on any rig to scan hardware and generate `config.json`. See `config.template.json` for the schema.
 
-Models are stored as GGUF files on the shared drive under `/mnt/shared/models/` on the rig and appear as `/media/bryan/shared/models/` on the laptop. The runtime backend is `llama` in `config.json`, and models are served via containerized `llama-server` (one container per loaded model).
+Models are stored as GGUF files on the shared drive under `/mnt/shared/models/` on the rig and appear as `<pi-shared-root>/models/` on the Pi. The runtime backend is `llama` in `config.json`, and models are served via containerized `llama-server` (one container per loaded model).
 
 The runtime image is an implementation detail, not an architectural constant:
 - worker/runtime ownership belongs to the orchestrator
@@ -202,24 +204,11 @@ See [NETWORK_SETUP.md](NETWORK_SETUP.md) and [systems_prep.md](systems_prep.md) 
 
 ## Physical Architecture
 
-```
-┌──────────────────────────────────┐     ethernet     ┌──────────────────────────────────┐
-│       Control Plane              │                  │           GPU Rig                │
-│  • Laptop at <pi-ip>            │◄────────────────►│  • Rig at <rig-ip>              │
-│  • Internet access               │                  │  • NVIDIA GPUs (per config.json) │
-│  • Runs cloud LLM / Codex        │                  │  • Runs brain + workers          │
-│  • Prepares plans and code       │                  │  • Executes plans                │
-│  • Reads shared drive over NFS   │                  │  • Local LLM inference           │
-│  • GitHub for version control    │                  │  • Owns USB shared drive         │
-└──────────────────────────────────┘                  └───────────────┬──────────────────┘
-                                                                      │
-                                                                      │ USB
-                                                                      ▼
-                                                         ┌──────────────────────────────┐
-                                                         │     Shared Drive (ext4)      │
-                                                         │  Mounted locally on rig      │
-                                                         │  Exported over NFS           │
-                                                         └──────────────────────────────┘
+```text
+Pi: operator gateway and shared storage
+  | private control and NFS network
+  +-- GPU rig: model execution and hardware controls
+  +-- optional CPU workers: batch tasks
 ```
 
 **Coordination state is file-based.** Tasks, heartbeats, reservations, and brain
@@ -231,7 +220,7 @@ replace the shared filesystem as the coordination authority.
 
 ## File Structure
 
-**Key insight:** The `shared/` folder lives on the USB drive attached to the rig. The rig mounts it locally as `/mnt/shared`, exports it over NFS, and the laptop reads it as `/media/bryan/shared`.
+**Key insight:** The shared drive is attached to the Pi and exported over the isolated network. The rig normally sees it at `/mnt/shared`; the Pi's site-specific mount is recorded in private operations notes.
 
 ```
 llm_orchestration/                 # Git repo on control host / laptop (~/llm_orchestration)
@@ -245,8 +234,8 @@ llm_orchestration/                 # Git repo on control host / laptop (~/llm_or
 │   ├── watch.py                   # Live monitoring
 │   └── gpu-monitor.py             # GPU benchmarking tools
 │
-└── shared/                        # NFS-mounted view of rig-owned shared drive
-    │                              # rig path: /mnt/shared ; laptop path: /media/bryan/shared
+└── shared/                        # mounted view of Pi-hosted shared drive
+    │                              # rig path: /mnt/shared ; Pi path: <pi-shared-root>
     │
     ├── agents/                    # Agent code (GPU rig runs these)
     │   ├── brain.py               # Brain coordinator (main loop + orchestration)
@@ -750,7 +739,7 @@ The *work* on that specific task run is lost, but the task naturally retries. Th
 | [CONTEXT.md](CONTEXT.md) | Project entry point, quick orientation |
 | [brain-behavior.md](brain-behavior.md) | Brain loop, task handling, failure recovery |
 | [PLAN_FORMAT.md](PLAN_FORMAT.md) | How to write plans |
-| [future/resource_manager_design.md](future/resource_manager_design.md) | Future: GPU resource management design |
+| [archive/resource_manager_design.md](archive/resource_manager_design.md) | Historical GPU resource management design |
 
 ---
 

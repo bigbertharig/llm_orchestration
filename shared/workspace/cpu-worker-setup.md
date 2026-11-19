@@ -19,9 +19,9 @@ operation, use [quickstart.md](quickstart.md) and [CONTEXT.md](CONTEXT.md).
 Current shared scripts:
 
 - CPU agent:
-  - `/media/bryan/shared/scripts/cpu_agent.py`
+  - `<pi-shared-root>/scripts/cpu_agent.py`
 - Restart helper (manual override):
-  - `/media/bryan/shared/scripts/restart_cpu_workers.sh`
+  - `<pi-shared-root>/scripts/restart_cpu_workers.sh`
 
 Normal behavior:
 
@@ -35,8 +35,8 @@ Normal behavior:
   - `shared/cpus/cpu-worker-<id>/heartbeat.json` (worker folder path)
 
 Source of truth (2026-10-19): the repo file `shared/scripts/cpu_agent.py`, deployed to
-`/media/bryan/shared/scripts/cpu_agent.py` with
-`python3 scripts/sync_shared_source.py --live-root /media/bryan/shared` (compare) and
+`<pi-shared-root>/scripts/cpu_agent.py` with
+`python3 scripts/sync_shared_source.py --live-root <pi-shared-root>` (compare) and
 `--apply` (copy). `scripts/cpu_agent.py` in a repo checkout only forwards to it; it used
 to be a separate, older copy.
 
@@ -120,7 +120,7 @@ done
 ## Fleet Standard (source of truth)
 
 Since 2026-10-20 one folder defines a CPU worker: `shared/scripts/cpu_worker/` in this repo, live on the
-share at `/media/bryan/shared/scripts/cpu_worker/` (the Pi checkout's `shared/` is the drive).
+share at `<pi-shared-root>/scripts/cpu_worker/` (the Pi checkout's `shared/` is the drive).
 
 | File | Role |
 |---|---|
@@ -141,8 +141,8 @@ Fleet:
 
 ```bash
 # from the Pi
-for i in 10 11 12 14 15 16 17; do ssh <worker-ip> bash /media/bryan/shared/scripts/cpu_worker/prepare_worker.sh; done
-for i in 10 11 12 14 15 16 17; do ssh <worker-ip> bash /media/bryan/shared/scripts/cpu_worker/check_worker.sh | grep -E "FAIL|failed"; done
+for i in 10 11 12 14 15 16 17; do ssh <worker-ip> bash <pi-shared-root>/scripts/cpu_worker/prepare_worker.sh; done
+for i in 10 11 12 14 15 16 17; do ssh <worker-ip> bash <pi-shared-root>/scripts/cpu_worker/check_worker.sh | grep -E "FAIL|failed"; done
 ```
 
 State 2026-10-20: workers 10-12 and 14-17 pass all checks (1.2-1.3 GB used each); an end-to-end test
@@ -154,7 +154,7 @@ standard in place with provisioning steps 5-7 and passes all checks.
 
 Image path:
 
-- `/media/bryan/shared/plans/shoulders/research_assistant/docs/worker-image.img.xz`
+- `<pi-shared-root>/plans/shoulders/research_assistant/docs/worker-image.img.xz`
 
 Last updated: 2026-10-20 (from worker 17 after `make_image_ready.sh`, 0 failed checks). Raw size
 7,910,457,344 bytes (fits any card of 8 GB or more), sha256 of the uncompressed image
@@ -165,14 +165,14 @@ Making a new image (needs the SD card in a Linux card reader, e.g. on the Pi):
 
 1. Pick the worker with the smallest card (worker 17, 8 GB; 14 and 16 have 16 GB, the rest 32 GB). An
    image only fits cards at least its size; first-boot grows the filesystem on larger ones.
-2. `ssh <worker-ip> bash /media/bryan/shared/scripts/cpu_worker/make_image_ready.sh` - prepares, checks
+2. `ssh <worker-ip> bash <pi-shared-root>/scripts/cpu_worker/make_image_ready.sh` - prepares, checks
    (stops on any FAIL), removes the first-boot flag, blanks the machine id, empties logs and history,
    then powers off.
 3. Move the card to the reader and find it with `lsblk`. On the Pi the shared drive is `/dev/sda`, so
    the card is another device (for example `/dev/sdb`); check the size before reading.
 4. Keep the old image and write the new one:
    ```bash
-   cd /media/bryan/shared/plans/shoulders/research_assistant/docs
+   cd <pi-shared-root>/plans/shoulders/research_assistant/docs
    mv worker-image.img.xz worker-image-20260323.img.xz
    sudo dd if=/dev/sdX bs=4M status=progress | xz -T0 -6 > worker-image.img.xz
    ```
@@ -195,14 +195,14 @@ the first-boot flag and machine id are gone.
 Burning:
 
 ```bash
-xzcat /media/bryan/shared/plans/shoulders/research_assistant/docs/worker-image.img.xz \
+xzcat <pi-shared-root>/plans/shoulders/research_assistant/docs/worker-image.img.xz \
   | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
 Image contents:
 
 - Armbian / Debian minimal (terminal-only), one ext4 partition (`armbi_root`), 1.2 GB used
-- Fleet standard from `prepare_worker.sh`: the Pi share fstab line (`<pi-ip>:/media/bryan/shared`),
+- Fleet standard from `prepare_worker.sh`: the Pi share fstab line (`<pi-ip>:<pi-shared-root>`),
   `/etc/sudoers.d/90-bryan-nopasswd`, `/opt/worker-env` matching `requirements.txt`, unattended
   updates and the other unused timers off
 - First-boot script at `/opt/first-boot.sh`, `first-boot.service` and `cpu-agent.service` enabled
@@ -215,23 +215,23 @@ Image contents:
 
 Expected shared mount on workers:
 
-- `/media/bryan/shared`
+- `<pi-shared-root>`
 
 Current required fstab line (normalized across workers 10-17). Since 2026-10-15 the share is served by
 the Pi (`<pi-ip>`), not the rig; workers still on the old `<rig-ip>:/mnt/shared` line need this change:
 
 ```fstab
-<pi-ip>:/media/bryan/shared /media/bryan/shared nfs nofail,_netdev,noauto,x-systemd.automount,x-systemd.mount-timeout=10s,nolock 0 0
+<pi-ip>:<pi-shared-root> <pi-shared-root> nfs nofail,_netdev,noauto,x-systemd.automount,x-systemd.mount-timeout=10s,nolock 0 0
 ```
 
 Expected runtime paths:
 
 - CPU agent:
-  - `/media/bryan/shared/scripts/cpu_agent.py`
+  - `<pi-shared-root>/scripts/cpu_agent.py`
 - CPU worker logs: the journal (`journalctl -u cpu-agent.service`); there is no
   `/var/log/cpu-agent/` file
 - config:
-  - `/media/bryan/shared/agents/config.json`
+  - `<pi-shared-root>/agents/config.json`
 
 The shared-script path is intentional. It keeps one runtime copy for all CPU
 workers.
@@ -299,19 +299,19 @@ The systemd service handles auto-start. These are fallback methods:
 Restart all default workers via SSH helper:
 
 ```bash
-/media/bryan/shared/scripts/restart_cpu_workers.sh
+<pi-shared-root>/scripts/restart_cpu_workers.sh
 ```
 
 Restart specific workers:
 
 ```bash
-/media/bryan/shared/scripts/restart_cpu_workers.sh <worker-ip> <worker-ip>
+<pi-shared-root>/scripts/restart_cpu_workers.sh <worker-ip> <worker-ip>
 ```
 
 Single-run smoke test:
 
 ```bash
-python3 /media/bryan/shared/scripts/cpu_agent.py --once --name cpu-worker-10
+python3 <pi-shared-root>/scripts/cpu_agent.py --once --name cpu-worker-10
 ```
 
 ---
@@ -336,9 +336,9 @@ python3 /media/bryan/shared/scripts/cpu_agent.py --once --name cpu-worker-10
 4. Verify: `ssh <worker-ip> 'hostname'` returns `worker-<octet>`
 5. Old (2026-03-23) image only, not needed with the 2026-10-20 image: point fstab at the Pi first, because `prepare_worker.sh` lives on the
    share (use `ssh root@...` if bryan's sudo asks for a password):
-   `ssh <worker-ip> "sudo sed -i 's#^<rig-ip>:/mnt/shared /media/bryan/shared #<pi-ip>:/media/bryan/shared /media/bryan/shared #' /etc/fstab && sudo systemctl daemon-reload && sudo systemctl restart media-bryan-shared.automount"`
-6. `ssh <worker-ip> bash /media/bryan/shared/scripts/cpu_worker/prepare_worker.sh`
-7. `ssh <worker-ip> bash /media/bryan/shared/scripts/cpu_worker/check_worker.sh` shows 0 failed
+   `ssh <worker-ip> "sudo sed -i 's#^<rig-ip>:/mnt/shared <pi-shared-root> #<pi-ip>:<pi-shared-root> <pi-shared-root> #' /etc/fstab && sudo systemctl daemon-reload && sudo systemctl restart media-bryan-shared.automount"`
+6. `ssh <worker-ip> bash <pi-shared-root>/scripts/cpu_worker/prepare_worker.sh`
+7. `ssh <worker-ip> bash <pi-shared-root>/scripts/cpu_worker/check_worker.sh` shows 0 failed
 
 Worker 13 was brought up this way on 2026-10-20 (steps 5-7 on its existing card).
 
@@ -351,7 +351,7 @@ The dashboard drops CPU workers whose heartbeats are older than 10 minutes
 
 1. Check if the Pi is reachable: `ping <worker-ip>`
 2. Check agent status: `ssh <worker-ip> 'systemctl status cpu-agent.service'`
-3. Check NFS mount: `ssh <worker-ip> 'mount | grep shared'` (should be `<pi-ip>:/media/bryan/shared`)
+3. Check NFS mount: `ssh <worker-ip> 'mount | grep shared'` (should be `<pi-ip>:<pi-shared-root>`)
 4. Check heartbeat file timestamp on shared drive
 
 ---
@@ -394,7 +394,7 @@ ssh <worker-ip> 'journalctl -u cpu-agent.service -u media-bryan-shared.mount -n 
 ```
 
 Common causes:
-- NFS mount not available (check fstab points at the Pi `<pi-ip>:/media/bryan/shared`, not the old
+- NFS mount not available (check fstab points at the Pi `<pi-ip>:<pi-shared-root>`, not the old
   `<rig-ip>:/mnt/shared`; check the Pi NFS server). Seen 2026-10-20: every worker still on the rig
   line, the mount timed out at boot and `cpu-agent.service` failed with result 'dependency'.
 - Permission error writing heartbeat (check file ownership on shared drive)

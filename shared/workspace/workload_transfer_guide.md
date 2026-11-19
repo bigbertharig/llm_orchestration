@@ -122,7 +122,7 @@ Do not use orchestration repo branches to carry plan/project code.
 Treat each plan folder as its own repo.
 
 Rules:
-1. Keep `/home/bryan/llm_orchestration` on `main` for operations.
+1. Keep `<orchestration-checkout>` on `main` for operations.
 2. Keep external project repos under `shared/plans/arms/<project_name>` or `shared/plans/shoulders/<project_name>` as independent git repos.
 3. For external upstream projects (for example `county-map`), keep them as direct clones/forks in their own arm repo.
 4. For rig-built integrations (for example `disaster-map-prep-suite`), create a separate arm repo owned by rig operators; do not keep it as a branch inside orchestration repo.
@@ -136,10 +136,10 @@ Decision matrix:
 Safe setup pattern:
 ```bash
 # orchestration runtime stays on main
-git -C /home/bryan/llm_orchestration rev-parse --abbrev-ref HEAD
+git -C <orchestration-checkout> rev-parse --abbrev-ref HEAD
 
 # initialize local-only plan repo when needed
-git -C /home/bryan/llm_orchestration/shared/plans/arms/<project_name> init -b main
+git -C <orchestration-checkout>/shared/plans/arms/<project_name> init -b main
 ```
 
 ---

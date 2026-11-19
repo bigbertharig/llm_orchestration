@@ -8,7 +8,7 @@ inform placement experiments. Last checked: 2026-11-15.
 |---|---|---|
 | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) | `llama-server` runtime used by rig loads and workers | Build and image procedure: [llama runtime README](shared/scripts/llama_runtime/README.md). Check the image digest and source commit recorded by a campaign before replacing a runtime. |
 | [Niko1221/Strata](https://github.com/Niko1221/Strata) | Optional `backend: strata` in the rig's managed remote load path | Rig release bundle `/data/bench-staging/strata-v0.2.10` (Control/engine 0.1.56); Pi source checkout `~/Strata` at `baf16363` on 2026-11-15. The new source checkout does not alter rig loads. See [managed runtime](README.md#managed-strata-runtime). |
-| [Helldez/BigMoeOnEdge](https://github.com/Helldez/BigMoeOnEdge) | Research source for expert placement; not the production runtime | Pi checkout `/media/bryan/shared/plans/shoulders/bigmoe-upstream` at `930b2c9` on 2026-11-15. Experimental ownership and evidence are in [benchmarking](https://github.com/bigbertharig/benchmarking/blob/master/EXPERT_TENSOR_SHARDING_RESEARCH.md). |
+| [Helldez/BigMoeOnEdge](https://github.com/Helldez/BigMoeOnEdge) | Research source for expert placement; not the production runtime | Local research checkout at `930b2c9` on 2026-11-15. Experimental ownership and evidence are in [benchmarking](https://github.com/bigbertharig/benchmarking/blob/master/EXPERT_TENSOR_SHARDING_RESEARCH.md). |
 
 ## Checking for updates
 

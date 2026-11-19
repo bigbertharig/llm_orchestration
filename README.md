@@ -17,6 +17,8 @@ This project runs local model and agent workloads across a Pi control host, an i
 
 Benchmarking publishes reviewed evidence; Gateway imports it and presents work to the operator; the rig-side Orchestration layer enforces hardware rules. Harness experiments consume prepared Gateway model routes. Gateway's current Manager still handles some admission and placement. Complete hardware reservations and placement are moving to Orchestration, so the target ownership and current code differ during the migration.
 
+Examples use role placeholders for hostnames, addresses, and mount paths. Replace them from a private site inventory before running commands.
+
 ## Read this repo
 
 - [System context](shared/workspace/CONTEXT.md): where components run and which guide owns each topic.

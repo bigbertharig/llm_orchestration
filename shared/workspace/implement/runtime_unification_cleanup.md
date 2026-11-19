@@ -44,7 +44,7 @@ Operational rule:
 
 1. Runtime image selection is hardcoded in agent/runtime code.
 2. Docs had stale wrapper paths and stale `status.py` expectations.
-3. Shared path assumptions drift between laptop (`/media/bryan/shared`) and rig (`/mnt/shared`).
+3. Shared path assumptions drift between laptop (`<pi-shared-root>`) and rig (`/mnt/shared`).
 4. Unmanaged debug containers can interfere with orchestrator-owned worker GPUs.
 5. Current llama runtime image is too old for Gemma 4.
 
@@ -76,7 +76,7 @@ Conclusion:
 6. Add preflight/cleanup handling for unmanaged runtime containers.
 7. Normalize path handling and docs around:
    - rig `<rig-ip>` -> `/mnt/shared/...`
-   - laptop `<pi-ip>` -> `/media/bryan/shared/...`
+   - laptop `<pi-ip>` -> `<pi-shared-root>/...`
 8. Run a system certification sweep after cleanup.
 
 ## Immediate Implementation Steps
@@ -112,7 +112,7 @@ Current next steps:
 New findings during `return_default.py` integration:
 - fixed: `_read_gpu_heartbeat()` had unreachable code and effectively returned `None` for all GPUs
 - fixed: `runtime_preflight.py` was flagging expected startup listeners as conflicts during managed `load_llm` transitions
-- fixed: repo-side `runtime_preflight.py` now normalizes shared-path aliases like `/home/bryan/llm_orchestration/shared/...` to rig paths before proxying
+- fixed: repo-side `runtime_preflight.py` now normalizes shared-path aliases like `<orchestration-checkout>/shared/...` to rig paths before proxying
 - fixed: `brain_plan.py` now substitutes plan variables into `llm_model`, `llm_min_tier`, and `llm_placement` instead of only command strings
 - fixed: `return_default.py` can now fall back to rig-side runtime probe results when heartbeat `model_loaded` state lags behind reality
 - fixed: `return_default.py` no longer uses a stale fixed `90s` wait budget by default; it derives wait time from the configured single-model load timeout/profile
