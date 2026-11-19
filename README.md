@@ -2,7 +2,7 @@
 
 Orchestration observes Big Bertha's hardware, enforces admission and reservations, controls model runtimes, and runs the legacy brain/worker batch queue. Gateway coordinates user work and still handles part of fit, placement, and loading. [Work organization](https://github.com/bigbertharig/llm-gateway/blob/main/docs/WORK_ORGANIZATION_DIRECTION.md) records the ownership migration.
 
-The rig reserves each admitted request's configured capacity until release. Unused tokens inside that reservation remain allocated. See the [rig hardware layer](shared/scripts/rig/README.md) for the operational contract.
+For each admitted chat, the rig reserves its configured context capacity, including KV memory, until release. A chat using fewer tokens still holds that reservation; this is capacity accounting, not billing. See the [rig hardware layer](shared/scripts/rig/README.md) for the operational contract.
 
 ## Project map
 
@@ -100,8 +100,9 @@ the shared drive, not the live mount, except on the Pi:
 - source: `~/llm_orchestration/shared`
 - live on the Pi: `<shared-drive-root>` (on the Pi, `~/llm_orchestration/shared` is a bind mount of the
   drive, so edits there are live at once)
-- live on the GPU rig: `/mnt/shared`; the rig's own checkout is a separate copy on local disk, and its
-  brain and GPU agents run from it (`git pull --ff-only pi main` there to update)
+- live on the GPU rig: `/mnt/shared` holds shared runtime state. The rig's own checkout is a separate
+  local copy for the brain and GPU agents; update its tracked code from the Pi checkout with
+  `git pull --ff-only pi main`. The Pi checkout is the deployment source and GitHub is the published remote.
 
 Compare source with the live drive, and deploy changed tracked files without deleting runtime files:
 
@@ -110,8 +111,9 @@ python3 scripts/sync_shared_source.py --live-root <shared-drive-root>           
 python3 scripts/sync_shared_source.py --live-root <shared-drive-root> --apply    # deploy
 ```
 
-The sync always excludes `shared/core/**` and `shared/agents/permissions/**`. Machine-specific configs and
-runtime state are not tracked.
+The sync always excludes `shared/core/**` and `shared/agents/permissions/**`. Those protected paths contain
+site-specific agent instructions and permissions and are provisioned outside Git; their contents are not
+required to inspect the published rig hardware layer. Machine-specific configs and runtime state are not tracked.
 
 ## Project structure
 
@@ -129,10 +131,10 @@ llm_orchestration/
     +-- tasks/ brain/ gpus/ cpus/ signals/ logs/   # runtime state (not in git)
 ```
 
-## License
-
-MIT
-
 ## Managed Strata runtime
 
 The rig's `rig start remote <id> --spec ...` path accepts `backend: strata` from the gateway manager. The rig uses the pinned Strata control under `/data/bench-staging/strata-v0.2.10`, launches only a registered pack on GPU 0, verifies API health and at least 4 GiB available host RAM, records the upstream model id, and stops the engine when the profile unloads. The existing rig plan, GPU lease, mode, and guard admission still own the hardware. A second Strata engine is refused. Qwen3.8 requires its prepared expert pack on disk; the load path does not download or repack one.
+
+## License
+
+MIT
