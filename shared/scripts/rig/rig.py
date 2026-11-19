@@ -1131,15 +1131,30 @@ def admit_lease_spec(spec: dict, hs: hw_state.HardwareState) -> dict:
                 for req in requirements):
             raise hw_state.StateError("invalid", "gpus_needed requires positive VRAM bounds per card")
         pool = sorted(free, key=lambda card: (card["total_mb"], card["index"]))
-        chosen = {}
-        for pos, req in sorted(enumerate(requirements), key=lambda item: -item[1]["min_vram_mb"]):
-            match = next((card for card in pool if req["min_vram_mb"] <= card["total_mb"]
-                          <= req.get("max_vram_mb", 1 << 30)), None)
-            if match is None:
-                detail = "; ".join(f"GPU {g}: {why}" for g, why in sorted(unavailable.items()))
-                raise hw_state.StateError("capacity", f"no capacity for {requirements}; {detail or 'no matching free card'}")
-            chosen[pos] = match["index"]
-            pool.remove(match)
+        options = {
+            pos: [card["index"] for card in pool if req["min_vram_mb"] <= card["total_mb"]
+                  <= req.get("max_vram_mb", 1 << 30)]
+            for pos, req in enumerate(requirements)
+        }
+        # Narrow bounded ranges must be assigned first, but a greedy choice
+        # can still strand a later request. Find a complete distinct-card fit.
+        order = sorted(options, key=lambda pos: (len(options[pos]), -requirements[pos]["min_vram_mb"]))
+
+        def match_cards(offset: int, used: set[int], chosen: dict[int, int]) -> dict[int, int] | None:
+            if offset == len(order):
+                return chosen
+            pos = order[offset]
+            for card_id in options[pos]:
+                if card_id not in used:
+                    result = match_cards(offset + 1, used | {card_id}, {**chosen, pos: card_id})
+                    if result is not None:
+                        return result
+            return None
+
+        chosen = match_cards(0, set(), {})
+        if chosen is None:
+            detail = "; ".join(f"GPU {g}: {why}" for g, why in sorted(unavailable.items()))
+            raise hw_state.StateError("capacity", f"no capacity for {requirements}; {detail or 'no matching free card'}")
         ids = [chosen[pos] for pos in range(len(requirements))]
     port = 11434 + min(ids)
     if port in live_ports():
@@ -1189,18 +1204,24 @@ def cmd_claim(args) -> int:
         if args.action == "list":
             return emit({"claims": hs.claims()})
         open_plan().require_active(args.controller)
-        if args.action == "add":
-            gpus = [int(g) for g in args.gpus.split(",")]
-            check_gpu_ids(gpus)
-            return emit({"claim": hs.add_claim(args.name, gpus, args.note, args.by or caller(), owner=args.owner,
-                                               ttl_s=args.ttl, purpose=args.purpose, model=args.model)})
-        if args.action == "extend":
-            gpus = [int(g) for g in args.gpus.split(",")]
-            check_gpu_ids(gpus)
-            return emit({"claim": hs.extend_claim(args.name, gpus, args.owner)})
-        if args.action == "renew":
-            return emit({"claim": hs.renew_claim(args.name, args.owner, args.ttl)})
-        return emit({"released": hs.remove_claim(args.name)})
+        # Claims and card selection share one admission lock. Otherwise a
+        # claim can appear after the lease reads claims but before it records
+        # the selected cards.
+        with hw_state.FileLock(str(HW_STATE_ROOT / "admission.lock"), timeout=10):
+            if args.action == "add":
+                gpus = [int(g) for g in args.gpus.split(",")]
+                check_gpu_ids(gpus)
+                return emit({"claim": hs.add_claim(args.name, gpus, args.note, args.by or caller(), owner=args.owner,
+                                                   ttl_s=args.ttl, purpose=args.purpose, model=args.model)})
+            if args.action == "extend":
+                gpus = [int(g) for g in args.gpus.split(",")]
+                check_gpu_ids(gpus)
+                return emit({"claim": hs.extend_claim(args.name, gpus, args.owner)})
+            if args.action == "renew":
+                return emit({"claim": hs.renew_claim(args.name, args.owner, args.ttl)})
+            return emit({"released": hs.remove_claim(args.name)})
+    except FileLockTimeout:
+        return emit({"error": "rig admission is busy; retry the claim request", "kind": "conflict"}, EXIT_FAIL)
     except (hw_state.StateError, hw_plan.PlanError) as exc:
         return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
 

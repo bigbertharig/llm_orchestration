@@ -12,6 +12,19 @@ import rig  # noqa: E402
 
 
 class ModeTests(unittest.TestCase):
+    def test_lease_admission_finds_complete_fit_for_bounded_cards(self):
+        cards = [{"index": 1, "total_mb": 6144, "used_mb": 0},
+                 {"index": 2, "total_mb": 8192, "used_mb": 0}]
+        state = Mock()
+        state.leases.return_value = []
+        state.claims.return_value = []
+        with patch.object(rig, "gpu_check", return_value={"ok": True, "visible": cards}), \
+             patch.object(rig, "llama_containers", return_value=[]), \
+             patch.object(rig, "live_ports", return_value={}):
+            chosen = rig.admit_lease_spec({"gpus_needed": [{"min_vram_mb": 5000},
+                                                         {"min_vram_mb": 5000, "max_vram_mb": 7000}]}, state)
+        self.assertEqual(chosen["gpu_ids"], [2, 1])
+
     def test_lease_admission_uses_live_smallest_fit_and_returns_specific_capacity(self):
         cards = [{"index": 0, "total_mb": 24576, "used_mb": 0},
                  {"index": 2, "total_mb": 8192, "used_mb": 0},
