@@ -1,6 +1,6 @@
 # Interactive Model Access
 
-> **Superseded 2026-10-15** by [model_roles.json](../../plans/shoulders/benchmarking/model_roles.json) (which model and settings to use per lane and job) and [model_registry.json](../../plans/shoulders/benchmarking/model_registry.json) (every tested model with its profiles), resolved by [scripts/active/model_library.py](../../plans/shoulders/benchmarking/scripts/active/model_library.py). Model choices, statuses, and settings in this document are history and are no longer updated; `models.catalog.json` and `model_tuning_profiles.json` are now generated from the registry.
+> **Superseded 2026-10-15** by [model_roles.json](https://github.com/bigbertharig/benchmarking/blob/master/model_roles.json) (which model and settings to use per lane and job) and [model_registry.json](https://github.com/bigbertharig/benchmarking/blob/master/model_registry.json) (every tested model with its profiles), resolved by [scripts/active/model_library.py](https://github.com/bigbertharig/benchmarking/blob/master/scripts/active/model_library.py). Model choices, statuses, and settings in this document are history and are no longer updated; `models.catalog.json` and `model_tuning_profiles.json` are now generated from the registry.
 
 Status: initial Pi-side API implemented on the
 `feature/interactive-model-access` branch.
@@ -61,7 +61,7 @@ ORCHESTRATOR_API_KEY=replace-me \
 python3 scripts/model_access_api.py \
   --host 127.0.0.1 \
   --port 8790 \
-  --shared-root /media/bryan/shared \
+  --shared-root <pi-shared-root> \
   --rig-host <rig-ip>
 ```
 

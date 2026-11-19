@@ -44,7 +44,7 @@ ls ~/llm_orchestration/shared/tasks/{queue,processing,complete}/ 2>/dev/null | h
 
 Notes:
 - there is no supported shared `status.py` helper under `/mnt/shared` right now
-- on the rig, prefer `/mnt/shared/...`; on the laptop, prefer `/media/bryan/shared/...`
+- on the rig, prefer `/mnt/shared/...`; on the laptop, prefer `<pi-shared-root>/...`
 - when a wrapper proxies to the rig, pass shared paths that normalize cleanly to rig-visible paths
 - worker runtime ports such as `11435+` are rig-local; run direct-to-port benchmark/custom harnesses on `<rig-ip>` or through an explicit proxy/tunnel
 
@@ -73,7 +73,7 @@ cd /mnt/shared/agents
 python3 startup.py
 ```
 
-- The operator-side checkout on the laptop may still be `/home/bryan/llm_orchestration`;
+- The operator-side checkout on the laptop may still be `<orchestration-checkout>`;
   keep that repo on `main` for live orchestration scripts.
 
 What `startup.py` is responsible for:
@@ -130,7 +130,7 @@ Canonical ownership:
 - Split-pair model changes: `load_split_llm` / `unload_split_llm`
 
 Authoritative runtime implementation:
-- `/media/bryan/shared/agents/gpu_tasks.py`
+- `<pi-shared-root>/agents/gpu_tasks.py`
 
 Why this matters:
 - heartbeats stay accurate
@@ -179,7 +179,7 @@ Path notes:
 - for file-based config values, prefer shared paths that the rig can open directly
 - the wrapper normalizes these shared aliases:
   - `~/llm_orchestration/shared/...`
-  - `/media/bryan/shared/...`
+  - `<pi-shared-root>/...`
   - `/mnt/shared/...`
 
 ### Dashboard Path
@@ -187,7 +187,7 @@ Path notes:
 Start dashboard:
 
 ```bash
-/media/bryan/shared/scripts/start_dashboard.sh
+<pi-shared-root>/scripts/start_dashboard.sh
 ```
 
 Use:
@@ -269,8 +269,8 @@ Use these commands when you want to inspect completed or failed runs. These are 
 Shared summarizer:
 
 ```bash
-python3 /media/bryan/shared/scripts/summarize_history_run.py \
-  --history-dir /media/bryan/shared/plans/<shoulder-or-arm>/<plan_name>/history/<batch_id>
+python3 <pi-shared-root>/scripts/summarize_history_run.py \
+  --history-dir <pi-shared-root>/plans/<shoulder-or-arm>/<plan_name>/history/<batch_id>
 ```
 
 What it does:
@@ -281,7 +281,7 @@ What it does:
 Output location:
 
 ```text
-/media/bryan/shared/plans/<shoulder-or-arm>/<plan_name>/history/<batch_id>/RUN_SUMMARY.md
+<pi-shared-root>/plans/<shoulder-or-arm>/<plan_name>/history/<batch_id>/RUN_SUMMARY.md
 ```
 
 ### Many Batches
@@ -290,7 +290,7 @@ Repo rollup tool:
 
 ```bash
 python3 ~/llm_orchestration/scripts/rollup_history.py \
-  /media/bryan/shared/plans/<shoulder-or-arm>/<plan_name>/history
+  <pi-shared-root>/plans/<shoulder-or-arm>/<plan_name>/history
 ```
 
 What it writes:
@@ -302,8 +302,8 @@ What it writes:
 Typical follow-up commands:
 
 ```bash
-cat /media/bryan/shared/plans/<shoulder-or-arm>/<plan_name>/history/_summary/ROLLUP_SUMMARY.md
-tail -n 20 /media/bryan/shared/plans/<shoulder-or-arm>/<plan_name>/history/_summary/failures.jsonl
+cat <pi-shared-root>/plans/<shoulder-or-arm>/<plan_name>/history/_summary/ROLLUP_SUMMARY.md
+tail -n 20 <pi-shared-root>/plans/<shoulder-or-arm>/<plan_name>/history/_summary/failures.jsonl
 ```
 
 ### Runtime-Focused Review
@@ -319,9 +319,9 @@ state, but localhost runtime probes and `nvidia-smi` will usually be wrong or mi
 #   python3 /mnt/shared/scripts/batch_runtime_diag.py --batch-id <batch_id> --shared-path /mnt/shared
 #
 # laptop-side fallback:
-python3 /media/bryan/shared/scripts/batch_runtime_diag.py \
+python3 <pi-shared-root>/scripts/batch_runtime_diag.py \
   --batch-id <batch_id> \
-  --shared-path /media/bryan/shared
+  --shared-path <pi-shared-root>
 ```
 
 Use this after:
@@ -336,9 +336,9 @@ What it writes:
 ### Script Location Rule
 
 Use the exact script paths below:
-- `/media/bryan/shared/scripts/summarize_history_run.py` for one batch
+- `<pi-shared-root>/scripts/summarize_history_run.py` for one batch
 - `~/llm_orchestration/scripts/rollup_history.py` for many batches
-- `/media/bryan/shared/scripts/batch_runtime_diag.py` for runtime diagnosis
+- `<pi-shared-root>/scripts/batch_runtime_diag.py` for runtime diagnosis
 
 Do not guess the path or omit required flags. The one-batch summarizer requires `--history-dir`.
 The runtime diagnostic helper requires `--batch-id`.
@@ -424,14 +424,14 @@ Or stop the foreground `startup.py` process with `Ctrl+C`.
 
 ## Branch Safety
 
-Keep `/home/bryan/llm_orchestration` on `main` for live rig operations.
+Keep `<orchestration-checkout>` on `main` for live rig operations.
 
 Do not switch that repo to feature branches during runtime work. Use a separate git worktree for feature development.
 
 Check before running orchestration commands:
 
 ```bash
-git -C /home/bryan/llm_orchestration rev-parse --abbrev-ref HEAD
+git -C <orchestration-checkout> rev-parse --abbrev-ref HEAD
 ```
 
 Expected output:

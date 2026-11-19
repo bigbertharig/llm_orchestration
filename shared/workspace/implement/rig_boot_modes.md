@@ -1,6 +1,6 @@
 # Rig Boot Modes + Published Model Profiles
 
-> **Superseded 2026-10-15** by [model_roles.json](../../plans/shoulders/benchmarking/model_roles.json) (which model and settings to use per lane and job) and [model_registry.json](../../plans/shoulders/benchmarking/model_registry.json) (every tested model with its profiles), resolved by [scripts/active/model_library.py](../../plans/shoulders/benchmarking/scripts/active/model_library.py). Model choices, statuses, and settings in this document are history and are no longer updated; `models.catalog.json` and `model_tuning_profiles.json` are now generated from the registry.
+> **Superseded 2026-10-15** by [model_roles.json](https://github.com/bigbertharig/benchmarking/blob/master/model_roles.json) (which model and settings to use per lane and job) and [model_registry.json](https://github.com/bigbertharig/benchmarking/blob/master/model_registry.json) (every tested model with its profiles), resolved by [scripts/active/model_library.py](https://github.com/bigbertharig/benchmarking/blob/master/scripts/active/model_library.py). Model choices, statuses, and settings in this document are history and are no longer updated; `models.catalog.json` and `model_tuning_profiles.json` are now generated from the registry.
 
 Status: v1 IMPLEMENTED 2026-10-06 (work items 1, 2, and a first cut of 5). Verified: reboot -> idle,
 all three modes start/stop, busy refusal, --force switch. Items 3-4 still open.
@@ -23,7 +23,7 @@ v1.1 (2026-10-06, desktop spec "rig gateway + dynamic remote_profiles"):
   `rig status --json`. The lock is held only for state changes, never while a model loads.
 - Gateway: `~/llm-gateway` (stdlib, no deps) as `rig-gateway.service` on the rig, 127.0.0.1:8080.
   Verified on the rig: model list, warm stream/non-stream, 404, cold on-demand load (25s for coder-7b).
-Related: `/home/bryan/Desktop/CLAUDE_COORDINATION.md`.
+Related: `private local coordination note`.
 
 ## Principle: keep it basic
 

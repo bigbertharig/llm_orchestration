@@ -75,7 +75,7 @@ operator wants non-conflicting mixed work.
 Acquire GPUs 1 and 3 atomically for a Plan controller:
 
 ```bash
-ssh gpu /home/bryan/llm-orchestration-venv/bin/python \
+ssh gpu <orchestration-venv>/bin/python \
   /mnt/shared/scripts/manage_gpu_lease.py \
   --shared-path /mnt/shared acquire \
   --controller plans \
@@ -88,7 +88,7 @@ ssh gpu /home/bryan/llm-orchestration-venv/bin/python \
 Inspect leases:
 
 ```bash
-ssh gpu /home/bryan/llm-orchestration-venv/bin/python \
+ssh gpu <orchestration-venv>/bin/python \
   /mnt/shared/scripts/manage_gpu_lease.py \
   --shared-path /mnt/shared list
 ```
@@ -96,7 +96,7 @@ ssh gpu /home/bryan/llm-orchestration-venv/bin/python \
 Renew an owned lease:
 
 ```bash
-ssh gpu /home/bryan/llm-orchestration-venv/bin/python \
+ssh gpu <orchestration-venv>/bin/python \
   /mnt/shared/scripts/manage_gpu_lease.py \
   --shared-path /mnt/shared renew \
   --lease-id LEASE_ID \
@@ -106,7 +106,7 @@ ssh gpu /home/bryan/llm-orchestration-venv/bin/python \
 Release an owned lease:
 
 ```bash
-ssh gpu /home/bryan/llm-orchestration-venv/bin/python \
+ssh gpu <orchestration-venv>/bin/python \
   /mnt/shared/scripts/manage_gpu_lease.py \
   --shared-path /mnt/shared release \
   --lease-id LEASE_ID \
