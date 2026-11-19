@@ -42,6 +42,7 @@ def build(source: Path) -> tuple[dict, dict, dict, dict]:
     registry, roles, recipes, catalog, tuning = (artifact[key] for key in
         ("registry", "roles", "load_recipes", "models_catalog", "tuning_profiles"))
     resolved_tuning = artifact["resolved_tuning_profiles"]
+    subagents = artifact["subagent_catalog"]
     if registry.get("schema") != "model-registry/1" or roles.get("schema") != "model-roles/1":
         raise ValueError("unsupported benchmarking registry or roles schema")
     if recipes.get("schema_version") != 1 or not isinstance(recipes.get("recipes"), dict):
@@ -50,6 +51,8 @@ def build(source: Path) -> tuple[dict, dict, dict, dict]:
         raise ValueError("benchmarking tuning profiles have no models")
     if not isinstance(resolved_tuning, dict) or set(resolved_tuning) != set(tuning["models"]):
         raise ValueError("benchmarking resolved tuning profiles are incomplete")
+    if subagents.get("schema_version") != 1 or not isinstance(subagents.get("candidates"), dict):
+        raise ValueError("benchmarking subagent catalog is invalid")
     models = registry.get("models")
     if not isinstance(models, dict) or not models:
         raise ValueError("benchmarking registry has no models")
@@ -65,6 +68,7 @@ def build(source: Path) -> tuple[dict, dict, dict, dict]:
         "registry": registry,
         "roles": roles,
         "load_recipes": recipes,
+        "subagent_catalog": subagents,
         "resolved_tuning_profiles": resolved_tuning,
     }
     # The local interactive model list is a planning projection, not a ready roster.
@@ -102,6 +106,8 @@ def report(snapshot: dict, catalog: dict, access: dict, tuning: dict) -> dict:
         "roles": changes(old.get("roles", {}).get("roles", {}), snapshot["roles"]["roles"]),
         "load_recipes": changes(old.get("load_recipes", {}).get("recipes", {}),
                                 snapshot["load_recipes"]["recipes"]),
+        "subagents": changes(old.get("subagent_catalog", {}).get("candidates", {}),
+                             snapshot["subagent_catalog"]["candidates"]),
         "catalog_changed": old_catalog != catalog or CATALOG.read_text(encoding="utf-8") != rendered(catalog),
         "interactive_models_changed": old_access != access,
         "tuning_profiles_changed": old_tuning != tuning,

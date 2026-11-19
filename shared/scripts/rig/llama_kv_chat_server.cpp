@@ -78,6 +78,21 @@ int main(int argc, char **argv) {
     const std::string kv_type = argv[4];
     if (kv_type != "q4_0" && kv_type != "f16") return 2;
     const bool nemo = kv_type == "f16";
+    const char *shared_gpu_env = std::getenv("KV_ALLOW_SHARED_GPU");
+    const bool allow_shared_gpu = shared_gpu_env && std::string(shared_gpu_env) == "1";
+    int main_context_cap = cap;
+    if (const char *main_cap_env = std::getenv("KV_MAIN_CONTEXT_CAP")) {
+        try {
+            main_context_cap = std::stoi(main_cap_env);
+        } catch (...) {
+            std::fprintf(stderr, "invalid KV_MAIN_CONTEXT_CAP\n");
+            return 2;
+        }
+        if (main_context_cap != 0 && (main_context_cap < 16384 || main_context_cap > cap)) {
+            std::fprintf(stderr, "KV_MAIN_CONTEXT_CAP must be 0 or 16384..service maximum\n");
+            return 2;
+        }
+    }
     ggml_backend_load_all();
     auto mp = llama_model_default_params();
     mp.n_gpu_layers = 99;
@@ -125,10 +140,14 @@ int main(int argc, char **argv) {
     std::shared_mutex lifecycle;
     std::map<std::string, std::shared_ptr<session>> sessions;
     auto add = [&](const std::string &id, int gpu, int context_cap) -> bool {
+        const size_t worker_count = sessions.size() - (sessions.count("main") ? 1 : 0);
         if (id.empty() || id.size() > 64 || !std::regex_match(id, std::regex("[A-Za-z0-9_-]+")) || gpu < 0 || gpu > 5 ||
-                (nemo && gpu != 0 && gpu != 5) ||
-                context_cap < 16384 || context_cap > cap || sessions.count(id)) return false;
-        for (const auto &[_, item] : sessions) if (item->gpu == gpu) return false;
+                (nemo && gpu != 0 && gpu != 5 && !allow_shared_gpu) ||
+                context_cap < 16384 || context_cap > cap || sessions.count(id) ||
+                (nemo && id != "main" && worker_count >= 4)) return false;
+        if (!allow_shared_gpu) {
+            for (const auto &[_, item] : sessions) if (item->gpu == gpu) return false;
+        }
         auto item = std::make_shared<session>();
         item->id = id; item->gpu = gpu; item->cap = context_cap;
         llama_kv_chat_select(gpu, -1);
@@ -143,11 +162,13 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "CHAT_ATTACHED id=%s gpu=%d cap=%d\n", id.c_str(), gpu, context_cap);
         return true;
     };
-    if (!add("main", 0, cap)) return 4;
+    if (main_context_cap != 0 && !add("main", 0, main_context_cap)) return 4;
     httplib::Server server;
     server.Get("/health", [&](const httplib::Request &, httplib::Response &res) {
         std::shared_lock lock(lifecycle);
-        reply(res, 200, {{"status","ok"},{"model_loaded",true},{"chats",sessions.size()}});
+        reply(res, 200, {{"status","ok"},{"model_loaded",true},{"chats",sessions.size()},
+                         {"allow_shared_gpu",allow_shared_gpu},
+                         {"main_context_cap",main_context_cap}});
     });
     server.Get("/chats", [&](const httplib::Request &, httplib::Response &res) {
         std::shared_lock lock(lifecycle);
@@ -165,13 +186,14 @@ int main(int argc, char **argv) {
         const std::string id = body["chat_id"].get<std::string>();
         const int gpu = body["gpu"].get<int>();
         const int context_cap = body.value("context_cap", cap);
-        if (gpu < 1 || gpu > 5 || (nemo && gpu != 5)) {
-            reply(res,400,{{"error",nemo ? "Nemo attached chat must use GPU5" : "worker GPU must be 1..5"}}); return;
+        if (gpu < 1 || gpu > 5 || (nemo && gpu != 5 && !allow_shared_gpu)) {
+            reply(res,400,{{"error",nemo ? "Nemo attached chat must use GPU5 outside probe mode" : "worker GPU must be 1..5"}}); return;
         }
         if (context_cap < 16384 || context_cap > cap) { reply(res,400,{{"error","context_cap must be 16384..service maximum"}}); return; }
         std::unique_lock lock(lifecycle);
         if (!add(id,gpu,context_cap)) { reply(res,409,{{"error","chat ID or GPU in use, or allocation failed"}}); return; }
-        reply(res,201,{{"chat_id",id},{"gpu",gpu},{"context_cap",context_cap},{"parent","main"}});
+        reply(res,201,{{"chat_id",id},{"gpu",gpu},{"context_cap",context_cap},
+                       {"parent",main_context_cap == 0 ? "service" : "main"}});
     });
     server.Delete(R"(/chats/([A-Za-z0-9_-]+))", [&](const httplib::Request &req, httplib::Response &res) {
         const std::string id = req.matches[1];
