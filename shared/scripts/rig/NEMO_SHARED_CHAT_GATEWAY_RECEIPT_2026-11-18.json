@@ -1,0 +1,74 @@
+{
+  "started_at": "2026-11-18T23:04:25.324126+00:00",
+  "parent_route": "gpu-rig/shared-nemo-main",
+  "admission": {
+    "agent_type": "research",
+    "candidate_id": "nemotron74_shared_1060",
+    "route": "gpu-rig/shared-nemo-child-35166edb27e446a0",
+    "model": "nemotron-3.5-bolt:74b-a9b",
+    "gpu_ids": [
+      5
+    ],
+    "context_length": 262144,
+    "state": "ready",
+    "parent_route": "gpu-rig/shared-nemo-main",
+    "ephemeral": true,
+    "service_instance_id": "95764d53fecb44f4bd5b5f3c315b6738",
+    "reservation": {
+      "reservation_id": "de77574e7c8648c3b2dc5e1c36ce886d",
+      "service_instance_id": "95764d53fecb44f4bd5b5f3c315b6738",
+      "context_capacity": 262144,
+      "occupied_tokens": 0,
+      "placement": {
+        "gpus": [
+          5
+        ]
+      },
+      "reserved_mib": 6144,
+      "reservation_scope": "gpu_exclusive",
+      "claim": "nemo74-kv-chat-child-35166edb27e446a0"
+    },
+    "admission": {
+      "mode": "shared_model",
+      "service_instance_id": "95764d53fecb44f4bd5b5f3c315b6738",
+      "reservation_id": "de77574e7c8648c3b2dc5e1c36ce886d",
+      "requested_context_tokens": null,
+      "served_context_tokens": 262144,
+      "reservation": {
+        "reservation_id": "de77574e7c8648c3b2dc5e1c36ce886d",
+        "service_instance_id": "95764d53fecb44f4bd5b5f3c315b6738",
+        "context_capacity": 262144,
+        "occupied_tokens": 0,
+        "placement": {
+          "gpus": [
+            5
+          ]
+        },
+        "reserved_mib": 6144,
+        "reservation_scope": "gpu_exclusive",
+        "claim": "nemo74-kv-chat-child-35166edb27e446a0"
+      }
+    }
+  },
+  "main_answer": "MAIN",
+  "child_answer": "WORKER",
+  "release": {
+    "released": "gpu-rig/shared-nemo-child-35166edb27e446a0",
+    "service_instance_id": "95764d53fecb44f4bd5b5f3c315b6738",
+    "released_reservation": {
+      "reservation_id": "de77574e7c8648c3b2dc5e1c36ce886d",
+      "service_instance_id": "95764d53fecb44f4bd5b5f3c315b6738",
+      "context_capacity": 262144,
+      "occupied_tokens": 0,
+      "placement": {
+        "gpus": [
+          5
+        ]
+      },
+      "reserved_mib": 6144,
+      "reservation_scope": "gpu_exclusive",
+      "claim": "nemo74-kv-chat-child-35166edb27e446a0"
+    }
+  },
+  "finished_at": "2026-11-18T23:04:28.619330+00:00"
+}
