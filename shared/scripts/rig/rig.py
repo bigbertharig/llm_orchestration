@@ -2,7 +2,6 @@
 """Rig mode selector. Runs on the GPU rig; other machines call it over SSH.
 
     ssh rig rig status [--json]
-    ssh rig rig start orchestration [--force]
     ssh rig rig start remote [profile ...] [--force]
     ssh rig rig start remote <id> --spec JSON --gpus G --port P   any model, placed by the rig manager
     ssh rig rig stop [profile ...]
@@ -58,19 +57,8 @@ LAYOUT_PATH = HW_STATE_ROOT / "gpu_layout.json"
 # operator runs `rig scan`; consumers must check observed_at before using it.
 INVENTORY_PATH = HW_STATE_ROOT / "hardware_inventory.json"
 
-# Stack modes run startup.py under these systemd units (installed from ./systemd/).
-STACK_UNITS = {
-    "orchestration": "llm-orchestration.service",
-}
-# control_policy profile written once a mode is ready.
-MODE_POLICY = {
-    "orchestration": "plan_ready",
-    "bench": "custom",
-    "remote": "custom",
-}
-MODES = ("orchestration", "bench", "remote")
+MODES = ("bench", "remote")
 LOAD_MODES = ("bench", "remote")  # modes made of manager or published profile loads (additive)
-BRAIN_PORT = 11434
 # Remote profiles get the lowest free port in this range (all inside the desktop rig-llm tunnel).
 REMOTE_PORTS = range(11434, 11442)
 REMOTE_CONTAINER_PREFIX = "rig-remote-"
@@ -81,7 +69,6 @@ STRATA_HOME = Path("/data/bench-staging/strata-v0.2.10/home-rig")
 
 # A GPU counts as free for remote placement only if nearly empty (catches strays).
 GPU_FREE_MAX_USED_MB = 1000
-STACK_READY_TIMEOUT_S = 600
 REMOTE_READY_TIMEOUT_S = 600
 # A queued (detached) remote load waits this long for its turn while another load runs.
 REMOTE_QUEUE_TIMEOUT_S = 1800
@@ -138,14 +125,6 @@ def save_state(state: dict) -> dict:
     return state
 
 
-def shared_available() -> bool:
-    # At boot the NFS automount can answer ENODEV before it is up (rig-boot.service failed on it).
-    try:
-        return (SHARED / "agents").is_dir()
-    except OSError:
-        return False
-
-
 def write_state(**fields) -> dict:
     state = {"mode": "idle", "status": "idle", "since": now_iso(), "from": caller()}
     state.update(fields)
@@ -177,17 +156,6 @@ class Lock:
         self.fh.close()
 
 
-def write_policy(profile: str, reason: str) -> None:
-    # Only the orchestrator stack reads the policy, and it reads it from network storage.
-    if not shared_available():
-        say(f"  note: {SHARED} not available; control policy not written")
-        return
-    sys.path.insert(0, str(LOCAL / "agents"))
-    from control_policy import write_control_policy
-
-    write_control_policy(SHARED, profile, reason=reason, updated_by="rig")
-
-
 # ---------------------------------------------------------------- probes
 
 def run(cmd: list[str], check: bool = True, timeout: int | None = 60) -> subprocess.CompletedProcess:
@@ -195,14 +163,6 @@ def run(cmd: list[str], check: bool = True, timeout: int | None = 60) -> subproc
     if check and proc.returncode != 0:
         raise RigError(f"command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr.strip()}")
     return proc
-
-
-def config_gpu_ids() -> list[int]:
-    """Cards the orchestration stack's config names (brain + workers). Only that stack needs them."""
-    cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    ids = [int(g) for g in cfg["brain"]["gpus"]]
-    ids += [int(g["id"]) for g in cfg.get("gpus", [])]
-    return sorted(ids)
 
 
 def read_layout() -> dict:
@@ -252,14 +212,10 @@ def gpu_check() -> dict:
     if not visible and not errors:
         errors = ["no GPU visible"]
     ids = {g["index"] for g in visible}
-    try:
-        not_present = sorted(set(config_gpu_ids()) - ids)
-    except (OSError, ValueError, KeyError):
-        not_present = []
     layout = read_layout()
     return {"ok": not errors, "visible": visible, "ids": sorted(ids), "errors": errors[:5],
             "changes": layout_changes(layout.get("gpus", []), visible),
-            "since_boot": layout.get("changes_at_boot", []), "config_not_present": not_present}
+            "since_boot": layout.get("changes_at_boot", [])}
 
 
 def pci_route(bus: str) -> dict:
@@ -290,8 +246,6 @@ def gpu_notes(g: dict) -> list[str]:
     notes = link_notes(g["visible"])
     notes += [f"changed since boot: {c}" for c in g["changes"]]
     notes += [f"changed at boot from the last layout: {c}" for c in g["since_boot"]]
-    if g["config_not_present"]:
-        notes.append(f"orchestration config names GPU {g['config_not_present']}, not present on this rig")
     return notes
 
 
@@ -451,10 +405,6 @@ def why_runtime(port: int | None = None, container: str | None = None) -> dict:
             "oom_kills": kills[-5:], "log_tail": (logs.stdout + logs.stderr).strip().splitlines()[-5:]}
 
 
-def unit_active(unit: str) -> bool:
-    return run(["systemctl", "is-active", "--quiet", unit], check=False).returncode == 0
-
-
 # ---------------------------------------------------------------- stop
 
 def strata_env() -> dict[str, str]:
@@ -477,18 +427,13 @@ def stop_everything() -> None:
         run([sys.executable, str(LOCAL / "scripts/rig/kv_chat_control.py"), "stop"], timeout=90)
     if any(e.get("backend") == "strata" for e in read_state().get("profiles", {}).values()):
         stop_strata()
-    for unit in STACK_UNITS.values():
-        if unit_active(unit):
-            say(f"  stopping {unit}")
-            run(["sudo", "-n", "systemctl", "stop", unit], timeout=90)
-    # Orchestrator-owned llama containers outlive startup.py, so remove them explicitly.
+    # Remove managed llama containers before returning to idle.
     for name in running_model_containers():
         say(f"  removing container {name}")
         run(["docker", "rm", "-f", name], check=False, timeout=60)
     leftovers = live_ports()
     if leftovers:
         raise RigError(f"model ports still serving after stop: {leftovers}")
-    write_policy("neutral", "rig_idle")
     write_state(mode="idle", status="idle")
 
 
@@ -503,7 +448,6 @@ def drop_remote_profile(state: dict, pid: str, error: str | None = None) -> dict
     if error:
         state["error"] = error
     if not state.get("profiles"):
-        write_policy("neutral", "rig_idle")
         return save_state({"mode": "idle", "status": "idle", "since": now_iso(),
                            "from": caller(), **({"error": error} if error else {})})
     return save_state(refresh_remote_status(state))
@@ -513,80 +457,6 @@ def refresh_remote_status(state: dict) -> dict:
     loading = any(p["state"] == "loading" for p in state["profiles"].values())
     state["status"] = "loading" if loading else "ready"
     return state
-
-
-# ---------------------------------------------------------------- stack modes
-
-def start_stack(mode: str) -> dict:
-    unit = STACK_UNITS[mode]
-    started = time.time()
-    say(f"  starting {unit}")
-    run(["sudo", "-n", "systemctl", "start", unit], timeout=60)
-    worker_ids = [int(g["id"]) for g in json.loads(CONFIG_PATH.read_text())["gpus"]]
-    deadline = started + STACK_READY_TIMEOUT_S
-    last_note = 0.0
-    while time.time() < deadline:
-        if not unit_active(unit):
-            tail = run(["journalctl", "-u", unit, "-n", "15", "--no-pager"], check=False).stdout
-            raise RigError(f"{unit} exited during startup:\n{tail}")
-        brain_ok = http_get(f"http://127.0.0.1:{BRAIN_PORT}/health")[0] == 200
-        fresh = [
-            w for w in worker_ids
-            if (hb := SHARED / "gpus" / f"gpu_{w}" / "heartbeat.json").exists()
-            and hb.stat().st_mtime > started
-        ]
-        if brain_ok and len(fresh) == len(worker_ids):
-            break
-        if time.time() - last_note > 30:
-            say(f"  waiting: brain={'up' if brain_ok else 'loading'} workers={len(fresh)}/{len(worker_ids)}")
-            last_note = time.time()
-        time.sleep(3)
-    else:
-        raise RigError(f"{mode} not ready within {STACK_READY_TIMEOUT_S}s")
-    write_policy(MODE_POLICY[mode], f"rig_start_{mode}")
-    return {"unit": unit, "ports": {BRAIN_PORT: served_model(BRAIN_PORT)}}
-
-
-def cmd_start_stack(args) -> int:
-    with Lock():
-        st = read_state()
-        if st["mode"] != "idle":
-            if not args.force:
-                return report_busy(st, args.mode)
-            say(f"stopping {st['mode']} (forced by {caller()})...")
-            stop_everything()
-        if not shared_available():
-            raise RigError(f"{args.mode} needs network storage at {SHARED}, which is not available")
-        g = gpu_check()
-        if not g["ok"]:
-            raise RigError(f"GPU fault: {g['errors']}; power-cycle the rig")
-        # The stack runs a worker per configured card, so here the config's cards are a requirement.
-        if g["config_not_present"]:
-            raise RigError(f"{args.mode} config names GPU {g['config_not_present']}, not present (rig has "
-                           f"{g['ids']}); update {CONFIG_PATH} for this layout")
-        say(f"starting {args.mode}...")
-        write_state(mode=args.mode, status="starting")
-        try:
-            detail = start_stack(args.mode)
-        except Exception as exc:
-            say(f"FAILED: {exc}")
-            say("cleaning up -> idle")
-            try:
-                stop_everything()
-            finally:
-                write_state(mode="idle", status="idle", error=f"{args.mode}: {str(exc)[:500]}")
-            return EXIT_FAIL
-        write_state(mode=args.mode, status="ready", detail=detail)
-    say(f"done: {args.mode} ready")
-    for port, what in detail.get("ports", {}).items():
-        say(f"  :{port}  {what}")
-    return 0
-
-
-def report_busy(st: dict, wanted: str) -> int:
-    say(f"busy: {st['mode']} ({st['status']}, since {st.get('since')}, from {st.get('from')})")
-    say(f"re-run with --force to stop {st['mode']} and start {wanted}")
-    return EXIT_BUSY
 
 
 # ---------------------------------------------------------------- remote mode
@@ -798,8 +668,6 @@ def claim_remote(requested: list[str], force: bool, placement: dict | None = Non
             raise RigError(f"guard {level}: load held: {why}", EXIT_LOCKED)
         if level == "unknown":
             say(f"  warning: {why}; loading without the guard")
-    if entering:
-        write_policy(MODE_POLICY[mode], f"rig_start_{mode}")
     for pid, gpus, port in plan:
         p = profiles[pid]
         say(f"  loading {pid} ({p['model']}) on GPU {gpus} -> :{port}")
@@ -1047,7 +915,7 @@ def cmd_status(args) -> int:
     say(f"guard: {gs['level']} (loads {'admitted' if gs['loads_admitted'] else 'held'}) {gs['why']}")
     ports = live_ports()
     say("ports: " + (", ".join(f":{p} {m}" for p, m in ports.items()) if ports else "none serving"))
-    if s["mode"] == "idle" and (ports or any(unit_active(u) for u in STACK_UNITS.values())) and not s["shared_kv_service"]:
+    if s["mode"] == "idle" and ports and not s["shared_kv_service"]:
         say("WARNING: state says idle but something is running; run `rig stop` to clean up")
     return 0
 
@@ -1491,9 +1359,7 @@ def cmd_start(args) -> int:
         raise RigError("bench mode starts with a benchmark load through the rig manager "
                        "(rigctl load-model MODEL --use benchmark, or a lane or campaign); it ends when the last "
                        "profile is unloaded")
-    if args.profiles:
-        raise RigError("profiles are only valid for remote mode")
-    return cmd_start_stack(args)
+    raise RigError("use a manager load request to start a model")
 
 
 def cmd_stop(args) -> int:
@@ -1542,7 +1408,6 @@ def cmd_boot(_args) -> int:
     layout is kept with it as a note (a card may have dropped out, or been moved on purpose)."""
     with Lock():
         g = gpu_check()
-        write_policy("neutral", "rig_idle")
         err = None if g["ok"] else f"boot GPU fault: {g['errors']}"
         write_state(mode="idle", status="idle", **({"error": err} if err else {}), **{"from": "boot"})
         if g["visible"]:
@@ -1557,8 +1422,6 @@ def cmd_boot(_args) -> int:
         say(f"  note: changed from the last layout: {c}")
     for n in link_notes(g["visible"]):
         say(f"  note: {n}")
-    if g["config_not_present"]:
-        say(f"  note: orchestration config names GPU {g['config_not_present']}, not present on this rig")
     return 0 if g["ok"] else EXIT_FAIL
 
 

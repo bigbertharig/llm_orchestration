@@ -163,9 +163,7 @@ rig-local `brain/hw/gpu_layout.json`, along with what changed from the previous 
 or moved to another index or bus). `rig status`, `rig observe` (`gpu_scan`) and the start of a load report those
 changes as notes, plus any card behind a switch or trained below the best link gen of the others (on this
 board, slots C17/C18: benchmarking `RIG_PERFORMANCE.md`). Leases, claims and placements are checked against the cards present now. `kill` also takes a
-card that is no longer visible while a runtime, lease or claim still holds it. Only the orchestration stack
-needs the cards its `agents/config.json` names, so `rig start orchestration` refuses when any of them is absent.
-GPU numbers follow PCI bus order: after moving cards, check which index each card has before pinning one.
+card that is no longer visible while a runtime, lease or claim still holds it. GPU numbers follow PCI bus order: after moving cards, check which index each card has before pinning one.
 
 ## Hardware changes and shared chats
 

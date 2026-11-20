@@ -126,8 +126,8 @@ class ModeTests(unittest.TestCase):
         self.assertIn("4096 MB", rig.partial_ready_error("x", entry, info, 4000))
 
 
-    def test_bench_is_no_longer_a_stack(self):
-        self.assertNotIn("bench", rig.STACK_UNITS)
+    def test_only_manager_load_modes_remain(self):
+        self.assertEqual(set(rig.MODES), {"bench", "remote"})
         self.assertEqual(set(rig.LOAD_MODES), {"bench", "remote"})
 
     def test_remote_load_requires_manager_spec(self):
