@@ -1,43 +1,38 @@
-# Python
+# Python and generated builds
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
 *.egg-info/
 dist/
 build/
-
-# Virtual environments
 venv/
 env/
 ENV/
 ml-env/
 
-# IDE
+# Editor and operating system
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.DS_Store
+Thumbs.db
 
-# Config files (machine-specific)
+# Site-specific configuration and runtime state
 config.json
 shared/rig_site_config.json
+*.lock
+*.log
+/tmp/
 
-# =============================================================================
-# Shared folder - selective sync
-# =============================================================================
-# Default: exclude everything in shared/
+# The shared drive contains model archives and runtime data. Only hardware
+# source, the local model-library projection, and selected workspace notes
+# belong in this checkout.
 shared/*
-
-# Local model-library projection
 !shared/model_library/
 !shared/model_library/**
 shared/model_library/__pycache__/
-shared/model_library/*.pyc
-
-# SYNC: Shared benchmark tooling committed into the main repo
 !shared/scripts/
 shared/scripts/*
 !shared/scripts/llama_runtime/
@@ -46,63 +41,17 @@ shared/scripts/*
 !shared/scripts/rig/**
 !shared/scripts/desktop_worker/
 !shared/scripts/desktop_worker/**
-!shared/scripts/cpu_worker/
-!shared/scripts/cpu_worker/**
-shared/scripts/rig/__pycache__/
-!shared/scripts/benchmarks/
-!shared/scripts/benchmarks/**
-# Canonical rig/worker operations used directly from the shared mount.
-!shared/scripts/batch_runtime_diag.py
-!shared/scripts/brain_watchdog.py
 !shared/scripts/cleanup_llama_runtime_state.py
-!shared/scripts/cleanup_task_heartbeats.py
-!shared/scripts/cpu_agent.py
-!shared/scripts/cpu_queue_guard.py
-!shared/scripts/generate_batch_summary.py
 !shared/scripts/gpu_rig_prep_for_image.sh
 !shared/scripts/manage_model_hotset.py
-!shared/scripts/prepare_llm_runtimes.py
-!shared/scripts/restart_cpu_workers.sh
-!shared/scripts/restart_gpu_agents.py
-!shared/scripts/start_dashboard.sh
-!shared/scripts/summarize_history_run.py
+!shared/scripts/startup_thermal_monitor.py
+!shared/scripts/sync_model_library.py
 shared/scripts/**/__pycache__/
 shared/scripts/**/*.pyc
-shared/scripts/benchmarks/containers/images/
-shared/scripts/benchmarks/*.backup.json
-shared/scripts/benchmarks/benchmark_audit_summary.json
 shared/scripts/*.key
 shared/scripts/*.pem
 shared/scripts/*ed25519
 shared/scripts/*ed25519.pub
-
-# NO SYNC: Runtime logs
-# shared/logs/ contains high-churn runtime artifacts and should not be versioned.
-shared/logs/
-
-# NO SYNC: Plans (each plan is its own repo, public or private)
-# shared/plans/          - plan folders live here but have their own git repos
-
-# SYNC: Workspace (docs, ideas, human escalations)
 !shared/workspace/
 shared/workspace/google.md
-# Site inventory: our real addresses and host details behind the docs placeholders (local only)
 shared/workspace/local/
-
-# NO SYNC: Runtime state
-# shared/brain/         - runtime state, private tasks
-# shared/core/          - root-owned, protected, only changed at terminal
-# shared/gpus/          - runtime heartbeats
-# shared/signals/       - ephemeral control signals
-# shared/tasks/         - runtime queue (results go in plan batch history)
-# shared/lost+found/    - ext4 system directory
-
-# Temporary and lock files
-*.lock
-/tmp/
-cpu_task_barrier.log
-
-# OS
-.DS_Store
-Thumbs.db
-nul
