@@ -14,7 +14,7 @@ its requirements, alongside profiles already loaded. `stop <id>` unloads one pro
 returns the rig to idle. A manager load spec's use picks the load mode: `benchmark` runs in `bench`,
 anything else (chat, worker, published profiles) in `remote` (isolated modes, 2026-10-23: each mode owns
 every card while active; benchmarking/docker/CAMPAIGN_RUNNER_REFACTOR.md).
-Design: shared/workspace/implement/rig_boot_modes.md
+Rig operations: shared/scripts/rig/README.md
 """
 
 from __future__ import annotations
