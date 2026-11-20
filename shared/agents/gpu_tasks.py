@@ -971,13 +971,13 @@ class GPUTaskMixin:
 
     def _read_gpu_claim(self) -> Optional[Dict[str, Any]]:
         """A live rig claim on this GPU that is not orchestration's own (rig_reservations.PREFIX), read
-        from the rig's mirror on the shared drive (<shared>/gpus/claims.json). None when there is none
+        from the authoritative rig-local hardware record. None when there is none
         or the record cannot be read (claims only add protection; leases stay the hard gate)."""
         gpu_id = getattr(self, "gpu_id", None)
         if gpu_id is None:
             return None
         try:
-            path = Path(self.shared_path) / "gpus" / "claims.json"
+            path = self.rig_hw_dir / "gpus" / "claims.json"
             claims = json.loads(path.read_text(encoding="utf-8")).get("claims", []) if path.exists() else []
         except (OSError, ValueError):
             return None

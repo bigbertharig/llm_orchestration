@@ -37,7 +37,7 @@ from gpu_constants import (
     SPLIT_ISSUE_BRAIN_TIMEOUT_SECONDS,
 )
 from gpu_core import GPUCoreMixin
-from gpu_leases import GPULeaseStateError, GPULeaseStore
+from gpu_leases import GPULeaseStateError, GPULeaseStore, rig_hardware_root
 from gpu_llama import GPULlamaMixin
 from gpu_runtime import GPURuntimeMixin
 from gpu_split import GPUSplitMixin
@@ -131,7 +131,8 @@ class GPUAgent(
         self.gpu_state_dir = self.shared_path / "gpus" / f"gpu_{self.gpu_id}"
         self.gpu_state_dir.mkdir(parents=True, exist_ok=True)
         self.heartbeat_file = self.gpu_state_dir / "heartbeat.json"
-        self.gpu_lease_store = GPULeaseStore(self.shared_path)
+        self.rig_hw_dir = rig_hardware_root(str(self.config.get("rig_hw_dir") or ""))
+        self.gpu_lease_store = GPULeaseStore(self.rig_hw_dir)
 
         # Signals
         self.signals_path = self.shared_path / "signals"

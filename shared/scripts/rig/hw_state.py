@@ -5,16 +5,13 @@ request explicit card IDs. The rig is the single writer, on its own disk, under 
 lock, which a model load holds for minutes). So the record survives a lost network, does not depend
 on which controller is active, and two controllers cannot double-book a card.
 
-Every write is mirrored to the shared drive (`<shared>/gpus/`), where orchestration GPU workers read
-leases, whenever the drive is mounted. The mirror is never read back, except to seed an empty local
-record once (the first run after leases moved here from the drive).
+The rig-local record is the only allocation authority. Legacy GPU workers read it directly.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -49,50 +46,22 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 class HardwareState:
-    def __init__(self, root: Path, agents_dir: Path, mirror_root: Path | None = None):
+    def __init__(self, root: Path, agents_dir: Path):
         sys.path.insert(0, str(agents_dir))
         import gpu_leases  # orchestration's lease store: same schema the GPU workers read
 
         self.leases_mod = gpu_leases
         self.root = root
-        self.mirror_root = mirror_root
         self.store = gpu_leases.GPULeaseStore(root)
         self.claims_path = root / "gpus" / "claims.json"
         self.claims_lock = FileLock(str(self.claims_path) + ".lock", timeout=10)
         (root / "gpus").mkdir(parents=True, exist_ok=True)
-        self._seed_from_mirror()
         # A reboot kills the processes holding automated reservations. Clear their
-        # previous-boot records and mirror the result before readers can see them.
+        # previous-boot records before readers can see them.
         with self.claims_lock:
             claims = self._read_claims()
             if any(self._expired(claim) for claim in claims):
                 self._write_claims(claims)
-                self.mirror()
-
-    # ---------------------------------------------------------------- mirror
-
-    def _seed_from_mirror(self) -> None:
-        if self.mirror_root is None:
-            return
-        for name in ("leases.json", "claims.json"):
-            local, remote = self.root / "gpus" / name, self.mirror_root / "gpus" / name
-            try:
-                if not local.exists() and remote.is_file():
-                    shutil.copyfile(remote, local)
-            except OSError:
-                pass  # drive missing or unreadable: start empty, the rig does not depend on it
-
-    def mirror(self) -> str:
-        if self.mirror_root is None or not (self.mirror_root / "gpus").is_dir():
-            return "skipped"
-        try:
-            for name in ("leases.json", "claims.json"):
-                local = self.root / "gpus" / name
-                if local.exists():
-                    _write_json(self.mirror_root / "gpus" / name, json.loads(local.read_text(encoding="utf-8")))
-            return "ok"
-        except (OSError, ValueError) as exc:
-            return f"error: {exc}"
 
     # ---------------------------------------------------------------- claims
 
@@ -170,7 +139,6 @@ class HardwareState:
             if model:
                 claim["model"] = model
             self._write_claims(self._read_claims() + [claim])
-        self.mirror()
         return claim
 
     def extend_claim(self, name: str, gpu_ids: list[int], owner: str = "") -> dict[str, Any]:
@@ -196,7 +164,6 @@ class HardwareState:
             match["gpu_ids"] = sorted(set(match["gpu_ids"]) | set(ids))
             match["extended_at"] = _now()
             self._write_claims(claims)
-        self.mirror()
         return match
 
     def renew_claim(self, name: str, owner: str = "", ttl_s: int | None = None) -> dict[str, Any]:
@@ -211,7 +178,6 @@ class HardwareState:
             ttl = int(ttl_s if ttl_s is not None else match.get("ttl_s", DEFAULT_CLAIM_TTL_S))
             match.update(ttl_s=ttl, expires_at=self._expiry(ttl), renewed_at=_now())
             self._write_claims(claims)
-        self.mirror()
         return match
 
     def remove_claim(self, name: str) -> dict[str, Any]:
@@ -222,7 +188,6 @@ class HardwareState:
             if not match:
                 raise StateError("not_found", f"no claim {name}")
             self._write_claims([c for c in self._read_claims() if c["name"] != name])
-        self.mirror()
         return match[0]
 
     def remove_claims_on(self, gpu_ids: list[int]) -> list[dict[str, Any]]:
@@ -234,8 +199,6 @@ class HardwareState:
             if dropped:
                 names = {c["name"] for c in dropped}
                 self._write_claims([c for c in self._read_claims() if c["name"] not in names])
-        if dropped:
-            self.mirror()
         return dropped
 
     # ---------------------------------------------------------------- leases
@@ -264,7 +227,6 @@ class HardwareState:
             raise StateError("conflict", str(exc)) from exc
         except ValueError as exc:
             raise StateError("invalid", str(exc)) from exc
-        self.mirror()
         return lease
 
     def renew(self, lease_id: str, owner: str, ttl_s: int) -> dict[str, Any]:
@@ -276,7 +238,6 @@ class HardwareState:
             raise StateError("ownership", str(exc)) from exc
         except self.leases_mod.GPULeaseConflict as exc:
             raise StateError("conflict", str(exc)) from exc
-        self.mirror()
         return lease
 
     def release(self, lease_id: str, owner: str = "", force: bool = False) -> None:
@@ -288,4 +249,3 @@ class HardwareState:
             raise StateError("ownership", str(exc)) from exc
         except ValueError as exc:
             raise StateError("invalid", str(exc)) from exc
-        self.mirror()

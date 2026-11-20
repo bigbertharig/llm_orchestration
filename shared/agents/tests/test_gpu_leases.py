@@ -18,10 +18,17 @@ from gpu_leases import (
     GPULeaseOwnershipError,
     GPULeaseStateError,
     GPULeaseStore,
+    rig_hardware_root,
 )
 
 
 class GPULeaseStoreTests(unittest.TestCase):
+    def test_rig_hardware_root_tracks_checkout_and_allows_override(self):
+        expected = Path(__file__).resolve().parents[2] / "brain" / "hw"
+        self.assertEqual(rig_hardware_root(), expected)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(rig_hardware_root(tmp), Path(tmp).resolve())
+
     def test_atomic_group_acquire_and_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = GPULeaseStore(tmp)

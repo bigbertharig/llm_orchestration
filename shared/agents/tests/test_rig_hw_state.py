@@ -18,23 +18,22 @@ class HardwareStateTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
-        self.root, self.share = base / "local", base / "share"
-        (self.share / "gpus").mkdir(parents=True)
+        self.root = base / "local"
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def make(self, mirror=True):
-        return hw_state.HardwareState(self.root, AGENTS, self.share if mirror else None)
+    def make(self):
+        return hw_state.HardwareState(self.root, AGENTS)
 
-    def mirrored(self, name):
-        return json.loads((self.share / "gpus" / name).read_text())
+    def local_record(self, name):
+        return json.loads((self.root / "gpus" / name).read_text())
 
-    def test_acquire_is_recorded_locally_and_mirrored(self):
+    def test_acquire_is_recorded_locally(self):
         hs = self.make()
         lease = hs.acquire(spec([0], metadata={"port": 11434}))
         self.assertEqual([l["lease_id"] for l in hs.leases()], [lease["lease_id"]])
-        self.assertEqual(self.mirrored("leases.json")["leases"][0]["gpu_ids"], [0])
+        self.assertEqual(self.local_record("leases.json")["leases"][0]["gpu_ids"], [0])
 
     def test_overlap_is_refused(self):
         hs = self.make()
@@ -52,7 +51,7 @@ class HardwareStateTests(unittest.TestCase):
         hs.acquire(spec([0], metadata={"claim": "bench"}))
         with self.assertRaises(hw_state.StateError):
             hs.add_claim("other", [0])
-        self.assertEqual(self.mirrored("claims.json")["claims"][0]["name"], "bench")
+        self.assertEqual(self.local_record("claims.json")["claims"][0]["name"], "bench")
         hs.remove_claim("bench")
         self.assertEqual(hs.claims(), [])
 
@@ -72,7 +71,7 @@ class HardwareStateTests(unittest.TestCase):
         hs.add_claim("other", [4])
         grown = hs.extend_claim("wait-m", [1], owner="llm-gateway")
         self.assertEqual(grown["gpu_ids"], [1, 2])
-        self.assertEqual(self.mirrored("claims.json")["claims"][0]["gpu_ids"], [1, 2])
+        self.assertEqual(self.local_record("claims.json")["claims"][0]["gpu_ids"], [1, 2])
         with self.assertRaises(hw_state.StateError) as ctx:   # a card another claim holds
             hs.extend_claim("wait-m", [4], owner="llm-gateway")
         self.assertEqual(ctx.exception.kind, "conflict")
@@ -117,7 +116,7 @@ class HardwareStateTests(unittest.TestCase):
         self.assertEqual([c["name"] for c in dropped], ["pair"])
         self.assertEqual([c["name"] for c in hs.claims()], ["bench"])
 
-    def test_previous_boot_and_legacy_claims_are_removed_on_startup_and_mirrored(self):
+    def test_previous_boot_and_legacy_claims_are_removed_on_startup(self):
         hs = self.make()
         hs.add_claim("old-boot", [0])
         record = json.loads(hs.claims_path.read_text())
@@ -126,7 +125,7 @@ class HardwareStateTests(unittest.TestCase):
         hs.claims_path.write_text(json.dumps(record))
         restarted = self.make()
         self.assertEqual(restarted.claims(), [])
-        self.assertEqual(self.mirrored("claims.json")["claims"], [])
+        self.assertEqual(self.local_record("claims.json")["claims"], [])
 
     def test_claim_ttl_cannot_exceed_one_hour(self):
         hs = self.make()
@@ -146,19 +145,16 @@ class HardwareStateTests(unittest.TestCase):
             hs.renew(lid, "llm-gateway", 60)
         self.assertEqual(ctx.exception.kind, "not_found")
 
-    def test_empty_local_record_is_seeded_from_the_drive_once(self):
+    def test_local_lease_survives_reopen(self):
         first = self.make()
         lid = first.acquire(spec([4]))["lease_id"]
-        # A fresh rig-local root (leases moved off the drive) starts from the drive's copy.
-        self.root = Path(self.tmp.name) / "fresh"
-        seeded = self.make()
-        self.assertEqual([l["lease_id"] for l in seeded.leases()], [lid])
+        reopened = self.make()
+        self.assertEqual([lease["lease_id"] for lease in reopened.leases()], [lid])
 
-    def test_works_without_the_drive(self):
-        hs = self.make(mirror=False)
-        hs.acquire(spec([5]))
-        self.assertEqual(hs.mirror(), "skipped")
-        self.assertEqual(len(hs.leases()), 1)
+    def test_local_record_does_not_need_a_shared_drive(self):
+        first = self.make()
+        first.acquire(spec([5]))
+        self.assertEqual(len(self.make().leases()), 1)
 
 
 if __name__ == "__main__":

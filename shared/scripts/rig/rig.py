@@ -46,12 +46,11 @@ LOCAL = Path(__file__).resolve().parents[2]
 # policy they read, and the model archive live here; it may be missing at any time.
 SHARED = Path("/mnt/shared")
 STATE_PATH = LOCAL / "brain" / "rig_mode.json"
-STATE_MIRROR_PATH = SHARED / "brain" / "rig_mode.json"  # read by watchers on the Pi
 LOCK_PATH = LOCAL / "brain" / "rig_mode.lock"
 CONFIG_PATH = LOCAL / "agents" / "config.json"
 # Remote loads require a complete manager spec; this checkout owns no gateway offer file.
 RUN_RUNTIME = LOCAL / "scripts" / "llama_runtime" / "run_runtime.sh"
-# GPU leases and claims, rig-local (hw_state.py); mirrored to SHARED/gpus/ for orchestration workers.
+# GPU leases and claims are rig-local; legacy GPU workers read the local record.
 HW_STATE_ROOT = LOCAL / "brain" / "hw"
 # The cards seen at the last boot (index, UUID, bus), so a scan can say what changed; never a requirement.
 LAYOUT_PATH = HW_STATE_ROOT / "gpu_layout.json"
@@ -136,11 +135,6 @@ def write_atomic(path: Path, body: str) -> None:
 def save_state(state: dict) -> dict:
     body = json.dumps(state, indent=2) + "\n"
     write_atomic(STATE_PATH, body)
-    if STATE_MIRROR_PATH != STATE_PATH and shared_available():
-        try:
-            write_atomic(STATE_MIRROR_PATH, body)
-        except OSError as exc:
-            say(f"  note: state mirror not written ({exc})")
     return state
 
 
@@ -1068,7 +1062,7 @@ def guard_summary() -> dict:
 
 
 def open_hw_state() -> hw_state.HardwareState:
-    return hw_state.HardwareState(HW_STATE_ROOT, LOCAL / "agents", SHARED if shared_available() else None)
+    return hw_state.HardwareState(HW_STATE_ROOT, LOCAL / "agents")
 
 
 def emit(payload: dict, code: int = 0) -> int:
