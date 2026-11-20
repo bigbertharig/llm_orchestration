@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "1d24f1d4cf440d9927cc1d146b682bad3f09f99bff71e5bc5e6d12c81e9ee4b9",
+  "source_sha256": "2ee59eaccf2d13cb6c05462c8d2ef6790a95c03e7e47a242f5848d6097d957f2",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -2490,7 +2490,7 @@
           "planning",
           "orchestration_brain"
         ],
-        "evidence": "MODEL_BEST_OF 2026-08-22 (qwen3.5:27b provisional); operator choice 2026-10-15"
+        "evidence": "20260813_limit5_all provisional review; operator choice 2026-10-15"
       },
       "brain_code": {
         "model": "qwen3-coder:30b-a3b",
@@ -2807,6 +2807,56 @@
         "status": "experimental",
         "evidence": "results/runtime_experiments/qwen35_q4_context_stacking_20261118/README.md"
       },
+      "nemotron74_shared_1060": {
+        "provider": "rig_shared_chat",
+        "model": "nemotron-3.5-bolt:74b-a9b",
+        "mode": "gpu1060-chat-f16",
+        "requires": {
+          "model": "nemotron-3.5-bolt:74b-a9b",
+          "mode": "gpu0-main-f16-experts1234"
+        },
+        "agent_types": [
+          "coding",
+          "research"
+        ],
+        "context_cap": 262144,
+        "context_allocation": "dynamic_at_attach",
+        "context_min": 16384,
+        "context_default": 262144,
+        "memory_estimate": {
+          "fixed_compute_mib": 6,
+          "kv_mib_at_262144": 2048,
+          "admission_reserve_mib": 256,
+          "shared_parent_mib_per_chat": 182,
+          "method": "linear_f16_kv_plus_measured_per_context_parent_state"
+        },
+        "placement_policy": "spread_then_stack",
+        "max_attached_chats": 4,
+        "status": "experimental",
+        "evidence": "results/runtime_experiments/nemotron_f16_context_sweep_20261118/README.md"
+      },
+      "codex_terra": {
+        "provider": "codex",
+        "model": "gpt-5.6-terra",
+        "agent_types": [
+          "coding",
+          "research"
+        ],
+        "status": "candidate",
+        "availability": "check_codex_model_list",
+        "evidence": "Pi Codex app-server model/list, observed 2026-11-12"
+      },
+      "codex_luna": {
+        "provider": "codex",
+        "model": "gpt-5.6-luna",
+        "agent_types": [
+          "coding",
+          "research"
+        ],
+        "status": "candidate",
+        "availability": "check_codex_model_list",
+        "evidence": "Pi Codex app-server model/list, observed 2026-11-12"
+      },
       "qwen35_headless_worker_pool": {
         "provider": "rig_shared_chat",
         "model": "qwen3.6:35b-a3b-xl",
@@ -2843,76 +2893,6 @@
         ],
         "status": "experimental",
         "evidence": "results/runtime_experiments/qwen35_q4_context_stacking_20261118/README.md"
-      },
-      "nemotron74_shared_1060": {
-        "provider": "rig_shared_chat",
-        "model": "nemotron-3.5-bolt:74b-a9b",
-        "mode": "gpu1060-chat-f16",
-        "requires": {
-          "model": "nemotron-3.5-bolt:74b-a9b",
-          "mode": "gpu0-main-f16-experts1234"
-        },
-        "agent_types": [
-          "coding",
-          "research"
-        ],
-        "context_cap": 262144,
-        "context_allocation": "dynamic_at_attach",
-        "context_min": 16384,
-        "context_default": 262144,
-        "memory_estimate": {
-          "fixed_compute_mib": 6,
-          "kv_mib_at_262144": 2048,
-          "admission_reserve_mib": 256,
-          "shared_parent_mib_per_chat": 182,
-          "method": "linear_f16_kv_plus_measured_per_context_parent_state"
-        },
-        "placement_policy": "spread_then_stack",
-        "max_attached_chats": 4,
-        "status": "experimental",
-        "evidence": "results/runtime_experiments/nemotron_f16_context_sweep_20261118/README.md"
-      },
-      "ministral3_3b_separate": {
-        "provider": "gateway_profile",
-        "model": "ministral-3:3b",
-        "agent_types": [
-          "coding",
-          "research"
-        ],
-        "status": "candidate",
-        "evidence": "results/model_benchmark_records.jsonl: campaign_agent_contract-bounded-live-20261115a and campaign_ministral3_3b_agent_20260813_limit5_all"
-      },
-      "ministral3_8b_separate": {
-        "provider": "gateway_profile",
-        "model": "ministral-3:8b",
-        "agent_types": [
-          "coding",
-          "research"
-        ],
-        "status": "candidate",
-        "evidence": "results/model_benchmark_records.jsonl: campaign_ministral3_8b_agent_20260813_limit5_all"
-      },
-      "codex_terra": {
-        "provider": "codex",
-        "model": "gpt-5.6-terra",
-        "agent_types": [
-          "coding",
-          "research"
-        ],
-        "status": "candidate",
-        "availability": "check_codex_model_list",
-        "evidence": "Pi Codex app-server model/list, observed 2026-11-12"
-      },
-      "codex_luna": {
-        "provider": "codex",
-        "model": "gpt-5.6-luna",
-        "agent_types": [
-          "coding",
-          "research"
-        ],
-        "status": "candidate",
-        "availability": "check_codex_model_list",
-        "evidence": "Pi Codex app-server model/list, observed 2026-11-12"
       }
     }
   },
@@ -4822,5 +4802,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-20T05:36:16+00:00"
+  "imported_at": "2026-11-20T19:57:16+00:00"
 }

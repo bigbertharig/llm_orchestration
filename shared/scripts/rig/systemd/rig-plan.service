@@ -12,6 +12,7 @@ Type=simple
 User=bryan
 Group=bryan
 Environment=HOME=/home/bryan
+ExecStartPre=/usr/bin/python3 /home/bryan/llm_orchestration/shared/scripts/sync_model_library.py sync-if-available
 ExecStart=/home/bryan/llm-orchestration-venv/bin/python /home/bryan/llm_orchestration/shared/scripts/rig/rig.py plan run
 Restart=always
 RestartSec=5

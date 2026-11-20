@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Import benchmarking model knowledge into orchestration-owned runtime files."""
+"""Import Benchmarking model knowledge into Orchestration-owned runtime files.
+
+The rig boot and plan services use sync-if-available. If Benchmarking is absent,
+the last valid local snapshot stays in service and its source hash is logged.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +11,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,12 +20,25 @@ from pathlib import Path
 
 SHARED = Path(__file__).resolve().parent.parent
 MODEL_LIBRARY_DIR = SHARED / "model_library"
-DEFAULT_SOURCE = SHARED / "plans" / "shoulders" / "benchmarking"
+DEFAULT_SOURCE = SHARED.parent.parent / "benchmarking"
 SNAPSHOT = MODEL_LIBRARY_DIR / "model_library.json"
 CATALOG = MODEL_LIBRARY_DIR / "models.catalog.json"
 ACCESS = MODEL_LIBRARY_DIR / "model_access.json"
 TUNING = MODEL_LIBRARY_DIR / "model_tuning_profiles.json"
 SOURCE_NAME = "model_library_export.json"
+
+
+def verify_local_snapshot() -> str:
+    snapshot = read_json(SNAPSHOT)
+    digest = snapshot.get("source_sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("local Orchestration snapshot has no Benchmarking source hash")
+    if not snapshot.get("registry", {}).get("models"):
+        raise ValueError("local Orchestration model registry is empty")
+    for path in (CATALOG, ACCESS, TUNING):
+        if not isinstance(read_json(path), dict):
+            raise ValueError(f"local Orchestration projection is invalid: {path.name}")
+    return digest
 
 
 def read_json(path: Path) -> dict:
@@ -157,20 +176,27 @@ def write_files(files: dict[Path, dict]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", nargs="?", choices=("sync", "what-new", "check"), default="what-new")
+    parser.add_argument("action", nargs="?", choices=("sync", "what-new", "check", "sync-if-available"), default="what-new")
     parser.add_argument("--source", type=Path, default=Path(os.getenv("BENCHMARKING_ROOT", DEFAULT_SOURCE)))
     args = parser.parse_args()
     try:
+        if args.action == "sync-if-available" and not (args.source / SOURCE_NAME).is_file():
+            print(f"Benchmarking unavailable; using Orchestration snapshot {verify_local_snapshot()}")
+            return 0
         snapshot, catalog, access, tuning = build(args.source.resolve())
         summary = report(snapshot, catalog, access, tuning)
-        if args.action == "sync" and summary["pending"]:
+        if args.action in ("sync", "sync-if-available") and summary["pending"]:
             snapshot["imported_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             write_files({SNAPSHOT: snapshot, CATALOG: catalog, ACCESS: access, TUNING: tuning})
             summary["pending"] = False
             summary["synced"] = True
         print(json.dumps(summary, indent=2))
         return 1 if args.action == "check" and summary["pending"] else 0
-    except (OSError, ValueError, RuntimeError) as exc:
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+        if args.action == "sync-if-available":
+            print(f"Benchmarking update unavailable: {exc}", file=sys.stderr)
+            print(f"Using Orchestration snapshot {verify_local_snapshot()}")
+            return 0
         print(f"model-library import: {exc}", file=sys.stderr)
         return 2
 

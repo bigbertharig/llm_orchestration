@@ -10,6 +10,7 @@ Type=oneshot
 User=bryan
 Group=bryan
 # /usr/local/bin/rig links to the rig-local checkout, so boot does not wait for network storage.
+ExecStartPre=/usr/bin/python3 /home/bryan/llm_orchestration/shared/scripts/sync_model_library.py sync-if-available
 ExecStart=/usr/local/bin/rig boot
 RemainAfterExit=yes
 
