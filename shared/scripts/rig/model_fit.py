@@ -121,6 +121,13 @@ def preview(request: dict, *, library: Any, cards: list[dict], free: list[dict],
         raise ModelFitError("invalid", "gpu_ids must be a nonempty list of distinct card indices")
     if count and ids:
         raise ModelFitError("invalid", "give cards or gpu_ids, not both")
+    excluded = request.get("exclude_gpu_ids") or []
+    if (not isinstance(excluded, list) or
+            any(type(g) is not int or g < 0 for g in excluded) or len(excluded) != len(set(excluded))):
+        raise ModelFitError("invalid", "exclude_gpu_ids must list distinct card indices")
+    if excluded and ids:
+        raise ModelFitError("invalid", "exclude_gpu_ids applies only to automatic placement")
+    free = [card for card in free if card["index"] not in excluded]
     snapshot, r = _selected_model(library, request)
     policy = request.get("placement_policy") or ("fastest_fit" if request.get("use") == "chat" else "smallest_fit")
     if policy not in fit.PLACEMENT_POLICIES:
@@ -130,6 +137,8 @@ def preview(request: dict, *, library: Any, cards: list[dict], free: list[dict],
         raise ModelFitError("invalid", "engine must be auto, llama, or strata")
     if engine == "llama" and (r.get("strata") or {}).get("only"):
         raise ModelFitError("invalid", f"{r['model']} is a Strata-only pack")
+    shape = None
+    chosen = None
     if engine == "strata" or (engine == "auto" and (r.get("strata") or {}).get("only")):
         result = _strata(r, request, free, host_available)
     else:
@@ -188,9 +197,34 @@ def preview(request: dict, *, library: Any, cards: list[dict], free: list[dict],
         result.update(ubatch=kw["ubatch"], context_mode=mode,
                       context_bounds={"min": lower, "working": rt.get("ctx_size"), "max": upper,
                                       "max_basis": (r.get("context_bounds") or {}).get("max_basis", "gguf_train")})
+        if chosen is None:
+            result["chosen_by"] = ("policy: fastest fit at largest available context"
+                                   if mode == "max" and policy == "fastest_fit" else
+                                   "policy: largest context across free cards" if mode == "max" else
+                                   "policy: fewest free cards at profile minimum" if mode == "min" else
+                                   "rig: measured response speed" if result.get("performance_basis") else
+                                   "policy: fastest available fit" if policy == "fastest_fit" else
+                                   "policy: smallest available fit")
     result.update(registry_profile=r["profile"], status=r["status"], use=request.get("use", "benchmark"),
                   gguf_path=r["gguf_path"], placement_policy=policy,
                   source_sha256=snapshot["source_sha256"])
     if not result["fits"]:
-        raise ModelFitError("capacity", result["reason"], fit=result, unavailable=unavailable)
+        suggestions = []
+        if shape is not None and chosen is not None and kw["ctx"] and kw["ctx"] > kw["ctx_min"]:
+            smaller = fit.plan(shape, chosen, **{**kw, "ctx": kw["ctx_min"]})
+            if smaller["fits"]:
+                suggestions.append(f"same GPU {smaller['gpus']} at minimum ctx {smaller['ctx']} "
+                                   "(context_mode=min)")
+        idle = [{**card, "used_mb": 0} for card in cards]
+        if not request.get("assume_idle") and not ids and not count and not excluded:
+            try:
+                preview({**request, "assume_idle": True}, library=library, cards=cards, free=idle,
+                        unavailable={}, host_available=host_available)
+            except ModelFitError:
+                pass
+            else:
+                raise ModelFitError("capacity", f"{r['model']}: no capacity while GPUs are occupied or reserved",
+                                    fit=result, unavailable=unavailable)
+        raise ModelFitError("unfit", result["reason"], fit=result, unavailable=unavailable,
+                            suggestions=suggestions)
     return result

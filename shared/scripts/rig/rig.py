@@ -40,6 +40,7 @@ import hw_guard  # noqa: E402  (rig-side power/thermal/memory guard and load adm
 import hw_plan  # noqa: E402  (active controller + queue of what to do next; rig-plan.service works through it)
 import hw_loadlog  # noqa: E402  (what a load actually got: llama.cpp fit projection, offload, ctx, buffers)
 import model_fit  # noqa: E402  (rig-owned model memory and placement fit)
+import observations  # noqa: E402  (rig-owned fit calibration receipts)
 
 LOCAL = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(LOCAL / "model_library"))
@@ -1065,6 +1066,23 @@ def cmd_model_fit(args) -> int:
         return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
 
 
+def cmd_fit_observation(args) -> int:
+    """Store a completed load receipt beside the rig's fit calibration state."""
+    try:
+        row = json.loads(args.row)
+        if not isinstance(row, dict):
+            raise ValueError("fit observation must be an object")
+        kind = row.get("kind")
+        if kind not in ("load", "load_failed"):
+            raise ValueError("fit observation kind must be load or load_failed")
+        if not isinstance(row.get("source"), str) or not row["source"]:
+            raise ValueError("fit observation source is required")
+        stored = observations.record(kind, **{k: v for k, v in row.items() if k != "kind"})
+        return emit({"recorded": True, "kind": stored["kind"], "at": stored["at"]})
+    except (ValueError, TypeError, OSError) as exc:
+        return emit({"error": str(exc), "kind": "invalid"}, EXIT_FAIL)
+
+
 def cmd_lease(args) -> int:
     """Lease record for controllers: list | preview | acquire | renew | release. JSON out.
     Writes need --controller <active controller id> once a controller is registered (hw_plan)."""
@@ -1508,6 +1526,9 @@ def main() -> int:
     s = sub.add_parser("model-fit", help="read-only detailed model fit from the imported library and live cards")
     s.add_argument("--request", required=True, help="JSON model, use, profile, context, and placement preference")
     s.set_defaults(fn=cmd_model_fit)
+    s = sub.add_parser("fit-observation", help="store a completed load receipt for rig-owned fit calibration")
+    s.add_argument("--row", required=True, help="JSON load or load_failed observation")
+    s.set_defaults(fn=cmd_fit_observation)
     sub.add_parser("scan", help="refresh and save the rig-owned hardware inventory").set_defaults(fn=cmd_scan)
     s = sub.add_parser("why", help="why a runtime is down: exit, OOM, guard action, earlyoom")
     s.add_argument("--port", type=int)
