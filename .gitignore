@@ -36,6 +36,8 @@ shared/*
 # SYNC: Agent code (the core engine, minus permissions)
 !shared/model_library/
 !shared/model_library/**
+shared/model_library/__pycache__/
+shared/model_library/*.pyc
 !shared/agents/
 shared/agents/__pycache__/
 shared/agents/*.pyc
