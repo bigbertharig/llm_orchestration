@@ -257,7 +257,7 @@ def main():
     else:
         print("\nGPU agents: None started")
 
-    print("\nSubmit plans with: python scripts/submit.py <plan_folder> --config '{...}'")
+    print("\nLegacy plan submission is no longer a Pi operator command")
     print("Press Ctrl+C to stop all agents")
     print("=" * 60 + "\n")
 

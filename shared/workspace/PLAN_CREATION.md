@@ -1,5 +1,8 @@
 # Plan Creation Guide
 
+> Historical design or legacy batch guidance. Pi plan-submit and manual model-load wrappers were retired. Use [rig quickstart](quickstart.md) for current hardware operations and Gateway for new work.
+
+
 Purpose: define the practical workflow for designing a new plan on another machine so it ports cleanly to this rig with minimal rewrite.
 
 Use this guide with:

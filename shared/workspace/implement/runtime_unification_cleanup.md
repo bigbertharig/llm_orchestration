@@ -1,5 +1,8 @@
 # Runtime Unification Cleanup
 
+> Historical design or legacy batch guidance. Pi plan-submit and manual model-load wrappers were retired. Use [rig quickstart](../quickstart.md) for current hardware operations and Gateway for new work.
+
+
 Goal: make the orchestration system operate as layered components with a stable
 runtime control surface.
 

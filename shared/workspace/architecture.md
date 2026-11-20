@@ -1,5 +1,8 @@
 # System Architecture
 
+> Historical design or legacy batch guidance. Pi plan-submit and manual model-load wrappers were retired. Use [rig quickstart](quickstart.md) for current hardware operations and Gateway for new work.
+
+
 Status: legacy plan-engine architecture snapshot. For current Pi-hosted storage, access, and hardware ownership, use [CONTEXT](CONTEXT.md) and [network setup](NETWORK_SETUP.md).
 
 High-level overview of the LLM orchestration system. For implementation details, see [brain-behavior.md](brain-behavior.md).

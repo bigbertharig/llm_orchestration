@@ -1,5 +1,8 @@
 # Ollama -> llama.cpp Migration Plan
 
+> Historical design or legacy batch guidance. Pi plan-submit and manual model-load wrappers were retired. Use [rig quickstart](../quickstart.md) for current hardware operations and Gateway for new work.
+
+
 ## Goal
 
 Move runtime ownership from Ollama to `llama-server` so model lifecycle is:

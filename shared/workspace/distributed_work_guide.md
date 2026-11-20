@@ -1,5 +1,8 @@
 # Distributed Work Guide
 
+> Historical design or legacy batch guidance. Pi plan-submit and manual model-load wrappers were retired. Use [rig quickstart](quickstart.md) for current hardware operations and Gateway for new work.
+
+
 How work moves through the current orchestration system, from plan creation to
 runtime review.
 

@@ -1,5 +1,8 @@
 # GPU Rig Workload Transfer Guide
 
+> Historical design or legacy batch guidance. Pi plan-submit and manual model-load wrappers were retired. Use [rig quickstart](quickstart.md) for current hardware operations and Gateway for new work.
+
+
 Purpose: define the exact contract for external teams to deliver a plan folder that drops into `shared/plans/arms/` or `shared/plans/shoulders/` and runs with minimal local integration work.
 
 Audience: external project teams preparing their own plan package, and rig operators validating intake.

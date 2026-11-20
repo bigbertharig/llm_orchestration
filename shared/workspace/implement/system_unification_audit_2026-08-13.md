@@ -1,5 +1,8 @@
 # System Unification Audit - 2026-08-13
 
+> Historical design or legacy batch guidance. Pi plan-submit and manual model-load wrappers were retired. Use [rig quickstart](../quickstart.md) for current hardware operations and Gateway for new work.
+
+
 Scope: `/home/bryan/llm_orchestration`, the shared runtime tree,
 `shared/plans/shoulders/benchmarking`, and a read-only review of
 `/home/bryan/global map/county-map-private/tools/gpu_rig`.

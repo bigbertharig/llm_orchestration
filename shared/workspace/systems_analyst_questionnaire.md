@@ -1,5 +1,8 @@
 # Multi-Agent GPU Cluster Systems Analysis Questionnaire
 
+> Historical design or legacy batch guidance. Pi plan-submit and manual model-load wrappers were retired. Use [rig quickstart](quickstart.md) for current hardware operations and Gateway for new work.
+
+
 Use this document as a structured review of the current orchestration system.
 It is not a speculative design doc. Each section should capture:
 

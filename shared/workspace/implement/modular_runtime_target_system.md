@@ -1,5 +1,8 @@
 # Modular Runtime Target System
 
+> Historical design or legacy batch guidance. Pi plan-submit and manual model-load wrappers were retired. Use [rig quickstart](../quickstart.md) for current hardware operations and Gateway for new work.
+
+
 Purpose: capture the target architecture, the current implementation status,
 and the next cleanup steps for runtime, plan, and benchmark execution.
 

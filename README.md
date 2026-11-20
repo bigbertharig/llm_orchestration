@@ -60,25 +60,11 @@ mode among others.
 - **GPU rig** (`<rig-host>`): its own code checkout and `llama-server` runtimes. Its GPUs are discovered by `rig scan` and `rig observe`; no published card count is a load requirement. Big Bertha also mounts a shared drive for legacy batch work and backup.
 - **CPU workers** (`<worker-ip>`): Orange Pi Prime boards (ARM64, 2 GB) that claim `task_class: cpu` work.
 
-## Running it
+## Operating the hardware layer
 
-```bash
-# On the Pi: submit a plan
-cd ~/llm_orchestration
-python3 scripts/submit.py ~/llm_orchestration/shared/plans/<plan_name> --config '{"VAR":"value"}'
+Run `rig scan` to refresh the hardware inventory and `rig observe` to inspect current admission, leases, and services. Gateway is the controller for model requests and dashboard work; its `rigctl` calls the rig directly. The rig checkout owns its runtime code and hardware state. A shared model archive or benchmark result directory can be mounted separately.
 
-# Watch it: the dashboard (served by llm-gateway on the Pi)
-#   http://127.0.0.1:8080/dashboard/      (from elsewhere: ssh -N -L 8080:127.0.0.1:8080 pi)
-```
-
-The dashboard UI lives only in llm-gateway. This repo's `scripts/orchestration_api` serves
-versioned status and plan-control endpoints over a private Unix socket on the Pi. The gateway
-reads it through HTTP and reads hardware status through its own `/v1/manager/status` API.
-The service definition is `deploy/llm-orchestration-api.service`.
-
-Starting and stopping the orchestration mode on the rig, and its startup order: `shared/workspace/CONTEXT.md`
-and `shared/workspace/quickstart.md`.
-
+The private `scripts/orchestration_api` service still exposes legacy batch status, diagnostics, activity, and stop controls on a Unix socket. It does not accept new dashboard plan submissions. The remaining legacy brain/worker queue and its shared-state readers are tracked in the cross-repo communication contract. New model work must use the Gateway to rig request path.
 ## Plans
 
 Plans define workflows as markdown files: `plan.md` (tasks with dependencies), `scripts/` (what tasks run)
