@@ -2,6 +2,7 @@ import sys
 import unittest
 import json
 import tempfile
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -12,6 +13,34 @@ import rig  # noqa: E402
 
 
 class ModeTests(unittest.TestCase):
+    def test_lease_preview_uses_live_admission_without_writing_a_lease(self):
+        cards = [{"index": 1, "total_mb": 6144, "used_mb": 0},
+                 {"index": 2, "total_mb": 8192, "used_mb": 0}]
+        state = Mock()
+        state.leases.return_value = []
+        state.claims.return_value = []
+        args = SimpleNamespace(action="preview", spec=json.dumps({
+            "gpus_needed": [{"min_vram_mb": 5000},
+                            {"min_vram_mb": 5000, "max_vram_mb": 7000}]}))
+        with patch.object(rig, "open_hw_state", return_value=state), \
+             patch.object(rig, "open_plan") as plan, \
+             patch.object(rig.hw_state, "FileLock", return_value=nullcontext()), \
+             patch.object(rig, "gpu_check", return_value={"ok": True, "visible": cards}), \
+             patch.object(rig, "llama_containers", return_value=[]), \
+             patch.object(rig, "live_ports", return_value={}), \
+             patch.object(rig, "emit", side_effect=lambda payload, code=0: payload):
+            preview = rig.cmd_lease(args)
+            refused = rig.cmd_lease(SimpleNamespace(action="preview", spec=json.dumps({
+                "gpus_needed": [{"min_vram_mb": 30000}]})))
+            malformed = rig.cmd_lease(SimpleNamespace(action="preview", spec="null"))
+        self.assertEqual(preview, {"admitted": True, "gpu_ids": [2, 1],
+                                   "ports": [11435, 11436], "port": 11435})
+        self.assertEqual(refused["kind"], "capacity")
+        self.assertIn("no capacity", refused["error"])
+        self.assertEqual(malformed["kind"], "invalid")
+        state.acquire.assert_not_called()
+        plan.assert_not_called()
+
     def test_lease_admission_finds_complete_fit_for_bounded_cards(self):
         cards = [{"index": 1, "total_mb": 6144, "used_mb": 0},
                  {"index": 2, "total_mb": 8192, "used_mb": 0}]

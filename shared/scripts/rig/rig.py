@@ -1086,6 +1086,8 @@ def admit_lease_spec(spec: dict, hs: hw_state.HardwareState) -> dict:
     The admission lock serializes fit decisions from current controllers. The
     lease store still rejects overlaps from older explicit-card callers.
     """
+    if not isinstance(spec, dict):
+        raise hw_state.StateError("invalid", "lease spec must be a JSON object")
     if bool(spec.get("gpus_needed")) == bool(spec.get("gpu_ids")):
         raise hw_state.StateError("invalid", "give exactly one of gpus_needed or gpu_ids")
     scan = gpu_check()
@@ -1168,12 +1170,24 @@ def admit_lease_spec(spec: dict, hs: hw_state.HardwareState) -> dict:
 
 
 def cmd_lease(args) -> int:
-    """Lease record for controllers: list | acquire --spec JSON | renew | release. JSON out.
+    """Lease record for controllers: list | preview | acquire | renew | release. JSON out.
     Writes need --controller <active controller id> once a controller is registered (hw_plan)."""
     try:
         hs = open_hw_state()
         if args.action == "list":
             return emit({"leases": hs.leases(), "claims": hs.claims()})
+        if args.action == "preview":
+            try:
+                spec = json.loads(args.spec or "")
+            except ValueError as exc:
+                raise hw_state.StateError("invalid", f"--spec is not JSON: {exc}") from exc
+            # Preview uses the same live matching path as acquire. It neither
+            # requires controller ownership nor records a lease. A later
+            # acquire must check again because capacity can change meanwhile.
+            with hw_state.FileLock(str(HW_STATE_ROOT / "admission.lock"), timeout=10):
+                proposed = admit_lease_spec(spec, hs)
+            return emit({"admitted": True, "gpu_ids": proposed["gpu_ids"],
+                         "ports": proposed["ports"], "port": proposed["metadata"]["port"]})
         open_plan().require_active(args.controller)
         if args.action == "acquire":
             try:
@@ -1609,10 +1623,13 @@ def main() -> int:
     s.add_argument("--container")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_why)
-    s = sub.add_parser("lease", help="GPU lease record (controllers): list | acquire | renew | release")
+    s = sub.add_parser("lease", help="GPU lease record: list | preview | acquire | renew | release")
     la = s.add_subparsers(dest="action", required=True)
     la.add_parser("list")
     ctl_help = "active controller id (required once a controller is registered: rig controller claim)"
+    x = la.add_parser("preview", help="read-only live admission check; acquire still rechecks atomically")
+    x.add_argument("--spec", required=True,
+                   help='JSON: {gpus_needed:[{min_vram_mb,...}]} or {gpu_ids:[...]}; optional metadata.claim')
     x = la.add_parser("acquire")
     x.add_argument("--spec", required=True,
                    help='JSON: {controller, owner, run_id, gpu_ids, ports, ttl_s, lane, metadata}')

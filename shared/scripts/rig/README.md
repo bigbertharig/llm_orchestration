@@ -37,6 +37,16 @@ older than 120 s (crashed) or by handoff (`--force`). `rig-plan.service` works t
 items one at a time, in order (`load`, `unload`), then waits; loaded models stay loaded unless an
 item unloads them, and it keeps going with no controller connected. `rig plan show` lists the queue.
 
+### Read-only lease preview
+
+`rig lease preview --spec '{"gpus_needed":[{"min_vram_mb":8192}]}'` runs the
+same live card matching and port checks as lease acquisition. It returns the
+proposed GPU IDs and ports, or a specific `kind` and refusal reason. It does not
+create a lease or require controller ownership. This is a display/preflight
+answer only: capacity may change before `rig lease acquire`, which checks again
+and records the lease under the admission lock. An explicit `gpu_ids` spec is
+also accepted for operator-pinned loads.
+
 ## Monitoring
 
 `rig-guard.service` samples every 2 s: CPU package temperature, per-GPU temperature, instant power
