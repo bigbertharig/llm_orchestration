@@ -23,9 +23,6 @@ def test_versioned_status_and_prepared_job_contract(tmp_path, monkeypatch):
         def __init__(self, shared, config):
             assert shared == tmp_path and config == {"marker": 1}
 
-        def submit_prepared(self, plan_name, plan_scope, starter_file, config):
-            return {"submitted": [plan_name, plan_scope, starter_file, config]}
-
         def kill_plan(self, batch_id):
             return {"message": f"killed {batch_id}"}
 
@@ -53,9 +50,7 @@ def test_versioned_status_and_prepared_job_contract(tmp_path, monkeypatch):
         assert request("GET", "/v1/orchestration/status") == (200, {"active_batch_count": 2})
         assert request("GET", "/v1/orchestration/diagnostics") == (200, {"ok": True, "checks": []})
         assert request("GET", "/v1/orchestration/options")[0] == 404
-        assert request("POST", "/v1/orchestration/actions/submit_prepared", {
-            "plan_name": "p", "plan_scope": "shoulders", "config": {"RUN_MODE": "fresh"}
-        }) == (200, {"submitted": ["p", "shoulders", "", {"RUN_MODE": "fresh"}]})
+        assert request("POST", "/v1/orchestration/actions/submit_prepared", {})[0] == 404
         assert request("POST", "/v1/orchestration/actions/start_plan", {})[0] == 404
         assert request("POST", "/v1/orchestration/actions/kill_plan", {"batch_id": "b1"}) == (200, {"message": "killed b1"})
         assert request("POST", "/v1/orchestration/actions/rm_rf", {})[0] == 404

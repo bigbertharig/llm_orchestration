@@ -16,7 +16,7 @@ from . import Controls
 from .status import activity, diagnostics, snapshot
 
 DEFAULT_SOCKET = Path("/run/llm-orchestration/api.sock")
-ACTIONS = frozenset({"submit_prepared", "kill_plan", "kill_all_active",
+ACTIONS = frozenset({"kill_plan", "kill_all_active",
                      "batch_outputs", "cleanup_stale", "requeue_worker"})
 MAX_BODY_BYTES = 1_048_576
 _action_lock = threading.Lock()
@@ -32,9 +32,6 @@ def _context():
 def _run_action(action: str, body: dict):
     shared, config = _context()
     controls = Controls(shared, config)
-    if action == "submit_prepared":
-        return controls.submit_prepared(str(body.get("plan_name") or ""), str(body.get("plan_scope") or ""),
-                                        str(body.get("starter_file") or ""), body.get("config"))
     if action in ("kill_plan", "batch_outputs"):
         return getattr(controls, action)(str(body.get("batch_id") or ""))
     if action == "requeue_worker":

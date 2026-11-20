@@ -1,6 +1,5 @@
 """Execution controls for prepared plans and active batches."""
 
-import base64
 import json
 import re
 import shlex
@@ -44,43 +43,6 @@ class Controls:
 
     # ------------------------------------------------------------------ public actions
 
-    def submit_prepared(self, plan_name: str, plan_scope: str, starter_file: str,
-                        config: dict[str, Any]) -> dict[str, Any]:
-        """Consume a gateway-prepared request; never discover or build a plan."""
-        scope = str(plan_scope).strip()
-        if scope not in {"shoulders", "arms"} or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", plan_name):
-            return {"ok": False, "message": "invalid plan reference"}
-        plan_path = self.shared_path / "plans" / scope / plan_name
-        if not plan_path.is_dir():
-            return {"ok": False, "message": "plan directory not found"}
-        if starter_file:
-            starter = (plan_path / starter_file).resolve()
-            if not starter.is_file() or not starter.is_relative_to(plan_path.resolve()):
-                return {"ok": False, "message": "invalid starter file"}
-        if not isinstance(config, dict) or len(config) > 120:
-            return {"ok": False, "message": "invalid prepared config"}
-        for key, value in config.items():
-            if not isinstance(key, str) or not re.fullmatch(r"[A-Z0-9_]{1,64}", key):
-                return {"ok": False, "message": "invalid prepared config key"}
-            if value is not None and not isinstance(value, (str, int, float, bool)):
-                return {"ok": False, "message": "invalid prepared config value"}
-        payload = json.dumps(config, separators=(",", ":"))
-        remote_path = f"/mnt/shared/plans/{scope}/{plan_name}"
-        starter_opt = f" --plan-file {shlex.quote(starter_file)}" if starter_file else ""
-        encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
-        script = ("set -e\n" +
-                  f"python3 /mnt/shared/agents/submit.py {shlex.quote(remote_path)}{starter_opt} " +
-                  f"--config \"$(printf %s {encoded} | base64 -d)\"\n")
-        try:
-            proc = subprocess.run(["ssh", "-o", "BatchMode=yes", "gpu", "bash", "-s"],
-                                  input=script,
-                                  capture_output=True, text=True, timeout=120)
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "message": "GPU submission timed out", "returncode": -1}
-        return {"ok": proc.returncode == 0, "returncode": proc.returncode,
-                "stdout": _clip_stdio(proc.stdout), "stderr": _clip_stdio(proc.stderr),
-                "message": f"Submitted {scope}/{plan_name}" if proc.returncode == 0 else
-                           f"Failed to submit {scope}/{plan_name}"}
     def kill_plan(self, batch_id: str) -> dict[str, Any]:
         return self._kill_plan(batch_id)
 
