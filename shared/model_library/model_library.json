@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "2ee59eaccf2d13cb6c05462c8d2ef6790a95c03e7e47a242f5848d6097d957f2",
+  "source_sha256": "cbaf2feca266eb1ccb3ffaba728b4dd0330e7cfa3dbf44e519cc2794e5000793",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -2408,6 +2408,9 @@
           "model": "ud-q4_k_xl",
           "model_path": "/data/model-hotset/qwen3.6-35b-a3b-strata-xl/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
           "validated_version": "0.2.10",
+          "validated_gpu_ids": [
+            0
+          ],
           "max_context": 8192,
           "min_host_available_mb": 8192,
           "prepared_pack_size_bytes": 9843821,
@@ -2438,6 +2441,9 @@
           "data_dir": "/data/bench-staging/strata-v0.2.10/data",
           "resident_budget_gib": 8,
           "validated_version": "0.2.10",
+          "validated_gpu_ids": [
+            0
+          ],
           "only": true,
           "max_context": 262144,
           "min_host_available_mb": 12288,
@@ -4802,5 +4808,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-20T19:57:16+00:00"
+  "imported_at": "2026-11-20T20:28:23+00:00"
 }

@@ -39,8 +39,11 @@ import hw_state  # noqa: E402  (rig-side lease and claim record, beside this fil
 import hw_guard  # noqa: E402  (rig-side power/thermal/memory guard and load admission, beside this file)
 import hw_plan  # noqa: E402  (active controller + queue of what to do next; rig-plan.service works through it)
 import hw_loadlog  # noqa: E402  (what a load actually got: llama.cpp fit projection, offload, ctx, buffers)
+import model_fit  # noqa: E402  (rig-owned model memory and placement fit)
 
 LOCAL = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(LOCAL / "model_library"))
+import orchestration_model_library  # noqa: E402
 # Network storage (shared drive, later a NAS). Only the orchestration/bench stacks, the control
 # policy they read, and the model archive live here; it may be missing at any time.
 SHARED = Path("/mnt/shared")
@@ -941,22 +944,13 @@ def open_plan() -> hw_plan.Plan:
     return hw_plan.Plan(HW_STATE_ROOT)
 
 
-def admit_lease_spec(spec: dict, hs: hw_state.HardwareState) -> dict:
-    """Select cards from current rig state before the lease store records them.
-
-    The admission lock serializes fit decisions from current controllers. The
-    lease store still rejects overlaps from older explicit-card callers.
-    """
-    if not isinstance(spec, dict):
-        raise hw_state.StateError("invalid", "lease spec must be a JSON object")
-    if bool(spec.get("gpus_needed")) == bool(spec.get("gpu_ids")):
-        raise hw_state.StateError("invalid", "give exactly one of gpus_needed or gpu_ids")
+def lease_availability(hs: hw_state.HardwareState, requested_claim: str | None = None) -> tuple[list[dict], list[dict], dict[int, str]]:
+    """One authoritative live view of cards available to fit and lease admission."""
     scan = gpu_check()
     if not scan["ok"]:
         raise hw_state.StateError("state", "GPU scan failed: " + "; ".join(scan["errors"]))
     cards = scan["visible"]
     leases, claims, containers = hs.leases(), hs.claims(), llama_containers()
-    requested_claim = (spec.get("metadata") or {}).get("claim")
     if requested_claim and not any(c["name"] == requested_claim for c in claims):
         raise hw_state.StateError("not_found", f"no claim {requested_claim}")
     held = {int(g): lease for lease in leases for g in lease.get("gpu_ids", [])}
@@ -977,6 +971,20 @@ def admit_lease_spec(spec: dict, hs: hw_state.HardwareState) -> dict:
             unavailable[index] = f"outside claim {requested_claim}"
         else:
             free.append(card)
+    return cards, free, unavailable
+
+
+def admit_lease_spec(spec: dict, hs: hw_state.HardwareState) -> dict:
+    """Select cards from current rig state before the lease store records them.
+
+    The admission lock serializes fit decisions from current controllers. The
+    lease store still rejects overlaps from older explicit-card callers.
+    """
+    if not isinstance(spec, dict):
+        raise hw_state.StateError("invalid", "lease spec must be a JSON object")
+    if bool(spec.get("gpus_needed")) == bool(spec.get("gpu_ids")):
+        raise hw_state.StateError("invalid", "give exactly one of gpus_needed or gpu_ids")
+    cards, free, unavailable = lease_availability(hs, (spec.get("metadata") or {}).get("claim"))
     if spec.get("gpu_ids"):
         ids = [int(g) for g in spec["gpu_ids"]]
         if len(ids) != len(set(ids)) or not ids:
@@ -1028,6 +1036,33 @@ def admit_lease_spec(spec: dict, hs: hw_state.HardwareState) -> dict:
     spec["ports"] = [11434 + g for g in sorted(ids)]
     spec["metadata"] = {**(spec.get("metadata") or {}), "port": port}
     return spec
+
+
+def cmd_model_fit(args) -> int:
+    """Read-only detailed model fit. A later lease acquire rechecks live admission."""
+    try:
+        request = json.loads(args.request)
+        if not isinstance(request, dict):
+            raise ValueError("model fit request must be an object")
+        hs = open_hw_state()
+        with hw_state.FileLock(str(HW_STATE_ROOT / "admission.lock"), timeout=10):
+            cards, free, unavailable = lease_availability(hs, request.get("claim"))
+            if request.get("assume_idle") is True:
+                if request.get("claim"):
+                    raise ValueError("assume_idle cannot be combined with a claim")
+                free = [{**card, "used_mb": 0} for card in cards]
+                unavailable = {}
+            guard = guard_summary()
+            result = model_fit.preview(request, library=orchestration_model_library,
+                                       cards=cards, free=free, unavailable=unavailable,
+                                       host_available=guard.get("mem_available_mb"))
+        return emit({"fit": result, "source_sha256": result["source_sha256"]})
+    except (ValueError, TypeError) as exc:
+        return emit({"error": str(exc), "kind": "invalid"}, EXIT_FAIL)
+    except model_fit.ModelFitError as exc:
+        return emit({"error": str(exc), "kind": exc.kind, **exc.details}, EXIT_FAIL)
+    except hw_state.StateError as exc:
+        return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
 
 
 def cmd_lease(args) -> int:
@@ -1470,6 +1505,9 @@ def main() -> int:
     s.add_argument("--main-context-cap", type=int)
     s.set_defaults(fn=cmd_shared_kv)
     sub.add_parser("observe", help="JSON snapshot for the rig manager").set_defaults(fn=cmd_observe)
+    s = sub.add_parser("model-fit", help="read-only detailed model fit from the imported library and live cards")
+    s.add_argument("--request", required=True, help="JSON model, use, profile, context, and placement preference")
+    s.set_defaults(fn=cmd_model_fit)
     sub.add_parser("scan", help="refresh and save the rig-owned hardware inventory").set_defaults(fn=cmd_scan)
     s = sub.add_parser("why", help="why a runtime is down: exit, OOM, guard action, earlyoom")
     s.add_argument("--port", type=int)
