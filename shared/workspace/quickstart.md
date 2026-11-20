@@ -27,8 +27,8 @@ Preview is read-only and reports selected cards/port or a typed refusal. Capacit
 
 Use Gateway's Manager API or `rigctl` from the controller. Gateway selects a model and prepared service configuration; Orchestration performs physical admission, launches it, and returns observed readiness. The controller may run on the GPU host or another local machine. See Gateway's `docs/MANAGER.md` for request and lease commands.
 
-## Results and legacy state
+## Results and model data
 
-Benchmarking's deterministic campaign submitter sends grouped suite requests through Gateway. Benchmark receipts and model files may live on shared storage. The old brain/worker queues still use shared task and heartbeat files, and their status is available through the private Orchestration API. New work should not submit a plan file through the shared drive.
+Benchmarking submits deterministic campaign requests through Gateway and saves durable receipts. Model files and benchmark results can live on shared storage; the rig's hardware authority stays local. The old Markdown plan and shared task queues are no longer running or published.
 
-For rig service, guard, and recovery details see [the hardware layer guide](../scripts/rig/README.md). For the repository boundary see [CONTEXT.md](CONTEXT.md).
+For service, guard, and recovery details see [the hardware layer guide](../scripts/rig/README.md). For repository boundaries see [CONTEXT.md](CONTEXT.md).

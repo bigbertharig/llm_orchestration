@@ -10,17 +10,16 @@ hardware. It keeps working when the controller or the network is gone.
 |---|---|
 | `rig.py` (`/usr/local/bin/rig`) | command layer: modes, manager-spec remote loads, `observe`, `lease`, `claim` (add with `--ttl`/`--owner`, `renew`, `remove`), `kill --gpus` (operator override: stop runtimes, release leases, drop claims on cards), `start`, `stop`, `why` (why a runtime is down: exit, OOM, guard action, earlyoom) |
 | `hw_jobs.py` | detached jobs: a load runs as its own systemd unit (`rig-load-<id>`), never on an ssh session |
-| `hw_state.py` | the GPU lease and claim record (rig-local `shared/brain/hw/gpus/`), read directly by legacy GPU workers. A claim may cover busy cards (a split reserving its cards while it waits). Every claim has a TTL (default 10 minutes, maximum 1 hour) and belongs to the current rig boot. Long-running owners renew claims; expired or previous-boot claims are dropped and logged in `gpus/claims_expired.log` (llm-gateway MANAGER.md, "Reservations") |
+| `hw_state.py` | the GPU lease and claim record (rig-local `shared/brain/hw/gpus/`), A claim may cover busy cards (a split reserving its cards while it waits). Every claim has a TTL (default 10 minutes, maximum 1 hour) and belongs to the current rig boot. Long-running owners renew claims; expired or previous-boot claims are dropped and logged in `gpus/claims_expired.log` (llm-gateway MANAGER.md, "Reservations") |
 | `hw_guard.py` | always-on power, thermal and memory guard (`rig-guard.service`) and load admission |
 | `hw_loadlog.py` | what a load actually got, from llama-server's startup log: llama.cpp's fit projection per card, layers offloaded, context, buffers per card |
 | `hw_power.py` | GPU power limits: set at boot by `rig-power.service` (GTX 1060s 100 W, the overclocked 156 W boards 120 W, others their default; rig-local `brain/hw/power.json` overrides), and re-checked by `run_runtime.sh` for the cards of every load |
 | `hw_plan.py` | the active controller and the plan queue (rig-local `brain/hw/plan.json`); `rig-plan.service` works through it |
 | `systemd/` | units: `rig-boot`, `rig-guard`, `rig-plan`, `rig-power`, `rig-performance-tune`, the stack modes; `earlyoom.default` (tracked `/etc/default/earlyoom`) |
 | `rig-performance-tune.sh` | boot tuning (`/usr/local/sbin`): CPU governor performance, swappiness 10, GPU persistence mode |
-| `check_rig.sh`, `prepare_rig.sh` | host standard for the rig (`shared/workspace/systems_prep.md`): PASS/FAIL readiness checks; idempotent setup (`--apply`) |
+| `check_rig.sh`, `prepare_rig.sh` | PASS/FAIL readiness checks and idempotent host setup (`--apply`) |
 
-`../llama_runtime/run_runtime.sh` is the one path every model load takes (brain, workers, split
-workers, `rig.py`, campaigns, benchmark lanes, runtime smoke). It holds the rig rules for a load:
+`../llama_runtime/run_runtime.sh` is the shared launcher for rig services, campaigns, benchmark lanes, and runtime smoke tests. It holds the rig rules for a load:
 
 1. one model load at a time, rig-wide (flock), and never on a port that is already serving;
 2. the guard must read ok (`hw_guard.py admit`), checked with the lock held;

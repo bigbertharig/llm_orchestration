@@ -23,8 +23,6 @@ ml-env/
 
 # Config files (machine-specific)
 config.json
-shared/agents/config.json
-shared/agents/config.plan.json
 shared/rig_site_config.json
 
 # =============================================================================
@@ -33,15 +31,11 @@ shared/rig_site_config.json
 # Default: exclude everything in shared/
 shared/*
 
-# SYNC: Agent code (the core engine, minus permissions)
+# Local model-library projection
 !shared/model_library/
 !shared/model_library/**
 shared/model_library/__pycache__/
 shared/model_library/*.pyc
-!shared/agents/
-shared/agents/__pycache__/
-shared/agents/*.pyc
-shared/agents/permissions/
 
 # SYNC: Shared benchmark tooling committed into the main repo
 !shared/scripts/
@@ -88,7 +82,6 @@ shared/logs/
 
 # NO SYNC: Plans (each plan is its own repo, public or private)
 # shared/plans/          - plan folders live here but have their own git repos
-# PLAN_FORMAT.md lives in shared/workspace/ (synced with main repo)
 
 # SYNC: Workspace (docs, ideas, human escalations)
 !shared/workspace/
