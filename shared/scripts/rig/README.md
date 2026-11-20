@@ -127,8 +127,8 @@ accepts `--ctx-size auto` (leave the context to llama.cpp's `--fit`), used for e
 
 The gateway catalog and manager plan name GGUFs under
 `/mnt/shared/models`. On the rig, `rig.py` calls
-`brain_core.resolve_hotset_gguf` before launching a container. It checks
-`shared/agents/config.json` `model_search_roots` in order and uses a file
+`model_paths.resolve_hotset_gguf` before launching a container. It checks
+`rig_site_config.json` `model_search_roots` in order and uses a file
 with the same relative path from the first local root where it exists.
 The archive path is the canonical source. A manager plan showing
 `/mnt/shared/models/...` therefore does not prove the runtime read NFS;

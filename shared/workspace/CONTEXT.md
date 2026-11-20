@@ -1,6 +1,6 @@
 # LLM Orchestration context
 
-This repository owns rig-side hardware observation, physical admission, leases and claims, context reservations, runtime execution, and the existing legacy brain/worker batch engine. New user work and model assignment belong in Gateway. Benchmarking owns the canonical model library and test evidence. Harness owns model-facing tools and sessions. See the [cross-repo contract](https://github.com/bigbertharig/benchmarking/blob/master/CROSS_REPO_CONTRACT.md).
+This repository owns rig-side hardware observation, physical admission, leases and claims, context reservations, runtime execution, and the imported model-data projection. The old brain/worker source remains for a reviewed removal; its startup mode and unit are retired. New user work and model assignment belong in Gateway. Benchmarking owns the canonical model library and test evidence. Harness owns model-facing tools and sessions. See the [cross-repo contract](https://github.com/bigbertharig/benchmarking/blob/master/CROSS_REPO_CONTRACT.md).
 
 ## Current entry points
 
@@ -13,12 +13,12 @@ This repository owns rig-side hardware observation, physical admission, leases a
 
 The controller and GPU rig each have their own code checkout. In the Big Bertha deployment the Pi also mounts a shared drive; that drive holds model archives, benchmark results, and legacy batch state. It is optional for a single-host installation. New control commands travel through direct controller-to-rig calls, not through files placed on the shared drive.
 
-The rig keeps authoritative hardware state in its checkout under `shared/brain/hw/`. The old batch engine still uses shared task queues, plan files, heartbeats, and control policy. Legacy GPU workers read rig-local claims and leases. The obsolete Pi watchdog and shared hardware mirrors have been removed. The [published cross-repo contract](https://github.com/bigbertharig/benchmarking/blob/master/CROSS_REPO_CONTRACT.md) describes the migration boundary; do not treat mirrored files as a second hardware authority.
+The rig keeps authoritative hardware state in its checkout under `shared/brain/hw/`. The retired batch source still describes shared task queues, plan files, heartbeats, and control policy. No new work uses those files for command submission. The obsolete Pi watchdog and shared hardware mirrors have been removed. The [published cross-repo contract](https://github.com/bigbertharig/benchmarking/blob/master/CROSS_REPO_CONTRACT.md) describes the migration boundary; do not treat mirrored files as a second hardware authority.
 
 Model knowledge originates in Benchmarking's versioned export. `python3 shared/scripts/sync_model_library.py what-new|sync|check` imports the reviewed snapshot into Orchestration's local model files. Normal rig runtime does not import Benchmarking Python or use a mounted Benchmarking checkout for model selection.
 
 ## Legacy batch engine
 
-The brain/worker engine remains for existing batch state and results. Its task queues and older shoulder/arm plan documents describe that engine, not the path for new dashboard work. Keep completed results and receipts. Retire the remaining shared-state readers as their roles move to direct rig observation or Gateway/Harness tools. Do not create new Pi-to-rig submission wrappers.
+The brain/worker startup mode is removed. Its source and older shoulder/arm documents await a reviewed removal; completed batch results and receipts remain. Dashboard chat and Gateway/Harness tools are the replacement for interactive work. Do not create new Pi-to-rig submission wrappers.
 
-Protected instructions under `shared/core/` and agent permission policy files are deployment-owned and are not changed by this cleanup. Read `shared/core/RULES.md` before working on the old batch engine.
+Protected instructions under `shared/core/` are deployment-owned and are not changed by this cleanup.

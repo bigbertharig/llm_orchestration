@@ -130,6 +130,17 @@ class ModeTests(unittest.TestCase):
         self.assertEqual(set(rig.MODES), {"bench", "remote"})
         self.assertEqual(set(rig.LOAD_MODES), {"bench", "remote"})
 
+    def test_hotset_prefers_present_local_copy(self):
+        import tempfile
+        from model_paths import resolve_hotset_gguf
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path("/mnt/shared/models/example/model.gguf")
+            hotset = Path(tmp) / "example" / "model.gguf"
+            hotset.parent.mkdir()
+            self.assertEqual(resolve_hotset_gguf(archive, {"model_search_roots": [tmp]}), archive)
+            hotset.write_bytes(b"model")
+            self.assertEqual(resolve_hotset_gguf(archive, {"model_search_roots": [tmp]}), hotset)
+
     def test_remote_load_requires_manager_spec(self):
         with self.assertRaisesRegex(rig.RigError, "manager --spec"):
             rig.cmd_start_remote(SimpleNamespace(spec=None, profiles=["chat"]))

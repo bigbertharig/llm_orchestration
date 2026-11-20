@@ -94,16 +94,6 @@ def _validate_token(value: str, label: str) -> str:
     return normalized
 
 
-def rig_hardware_root(configured: str = "") -> Path:
-    """Find the rig's local hardware record, independent of legacy shared task state."""
-    explicit = configured or os.getenv("RIG_HW_DIR", "")
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-    # GPU workers and rig.py run from the same checkout. An override supports
-    # installations that keep mutable hardware state outside that checkout.
-    return Path(__file__).resolve().parent.parent / "brain" / "hw"
-
-
 class GPULeaseStore:
     """Locked repository for atomic single- and multi-GPU leases."""
 

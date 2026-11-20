@@ -40,7 +40,7 @@ IMPORT_DIR = Path("/var/lib/ollama-import")
 ARCHIVE_MODELS = Path("/mnt/shared/models")
 # The checkout this script lives in (<tree>/scripts/manage_model_hotset.py).
 TREE = Path(__file__).resolve().parents[1]
-MODEL_LIBRARY_DIR = TREE / "agents"
+MODEL_LIBRARY_DIR = TREE / "model_library"
 
 
 def run_cmd(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -269,7 +269,7 @@ def selected_gguf_paths(model_ids: list[str] | None = None) -> dict[str, Path]:
 
     model_ids = model_ids or []
     if not model_ids:
-        access = TREE / "agents" / "model_access.json"
+        access = TREE / "model_library" / "model_access.json"
         try:
             model_ids = json.loads(access.read_text(encoding="utf-8"))["models"]
         except (OSError, ValueError, KeyError) as exc:

@@ -25,6 +25,7 @@ ml-env/
 config.json
 shared/agents/config.json
 shared/agents/config.plan.json
+shared/rig_site_config.json
 
 # =============================================================================
 # Shared folder - selective sync
@@ -33,6 +34,8 @@ shared/agents/config.plan.json
 shared/*
 
 # SYNC: Agent code (the core engine, minus permissions)
+!shared/model_library/
+!shared/model_library/**
 !shared/agents/
 shared/agents/__pycache__/
 shared/agents/*.pyc

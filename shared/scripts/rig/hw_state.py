@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -46,9 +45,8 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 class HardwareState:
-    def __init__(self, root: Path, agents_dir: Path):
-        sys.path.insert(0, str(agents_dir))
-        import gpu_leases  # orchestration's lease store: same schema the GPU workers read
+    def __init__(self, root: Path):
+        import gpu_leases  # rig-local atomic lease store
 
         self.leases_mod = gpu_leases
         self.root = root

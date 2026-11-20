@@ -29,7 +29,7 @@ MODEL_ID = "qwen3.6:35b-a3b-xl"
 NEMO_ID = "nemotron-3.5-bolt:74b-a9b"
 NEMO_MODEL = Path("/data/model-hotset/nemotron-3.5-bolt-74b-a9b/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-Q3_K_XL.gguf")
 NEMO_OVERRIDES = Path("/mnt/shared/plans/shoulders/benchmarking/results/runtime_experiments/kv_expert_chat_20261107/nemo_experts_1234.tsv")
-MODEL_LIBRARY = ROOT / "agents/model_library.json"
+MODEL_LIBRARY = ROOT / "model_library/model_library.json"
 MODELS = {
     MODEL_ID: {"path": MODEL, "mode": "gpu0-main-q4", "gpus": (0,), "kv": "q4_0",
                "port": 11524, "context_allocation": "dynamic_at_attach"},

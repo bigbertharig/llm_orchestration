@@ -13,12 +13,12 @@ from pathlib import Path
 
 
 SHARED = Path(__file__).resolve().parent.parent
-AGENTS = SHARED / "agents"
+MODEL_LIBRARY_DIR = SHARED / "model_library"
 DEFAULT_SOURCE = SHARED / "plans" / "shoulders" / "benchmarking"
-SNAPSHOT = AGENTS / "model_library.json"
-CATALOG = AGENTS / "models.catalog.json"
-ACCESS = AGENTS / "model_access.json"
-TUNING = AGENTS / "model_tuning_profiles.json"
+SNAPSHOT = MODEL_LIBRARY_DIR / "model_library.json"
+CATALOG = MODEL_LIBRARY_DIR / "models.catalog.json"
+ACCESS = MODEL_LIBRARY_DIR / "model_access.json"
+TUNING = MODEL_LIBRARY_DIR / "model_tuning_profiles.json"
 SOURCE_NAME = "model_library_export.json"
 
 

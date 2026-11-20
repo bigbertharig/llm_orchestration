@@ -57,7 +57,7 @@ chk "docker active" systemctl is-active --quiet docker
 chk "bryan in docker group" bash -c 'id -nG bryan | tr " " "\n" | grep -qx docker'
 chk "nvidia container toolkit" nvidia-ctk --version
 chk "docker nvidia runtime configured" grep -q nvidia-container-runtime /etc/docker/daemon.json
-img=$(python3 -c "import json; print(json.load(open('$TREE/shared/agents/model_library.json'))['registry']['runtime_image'])" 2>/dev/null)
+img=$(python3 -c "import json; print(json.load(open('$TREE/shared/model_library/model_library.json'))['registry']['runtime_image'])" 2>/dev/null)
 [ -n "$img" ] && docker image inspect "$img" >/dev/null 2>&1 && ok "runtime image $img" || bad "runtime image ${img:-?}" "build it (llama_runtime/README.md)"
 missing=""
 for d in "$BENCH"/docker/bench-*/; do
@@ -98,7 +98,8 @@ ppd=$(systemctl is-enabled power-profiles-daemon 2>/dev/null)
 lvl=$(python3 -c "import json; print(json.load(open('$TREE/shared/brain/hw/guard_state.json'))['level'])" 2>/dev/null)
 [ "$lvl" = "ok" ] && ok "guard ok" || bad "guard ok" "${lvl:-no guard state}"
 chk "orchestration venv (requests, filelock)" /home/bryan/llm-orchestration-venv/bin/python -c 'import requests, filelock'
-chk "machine config shared/agents/config.json" test -s "$TREE/shared/agents/config.json"
+# Local hotset preferences are optional; the archive path remains valid without them.
+[ ! -f "$TREE/shared/rig_site_config.json" ] || chk "rig site config" test -s "$TREE/shared/rig_site_config.json"
 
 # --- access and time ---
 chk "passwordless sudo" sudo -n true

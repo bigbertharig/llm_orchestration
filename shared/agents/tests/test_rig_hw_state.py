@@ -24,7 +24,7 @@ class HardwareStateTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def make(self):
-        return hw_state.HardwareState(self.root, AGENTS)
+        return hw_state.HardwareState(self.root)
 
     def local_record(self, name):
         return json.loads((self.root / "gpus" / name).read_text())

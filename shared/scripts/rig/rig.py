@@ -46,10 +46,10 @@ LOCAL = Path(__file__).resolve().parents[2]
 SHARED = Path("/mnt/shared")
 STATE_PATH = LOCAL / "brain" / "rig_mode.json"
 LOCK_PATH = LOCAL / "brain" / "rig_mode.lock"
-CONFIG_PATH = LOCAL / "agents" / "config.json"
+CONFIG_PATH = Path(os.environ.get("RIG_SITE_CONFIG", str(LOCAL / "rig_site_config.json")))
 # Remote loads require a complete manager spec; this checkout owns no gateway offer file.
 RUN_RUNTIME = LOCAL / "scripts" / "llama_runtime" / "run_runtime.sh"
-# GPU leases and claims are rig-local; legacy GPU workers read the local record.
+# GPU leases and claims are rig-local hardware state.
 HW_STATE_ROOT = LOCAL / "brain" / "hw"
 # The cards seen at the last boot (index, UUID, bus), so a scan can say what changed; never a requirement.
 LAYOUT_PATH = HW_STATE_ROOT / "gpu_layout.json"
@@ -464,8 +464,7 @@ def refresh_remote_status(state: dict) -> dict:
 def spec_profile(pid: str, spec: dict) -> dict:
     """A load spec from the rig manager (`--spec`, llm-gateway `load_model`): any registry model, with the
     context and tensor split the manager planned for the GPUs it leased. Same shape as a published profile."""
-    sys.path.insert(0, str(LOCAL / "agents"))
-    from brain_core import resolve_hotset_gguf
+    from model_paths import resolve_hotset_gguf
 
     missing = [k for k in ("model", "gguf_path", "ctx_size") if not spec.get(k)]
     if missing:
@@ -488,7 +487,7 @@ def spec_profile(pid: str, spec: dict) -> dict:
         budget = cfg.get("resident_budget_gib")
         if budget is not None and not (0 < float(budget) <= 26):
             raise RigError("Strata resident_budget_gib must be 0..26")
-    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.is_file() else {}
     return {"batch_size": 64, "parallel": 1, "extra_args": [], **spec, "id": pid, "spec": True,
             "gguf_path": str(resolve_hotset_gguf(spec["gguf_path"], config))}
 
@@ -930,7 +929,7 @@ def guard_summary() -> dict:
 
 
 def open_hw_state() -> hw_state.HardwareState:
-    return hw_state.HardwareState(HW_STATE_ROOT, LOCAL / "agents")
+    return hw_state.HardwareState(HW_STATE_ROOT)
 
 
 def emit(payload: dict, code: int = 0) -> int:
@@ -1439,9 +1438,6 @@ def cmd_shared_kv(args) -> int:
 
 
 def main() -> int:
-    if not LOCAL.joinpath("agents").is_dir():
-        say(f"error: {LOCAL}/agents not found; rig.py must run from a rig checkout")
-        return EXIT_FAIL
     STATE_PATH.parent.mkdir(exist_ok=True)
     ap = argparse.ArgumentParser(prog="rig", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)

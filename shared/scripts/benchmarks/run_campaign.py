@@ -37,14 +37,14 @@ from typing import Any, Dict, List, Optional, Set
 
 TICK_INTERVAL = 3  # seconds between scheduler ticks
 SHARED_ROOT = Path(os.environ.get("CAMPAIGN_SHARED_ROOT", "/mnt/shared"))
-AGENTS_DIR = Path(__file__).resolve().parents[2] / "agents"
-TUNING_PROFILES_PATH = AGENTS_DIR / "model_tuning_profiles.json"
+MODEL_LIBRARY_DIR = Path(__file__).resolve().parents[2] / "model_library"
+TUNING_PROFILES_PATH = MODEL_LIBRARY_DIR / "model_tuning_profiles.json"
 SUITE_CONTRACTS_PATH = SHARED_ROOT / "plans" / "shoulders" / "benchmarking" / "docker" / "suite_contracts.json"
-MODELS_CATALOG_PATH = SHARED_ROOT / "agents" / "models.catalog.json"
+MODELS_CATALOG_PATH = MODEL_LIBRARY_DIR / "models.catalog.json"
 HISTORY_ROOT = SHARED_ROOT / "logs" / "benchmarks" / "campaigns" / "history"
 BENCHMARKING_SCRIPTS = SHARED_ROOT / "plans" / "shoulders" / "benchmarking"
-if str(AGENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(AGENTS_DIR))
+if str(MODEL_LIBRARY_DIR) not in sys.path:
+    sys.path.insert(0, str(MODEL_LIBRARY_DIR))
 import orchestration_model_library as model_library
 # The rig manager (llm-gateway docs/MANAGER.md) on the Pi, reached with rigctl over ssh like the lanes.
 MANAGER_HOST = os.environ.get("HARNESS_HOST", "pi")

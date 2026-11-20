@@ -25,9 +25,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TREE = HERE.parents[1]  # <tree>/scripts/llama_runtime -> <tree>
-sys.path.insert(0, str(TREE / "agents"))
+sys.path.insert(0, str(TREE / "model_library"))
 import orchestration_model_library as model_library  # noqa: E402
-from brain_core import resolve_hotset_gguf  # noqa: E402
+sys.path.insert(0, str(TREE / "scripts" / "rig"))
+from model_paths import resolve_hotset_gguf  # noqa: E402
 
 PORT = 11450  # outside every mode's port range
 NAME = "llama-runtime-smoke"
@@ -54,7 +55,7 @@ def lane(entry: dict, model_id: str) -> tuple[str, str | None]:
 def models_in_use() -> list[str]:
     roles = model_library.load_roles()
     used = [spec["model"] for spec in roles["roles"].values()]
-    access = json.loads((TREE / "agents" / "model_access.json").read_text(encoding="utf-8"))
+    access = json.loads((TREE / "model_library" / "model_access.json").read_text(encoding="utf-8"))
     used += access["models"]
     used += PROMOTION_MODELS
     return list(dict.fromkeys(used))
