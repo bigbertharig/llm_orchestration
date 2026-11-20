@@ -190,7 +190,11 @@ def main() -> int:
             write_files({SNAPSHOT: snapshot, CATALOG: catalog, ACCESS: access, TUNING: tuning})
             summary["pending"] = False
             summary["synced"] = True
-        print(json.dumps(summary, indent=2))
+        if args.action == "sync-if-available":
+            state = "updated" if summary.get("synced") else "current"
+            print(f"Benchmarking source {summary['source_sha256']} from {args.source}: {state}")
+        else:
+            print(json.dumps(summary, indent=2))
         return 1 if args.action == "check" and summary["pending"] else 0
     except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
         if args.action == "sync-if-available":
