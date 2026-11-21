@@ -27,7 +27,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from filelock import Timeout as FileLockTimeout
 
@@ -40,6 +40,7 @@ import hw_guard  # noqa: E402  (rig-side power/thermal/memory guard and load adm
 import hw_plan  # noqa: E402  (active controller + queue of what to do next; rig-plan.service works through it)
 import hw_loadlog  # noqa: E402  (what a load actually got: llama.cpp fit projection, offload, ctx, buffers)
 import model_fit  # noqa: E402  (rig-owned model memory and placement fit)
+import schedule_preview  # noqa: E402  (read-only workload placement alternatives)
 import observations  # noqa: E402  (rig-owned fit calibration receipts)
 
 LOCAL = Path(__file__).resolve().parents[2]
@@ -98,7 +99,7 @@ def say(msg: str) -> None:
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def caller() -> str:
@@ -1066,6 +1067,39 @@ def cmd_model_fit(args) -> int:
         return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
 
 
+def cmd_schedule_preview(args) -> int:
+    """Read-only scheduling snapshot; live admission still happens for every later load."""
+    try:
+        request = json.loads(args.request)
+        hs = open_hw_state()
+        with hw_state.FileLock(str(HW_STATE_ROOT / "admission.lock"), timeout=10):
+            cards, free, unavailable = lease_availability(hs, None)
+            guard = guard_summary()
+            plan = plan_report_safe()
+            result = schedule_preview.build_preview(
+                request,
+                library=orchestration_model_library,
+                cards=cards,
+                free=free,
+                unavailable=unavailable,
+                host_available=guard.get("mem_available_mb"),
+                loads_admitted=bool(guard.get("loads_admitted")),
+                guard_level=str(guard.get("level") or "unknown"),
+                boot_id=boot_id(),
+                plan_version=int(plan.get("version") or 0),
+                mode=read_state().get("mode", "idle"),
+                observed_at=now_iso(),
+                load_history=observations.rows(),
+            )
+        return emit(result)
+    except (ValueError, TypeError) as exc:
+        return emit({"error": str(exc), "kind": "invalid"}, EXIT_FAIL)
+    except model_fit.ModelFitError as exc:
+        return emit({"error": str(exc), "kind": exc.kind, **exc.details}, EXIT_FAIL)
+    except hw_state.StateError as exc:
+        return emit({"error": str(exc), "kind": exc.kind}, EXIT_FAIL)
+
+
 def cmd_fit_observation(args) -> int:
     """Store a completed load receipt beside the rig's fit calibration state."""
     try:
@@ -1526,6 +1560,9 @@ def main() -> int:
     s = sub.add_parser("model-fit", help="read-only detailed model fit from the imported library and live cards")
     s.add_argument("--request", required=True, help="JSON model, use, profile, context, and placement preference")
     s.set_defaults(fn=cmd_model_fit)
+    s = sub.add_parser("schedule-preview", help="read-only revisioned placement alternatives for workloads")
+    s.add_argument("--request", required=True, help="JSON workloads and optional candidate limit")
+    s.set_defaults(fn=cmd_schedule_preview)
     s = sub.add_parser("fit-observation", help="store a completed load receipt for rig-owned fit calibration")
     s.add_argument("--row", required=True, help="JSON load or load_failed observation")
     s.set_defaults(fn=cmd_fit_observation)

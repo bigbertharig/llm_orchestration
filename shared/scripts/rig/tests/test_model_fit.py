@@ -16,6 +16,7 @@ import fit
 import model_fit
 import observations
 import rig
+import schedule_preview
 
 
 class Library:
@@ -44,6 +45,45 @@ CARDS = [{"index": 0, "total_mb": 24576, "used_mb": 0},
 
 
 class ModelFitTests(unittest.TestCase):
+    def test_rig_backend_timestamps_are_explicit_utc(self):
+        self.assertTrue(rig.now_iso().endswith("+00:00"))
+
+    def test_schedule_preview_exposes_revisioned_orchestration_alternatives(self):
+        shape = fit.Shape("m", "llama", 16384, 8, [1024**3], [1024.0],
+                          [None], [0], 0, 0)
+        history = [{"kind": "load", "model": "m", "source": "model.gguf",
+                    "gpus": [1], "seconds": 12.0}]
+        with patch.object(fit, "shape_for", return_value=shape):
+            result = schedule_preview.build_preview(
+                {"workloads": [{"id": "model_m", "model": "m", "use": "benchmark"}]},
+                library=Library(), cards=CARDS, free=CARDS[1:], unavailable={0: "leased"},
+                host_available=8192, loads_admitted=True, guard_level="normal",
+                boot_id="boot-a", plan_version=7, mode="bench",
+                observed_at="2026-11-21T00:00:00+00:00", load_history=history)
+        self.assertEqual(result["schema"], "rig-scheduling-preview/1")
+        self.assertEqual(result["constraints"]["hardware_authority"], "orchestration")
+        self.assertTrue(result["admission_required_at_execution"])
+        self.assertTrue(result["revision"].startswith("sha256:"))
+        alternatives = result["workloads"][0]["alternatives"]
+        solo = next(row for row in alternatives if row["gpus"] == [1])
+        self.assertTrue(solo["currently_available"])
+        self.assertEqual((solo["estimated_load_seconds"], solo["load_estimate_basis"]),
+                         (12.0, "measured_layout"))
+        self.assertFalse(next(row for row in alternatives if row["gpus"] == [0])["currently_available"])
+
+    def test_schedule_preview_revision_changes_with_hardware_state(self):
+        shape = fit.Shape("m", "llama", 16384, 8, [1024**3], [1024.0],
+                          [None], [0], 0, 0)
+        common = dict(library=Library(), cards=CARDS, host_available=8192,
+                      loads_admitted=True, guard_level="normal",
+                      boot_id="boot-a", plan_version=7, mode="bench",
+                      observed_at="2026-11-21T00:00:00+00:00", load_history=[])
+        request = {"workloads": [{"id": "m", "model": "m"}]}
+        with patch.object(fit, "shape_for", return_value=shape):
+            first = schedule_preview.build_preview(request, free=CARDS, unavailable={}, **common)
+            second = schedule_preview.build_preview(request, free=CARDS[1:], unavailable={0: "leased"}, **common)
+        self.assertNotEqual(first["revision"], second["revision"])
+
     def test_imported_strata_recipes_keep_tested_gpu_layout(self):
         library = rig.orchestration_model_library
         for model in ("qwen3.6:35b-a3b-xl", "qwen3.8-flash-next:q2_0"):
