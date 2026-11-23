@@ -1,4 +1,5 @@
 # Python and generated builds
+.venv/
 __pycache__/
 *.py[cod]
 *.so

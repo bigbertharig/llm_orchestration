@@ -13,12 +13,18 @@ Orchestration is the GPU host's hardware and runtime layer. It discovers cards, 
 
 The four repositories communicate through reviewed requests, receipts, and versioned model-library exports. Benchmarking owns the source model registry. Each runtime keeps a local projection; it is not a second authority. A model can be a candidate for testing without being offered in the main dashboard. Gateway requests a load; Orchestration admits it against live hardware or returns a reason for refusal.
 
+This repository is NVIDIA/CUDA-focused today, with hardware discovery, telemetry, power controls, fit,
+log parsing, containers, and runtime launch. AMD/ROCm and Apple Silicon/Metal integrations are planned
+through versioned backends in the same Orchestration control plane. See
+[Portability and accelerator backends](docs/PORTABILITY.md) for the contract and acceptance gates.
+
 ## Start here
 
 1. [Rig quickstart](shared/workspace/quickstart.md) covers scanning, observing, previewing, and starting admitted services.
 2. [Hardware layer](shared/scripts/rig/README.md) describes the rig command, leases, controller ownership, guard, and runtime lifecycle.
 3. [System context](shared/workspace/CONTEXT.md) explains code and state locations.
 4. [External runtimes](EXTERNAL_REPOS.md) identifies upstream engines and local revisions.
+5. [Portability and accelerator backends](docs/PORTABILITY.md) defines the multi-backend architecture.
 
 On the GPU host, `rig scan` writes the versioned inventory in the rig's hardware state directory. `rig observe` is the live report consumed by a controller. `rig lease preview --spec JSON` checks fit without allocating; acquisition checks again under the rig lock. The controller may run on the same machine or a separate host. A shared drive is optional for control; it can hold model archives and benchmark results.
 
@@ -29,6 +35,16 @@ A chat reserves its admitted context and KV capacity until release. Unused token
 `shared/scripts/rig/` contains the hardware service, guard, lease store, job executor, and systemd units. `shared/scripts/llama_runtime/` launches llama-server with the rig's runtime checks. `shared/model_library/` is the local projection imported from Benchmarking. Each code-running host uses its own checkout; Big Bertha also has a mounted drive for models and results. Private site configuration supplies addresses, mounts, and model paths. GPU count and indices are discovered rather than fixed by this repository.
 
 The old Markdown plan, brain, GPU-worker, CPU-worker, NFS task queue, and private batch API were removed. The active rig `plan` is a hardware action queue for loads, unloads, and recovery; it does not interpret Markdown work plans. Gateway dashboard chat and agent sessions handle user work.
+
+## Local test environment
+
+Use this repository's own virtual environment rather than another project's interpreter:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q shared/scripts/rig/tests
+```
 
 ## Managed Strata runtime
 
