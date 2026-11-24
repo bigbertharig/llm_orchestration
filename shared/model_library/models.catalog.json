@@ -439,7 +439,6 @@
       "tier": 3,
       "placement": "single_gpu",
       "gguf_path": "/mnt/shared/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_M.gguf",
-      "in_testing": true,
       "tags": [
         "brain_candidate",
         "dense"

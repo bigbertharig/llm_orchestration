@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "cbaf2feca266eb1ccb3ffaba728b4dd0330e7cfa3dbf44e519cc2794e5000793",
+  "source_sha256": "24cea2dd69d155a535f15e88be065993c9eb5f60d6f98a4687521a49ccdd9e76",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -1938,9 +1938,18 @@
       "qwen3.8:27b": {
         "gguf": "qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_M.gguf",
         "source_url": "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_M.gguf",
-        "status": "candidate",
-        "in_testing": true,
-        "status_note": "Full code and validated reasoning suites completed by 2026-10-17. HumanEval+ 90.2%, strict prompt IFEval 92%, but BBH 41.6% in the selected validated run versus 91.6% for active Qwen3.6 27B. Candidate pending a useful role or settings correction.",
+        "status": "active",
+        "in_testing": false,
+        "status_note": "Promoted 2026-11-24 for experimental Harness and subagent evaluation after receipt audit. Full code, validated reasoning, GeoImport, pipeline, runtime, and context-capacity gates completed in October. HumanEval+ 90.2%, MBPP+ 77.5%, flexible BBH 91.0%, flexible DROP 96%, prompt-level strict IFEval 92%, and runtime checks 4/4. No production role replaces Qwen3.6 yet; thinking mode is slower and produced 26/1350 empty BBH answers at the 8192-token reasoning cap.",
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "llama.cpp/b11669",
+          "recipe": "GPU 0, full GPU offload, one slot",
+          "default_context": 16384,
+          "context_limit": 190720,
+          "context_basis": "Single-GPU capacity receipt qwen3_8_27b__compact passed at the measured 190720-position memory limit; the separate three-GPU trained-ceiling run reached 262144.",
+          "limits": "The routine single-GPU profile is capped at 190720. Thinking-on reasoning can be roughly 3x slower than thinking-off and may exhaust the 8192-token output budget."
+        },
         "schedule": {
           "tier": 3,
           "placement": "single_gpu",
@@ -2784,6 +2793,16 @@
     "schema_version": 1,
     "about": "Candidate child routes. The manager resolves local placement; the harness runs bounded child sessions. Ready state is checked at request time.",
     "candidates": {
+      "qwen38_27b_separate": {
+        "provider": "gateway_profile",
+        "model": "qwen3.8:27b",
+        "agent_types": [
+          "coding",
+          "research"
+        ],
+        "status": "experimental",
+        "evidence": "results/MODEL_BENCHMARK_REFERENCE.md"
+      },
       "qwen35_shared_1060": {
         "provider": "rig_shared_chat",
         "model": "qwen3.6:35b-a3b-xl",
@@ -4808,5 +4827,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-20T20:28:23+00:00"
+  "imported_at": "2026-11-24T08:10:49+00:00"
 }
