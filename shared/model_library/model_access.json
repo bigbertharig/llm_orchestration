@@ -7,6 +7,7 @@
     "qwen2.5-coder:7b",
     "qwen3-coder:30b-a3b",
     "qwen3.6:27b",
-    "qwen3.6:35b-a3b-xl"
+    "qwen3.6:35b-a3b-xl",
+    "qwen3.8:27b"
   ]
 }

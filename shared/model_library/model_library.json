@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "24cea2dd69d155a535f15e88be065993c9eb5f60d6f98a4687521a49ccdd9e76",
+  "source_sha256": "94da02206aa0a431b53680cedfcf62e15e18259688c0cdc8d303e18fcc16645b",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -1987,6 +1987,18 @@
               "max": 262144,
               "max_basis": "gguf_train"
             }
+          },
+          "interactive": {
+            "runtime": {
+              "ctx_size": 65536,
+              "batch_size": 128,
+              "parallel": 1
+            },
+            "extra_args": [
+              "--reasoning",
+              "on"
+            ],
+            "notes": "Experimental 65K Harness/subagent route. This stays out of the dashboard chatbot catalog; the measured single-GPU capacity ceiling is 190720 positions."
           }
         },
         "model_size_bytes": 16464440224,
@@ -4827,5 +4839,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-24T08:10:49+00:00"
+  "imported_at": "2026-11-24T08:14:58+00:00"
 }
