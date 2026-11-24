@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "a2bac605071a6a62c6c5d0210144b1f5216838ceb3dfdafc27f7e59da033f21c",
+  "source_sha256": "c2bf168a24a8e014f946accf0162e907fb6213fa0ed28fb8ea052a7e86d8efb2",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -1938,17 +1938,17 @@
       "qwen3.8:27b": {
         "gguf": "qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_M.gguf",
         "source_url": "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_M.gguf",
-        "status": "candidate",
-        "in_testing": true,
-        "status_note": "Modern loading-gate refresh started 2026-11-24 before experimental Harness promotion. The older full code, validated reasoning, GeoImport, pipeline, runtime, and context receipts remain valid quality evidence, but predate the current min/max loading, depth, speed, and chat-capacity workflow. HumanEval+ 90.2%, MBPP+ 77.5%, flexible BBH 91.0%, flexible DROP 96%, prompt-level strict IFEval 92%, and runtime checks 4/4. Thinking mode is slower and produced 26/1350 empty BBH answers at the 8192-token reasoning cap.",
+        "status": "active",
+        "in_testing": false,
+        "status_note": "Promoted after the 2026-11-24 modern hardware gate. Current and legacy evidence now cover min/max loading, 10%/90% recall on the ordinary GPU0 frontier, speed, shared-weight Q4 chat memory and concurrency, full code, validated reasoning, GeoImport, pipeline, and runtime. HumanEval+ 90.2%, MBPP+ 77.5%, flexible BBH 91.0%, flexible DROP 96%, prompt-level strict IFEval 92%, and runtime checks 4/4. Thinking mode is slower and produced 26/1350 empty BBH answers at the 8192-token reasoning cap.",
         "loading_stage": {
-          "state": "in_progress",
+          "state": "ready_for_benchmark",
           "runtime": "llama.cpp/b11669",
           "recipe": "GPU 0, full GPU offload, one slot",
           "default_context": 16384,
-          "context_limit": 262144,
-          "context_basis": "Unvalidated candidate test target from the GGUF trained bound. Legacy evidence reached 190720 positions on one GPU and 262144 on three GPUs; the current Phase 2 and Phase 8 runners must refresh both before promotion.",
-          "limits": "Modern min/max loads, 10%/90% recall, speed, and practical chat-capacity checks are in progress. Thinking-on reasoning can be roughly 3x slower than thinking-off and may exhaust the 8192-token output budget."
+          "context_limit": 226048,
+          "context_basis": "Current 2026-11-24 hardware gate: GPU0 loaded 8192..226048 with full 66/66-layer offload; 10% and 90% recall passed at 226048. GPU0+one GTX 1060 loaded the trained 262144 ceiling, but the conventional 59/7 layer split was rejected for interactive use after its 90% prompt exceeded 20 minutes with the 1060 saturated. Evidence: results/model_context_bounds_qwen38_27b_20261124 and results/runtime_experiments/qwen38_27b_capacity_g0_ctx226048_20261124.json.",
+          "limits": "Validated ordinary route: GPU0 weights, one slot, up to 226048 positions; interactive profile uses 65536. Experimental shared-weight Q4 worker evidence keeps all weights on GPU0: worker allocation is ceil(1.3333 + 0.02150181 * context_tokens) MiB, so a 262144-token chat costs 5638 MiB. Four 1060s hold four full chats; adding the 1070 holds a fifth full chat plus one measured 97280-token gap-fill chat. Five full chats decoded concurrently at 12.08-12.60 tok/s each; six mixed chats at 8.90-15.03 tok/s each. The shared layout is evidence only until Orchestration has an explicit Qwen3.8 service mode and admission profile. Thinking-on reasoning can be roughly 3x slower than thinking-off and may exhaust the 8192-token output budget. Evidence: results/runtime_experiments/qwen38_27b_shared_kv_capacity_20261124.json and qwen38_27b_all_worker_capacity_20261124.json."
         },
         "schedule": {
           "tier": 3,
@@ -1998,7 +1998,7 @@
               "--reasoning",
               "on"
             ],
-            "notes": "Experimental 65K Harness/subagent route. This stays out of the dashboard chatbot catalog; the measured single-GPU capacity ceiling is 190720 positions."
+            "notes": "Validated 65K Harness/subagent route on GPU0. The measured ordinary single-GPU capacity ceiling is 226048 positions; shared-weight multi-chat placement remains a separate experimental recipe."
           }
         },
         "model_size_bytes": 16464440224,
@@ -4839,5 +4839,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-24T17:55:02+00:00"
+  "imported_at": "2026-11-24T18:23:29+00:00"
 }
