@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "c2bf168a24a8e014f946accf0162e907fb6213fa0ed28fb8ea052a7e86d8efb2",
+  "source_sha256": "dbc79c8f53639b61140df4c46f84a282c3665732bfde2ca61b93d5663b3b2599",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -1996,9 +1996,9 @@
             },
             "extra_args": [
               "--reasoning",
-              "on"
+              "off"
             ],
-            "notes": "Validated 65K Harness/subagent route on GPU0. The measured ordinary single-GPU capacity ceiling is 226048 positions; shared-weight multi-chat placement remains a separate experimental recipe."
+            "notes": "Validated 65K Harness/subagent route on GPU0 with reasoning off for bounded, visible tool-task finalization. Two reasoning-on supervised runs consumed the 1536-token terminal budget without visible answer text; the Harness correctly failed closed after its one repair. The benchmark default keeps reasoning on for maximum quality scores. The measured ordinary single-GPU capacity ceiling is 226048 positions; shared-weight multi-chat placement remains a separate experimental recipe."
           }
         },
         "model_size_bytes": 16464440224,
@@ -4839,5 +4839,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-24T18:23:29+00:00"
+  "imported_at": "2026-11-24T22:42:10+00:00"
 }
