@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "d205830d0fe1e8f1929872ef0cca0777f6a374a909e96ad56b0c32e733ddc419",
+  "source_sha256": "a2bac605071a6a62c6c5d0210144b1f5216838ceb3dfdafc27f7e59da033f21c",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -1946,8 +1946,8 @@
           "runtime": "llama.cpp/b11669",
           "recipe": "GPU 0, full GPU offload, one slot",
           "default_context": 16384,
-          "context_limit": 190720,
-          "context_basis": "Provisional legacy evidence only: single-GPU receipt qwen3_8_27b__compact reached 190720 positions and the three-GPU trained-ceiling run reached 262144. Refresh with the current Phase 2 and Phase 8 runners before promotion.",
+          "context_limit": 262144,
+          "context_basis": "Unvalidated candidate test target from the GGUF trained bound. Legacy evidence reached 190720 positions on one GPU and 262144 on three GPUs; the current Phase 2 and Phase 8 runners must refresh both before promotion.",
           "limits": "Modern min/max loads, 10%/90% recall, speed, and practical chat-capacity checks are in progress. Thinking-on reasoning can be roughly 3x slower than thinking-off and may exhaust the 8192-token output budget."
         },
         "schedule": {
@@ -4839,5 +4839,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-24T17:35:12+00:00"
+  "imported_at": "2026-11-24T17:55:02+00:00"
 }
