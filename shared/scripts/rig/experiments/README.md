@@ -3,7 +3,7 @@
 ## Ownership and migration (2026-11-24)
 
 These are historical research launchers awaiting relocation under the
-[cleanup plan](https://github.com/bigbertharig/benchmarking/blob/master/REPOSITORY_CLEANUP_PLAN.md). Benchmarking owns their experiment definitions, comparison logic
+[implementation status](../../../../README.md#implementation-status). Benchmarking owns their experiment definitions, comparison logic
 and evidence. Orchestration retains runtime launch, admission, power and observation
 operations plus their correctness tests. Preserve old receipts and measured conditions.
 The commands below describe the existing experiment path, not a portable standalone

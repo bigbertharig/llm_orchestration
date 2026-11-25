@@ -39,5 +39,12 @@ For service, guard, and recovery details see [the hardware layer guide](../scrip
 Orchestration owns local model/profile registration and load/observe/stop. This user workflow
 must work without Gateway or a Benchmarking registry entry, while preserving controller
 ownership, leases and guard checks. The existing prepared-spec CLI is a primitive, not a
-completed standalone onboarding workflow. Follow the [cleanup plan](https://github.com/bigbertharig/benchmarking/blob/master/REPOSITORY_CLEANUP_PLAN.md); no new local
+completed standalone onboarding workflow. Follow the [implementation status](../../README.md#implementation-status); no new local
 load command is documented as available until its acceptance tests pass.
+
+## Read-only direct-client operations
+
+`rig inspect power --gpus 0,2` verifies observed power caps against the runtime plan.
+`rig inspect model-path --path /models/example.gguf` resolves a file on the runtime host.
+Both return versioned JSON and fail explicitly without model loads or repairs. They work
+without Gateway or a Benchmarking snapshot; see [the inspection contract](../../docs/CLI_INSPECTION.md).

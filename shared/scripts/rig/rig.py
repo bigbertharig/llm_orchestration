@@ -1527,10 +1527,23 @@ def cmd_shared_kv(args) -> int:
     return subprocess.run(command, check=False).returncode
 
 
+def cmd_inspect(args) -> int:
+    from inspection import inspect
+    payload, code = inspect(args.action, gpus=getattr(args, "gpus", ""),
+                            path=getattr(args, "path", ""), config_path=CONFIG_PATH)
+    return emit(payload, code)
+
+
 def main() -> int:
-    STATE_PATH.parent.mkdir(exist_ok=True)
     ap = argparse.ArgumentParser(prog="rig", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("inspect", help="read-only versioned inspection; never repairs or loads")
+    inspect_sub = s.add_subparsers(dest="action", required=True)
+    power = inspect_sub.add_parser("power", help="verify selected cards against the configured power plan")
+    power.add_argument("--gpus", required=True)
+    path = inspect_sub.add_parser("model-path", help="resolve an archive path on this runtime host")
+    path.add_argument("--path", required=True)
+    s.set_defaults(fn=cmd_inspect)
     s = sub.add_parser("status")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_status)
@@ -1670,6 +1683,8 @@ def main() -> int:
     s.set_defaults(fn=cmd_stop)
     sub.add_parser("boot").set_defaults(fn=cmd_boot)
     args = ap.parse_args()
+    if args.cmd != "inspect":
+        STATE_PATH.parent.mkdir(exist_ok=True)
     try:
         return args.fn(args)
     except RigError as exc:

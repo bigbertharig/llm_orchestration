@@ -74,7 +74,7 @@ Supply site-private hosts, service identities, model paths, mounts, credentials,
 Run inventory and synthetic hardware surveys, then remeasure every offered model/runtime recipe. Do not
 copy Big Bertha's CUDA margins, power rules, topology choices, or successful placements as facts about
 another machine. The cross-repository ownership and artifact contract is maintained in Benchmarking's
-[`CROSS_REPO_CONTRACT.md`](https://github.com/bigbertharig/benchmarking/blob/master/CROSS_REPO_CONTRACT.md).
+[model-library contract](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_LIBRARY_CONTRACT.md).
 
 ## Standalone status (2026-11-24)
 
@@ -82,5 +82,4 @@ Running a local model without Gateway is a required product workflow. The curren
 quickstart delegates model loading to Gateway, while `rig start remote` accepts a
 prepared spec from a controller. A documented local profile-to-admission-to-launch
 workflow is still needed; it must preserve controller fencing, leases, and guard
-checks. Standalone acceptance has not passed. See the [source audit and acceptance
-criteria](https://github.com/bigbertharig/benchmarking/blob/master/reports/STANDALONE_ISOLATION_AUDIT_2026-11-24.md).
+checks. Standalone acceptance has not passed. See the [implementation status](../README.md#implementation-status).

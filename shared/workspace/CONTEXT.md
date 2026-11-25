@@ -16,6 +16,6 @@ Benchmarking exports a versioned evidence/model library. Its identity is authori
 
 The old brain/worker engine, Markdown work plans, NFS task queues, Pi submit wrappers, and private batch API have been removed. The rig's current `plan` queue is limited to hardware actions. Dashboard chat and Gateway-managed agent sessions replace interactive work orchestration.
 
-Protected site instructions and private configuration are not published. See the [cross-repo contract](https://github.com/bigbertharig/benchmarking/blob/master/CROSS_REPO_CONTRACT.md) for request and ownership boundaries.
+Protected site instructions and private configuration are not published. See the [product boundary](../../README.md#product-boundary) for request and ownership boundaries.
 
-The [cleanup plan](https://github.com/bigbertharig/benchmarking/blob/master/REPOSITORY_CLEANUP_PLAN.md) defines standalone acceptance and the migration sequence. Each repo keeps its own correctness tests; comparative measurements belong to Benchmarking.
+The [implementation status](../../README.md#implementation-status) defines standalone acceptance and the migration sequence. Each repo keeps its own correctness tests; comparative measurements belong to Benchmarking.

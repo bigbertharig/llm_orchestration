@@ -39,8 +39,8 @@ import os
 
 LOCAL = Path(__file__).resolve().parents[2]
 # Rig-local hardware state, whichever copy of this file runs (rig checkout or the shared drive's copy).
-_HW = Path(os.getenv("RIG_HW_DIR") or "/home/bryan/llm_orchestration/shared/brain/hw")
-CONFIG_PATH = (_HW if _HW.is_dir() else LOCAL / "brain" / "hw") / "power.json"
+_HW = Path(os.getenv("RIG_HW_DIR") or str(LOCAL / "brain" / "hw"))
+CONFIG_PATH = _HW / "power.json"
 OVERRIDE_PATH = Path(os.getenv("RIG_POWER_OVERRIDE") or "/run/rig/power_override.json")
 DEFAULT_RULES = {"by_model": {"GTX 1060": 100, "RTX 3090 Ti": 350}, "by_index": {}}
 
