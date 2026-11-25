@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "2ee8308ce3f544b008814180144fda5b01a2478df4dc4554c16964b1cd5d170f",
+  "source_sha256": "b314d9d0cc7fe7616b852c09e2854b7c4bbf825dad28e29b8b6c21835718ab8a",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -4859,5 +4859,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-25T00:48:46+00:00"
+  "imported_at": "2026-11-25T23:29:55+00:00"
 }
