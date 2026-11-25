@@ -3,8 +3,8 @@
 Orchestration is the authority for physical resources regardless of accelerator vendor. Gateway may
 request a capability, profile, context, or scheduling outcome, but Orchestration discovers the actual
 machine, admits or refuses the request, starts the runtime, and reports observed state. Benchmarking
-supplies optional measured evidence; Harness uses a configured inference provider. The active
-Harness loop currently requires a Gateway-ready route; direct-provider execution is Planned.
+supplies optional measured evidence; Harness uses a configured inference provider. Harness supports direct OpenAI-compatible provider execution as well as Gateway-ready
+routes. Gateway remains optional for standalone Harness use.
 
 ## Current backend
 
@@ -42,7 +42,8 @@ a CUDA default.
 
 Site configuration selects installed backends, runtime adapters and executable local profiles.
 Benchmarking evidence is an optional input, kept separate from explicit local configuration.
-A standalone user can register an unbenchmarked model through the Planned local workflow.
+A standalone user can register and load an unbenchmarked model through the active
+`rig-lifecycle/1` local-profile workflow.
 Model recipes declare required
 capabilities and retain the Benchmarking evidence environment. The control plane asks an adapter for a
 preview and then rechecks admission under its own lock before allocation. Receipts record adapter name
@@ -76,10 +77,10 @@ copy Big Bertha's CUDA margins, power rules, topology choices, or successful pla
 another machine. The cross-repository ownership and artifact contract is maintained in Benchmarking's
 [model-library contract](https://github.com/bigbertharig/benchmarking/blob/master/MODEL_LIBRARY_CONTRACT.md).
 
-## Standalone status (2026-11-24)
+## Standalone status (2026-11-25)
 
-Running a local model without Gateway is a required product workflow. The current
-quickstart delegates model loading to Gateway, while `rig start remote` accepts a
-prepared spec from a controller. A documented local profile-to-admission-to-launch
-workflow is still needed; it must preserve controller fencing, leases, and guard
-checks. Standalone acceptance has not passed. See the [implementation status](../README.md#implementation-status).
+The `rig-lifecycle/1` API registers a local profile, claims a controller, checks
+admission, loads the runtime and observes or stops it without Gateway or a
+Benchmarking registry. The independent `rig-control` service also serves local
+requests. The November 25 Pi/GPU handoff passed live NVIDIA loading and recovery.
+See [standalone operations](STANDALONE.md) and the [control-plane guide](CONTROL_PLANE.md).

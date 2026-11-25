@@ -59,7 +59,8 @@ MIT.
 
 Implemented and tested: versioned inspection, direct lifecycle and CLI wire contracts,
 immutable local profile registration, controller-owned load/observe/stop, lease cleanup and
-scoped power restoration. The rig suite passes 118 tests, including no-registry local profiles
-with fake hardware and real lease/controller stores. Comparative experiment source moved to
-Benchmarking with provenance. Live NVIDIA deployment/loading remains a separate acceptance
-step; no unrelated GPU-host edits were overwritten. See [standalone operations](docs/STANDALONE.md).
+scoped power restoration. The November 25 Pi/GPU handoff passed real NVIDIA load, Gateway
+inference, Gateway restart, unload, shared-KV turns and power-changing campaign recovery.
+Orchestration passed 268 tests in the extended handoff. Comparative experiment source
+moved to Benchmarking with provenance. See [standalone operations](docs/STANDALONE.md)
+and the [control-plane guide](docs/CONTROL_PLANE.md).
