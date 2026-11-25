@@ -47,14 +47,9 @@ MIT.
 
 ## Implementation status
 
-Implemented: [read-only inspection CLI](docs/CLI_INSPECTION.md) for strict power-plan
-checks and runtime-owned model-path resolution. The rig suite passes 113 tests, including
-an installation without sibling repositories or model artifacts. Standalone registration,
-load/stop lifecycle and deployment to the separate GPU checkout remain pending.
-
-The following cleanup is Planned until its tests and receipts are recorded:
-
-- Expose supported direct-client operations with versioned results and typed refusals.
-- Add a standalone profile registration/load/observe/stop workflow that preserves admission and controller fencing.
-- Keep imported measurements immutable; accept explicit local models without a Benchmarking record.
-- Move comparative experiment drivers to their evaluation owner; retain runtime correctness tests.
+Implemented and tested: versioned inspection, direct lifecycle and CLI wire contracts,
+immutable local profile registration, controller-owned load/observe/stop, lease cleanup and
+scoped power restoration. The rig suite passes 118 tests, including no-registry local profiles
+with fake hardware and real lease/controller stores. Comparative experiment source moved to
+Benchmarking with provenance. Live NVIDIA deployment/loading remains a separate acceptance
+step; no unrelated GPU-host edits were overwritten. See [standalone operations](docs/STANDALONE.md).

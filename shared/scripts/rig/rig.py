@@ -1537,6 +1537,12 @@ def cmd_inspect(args) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(prog="rig", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser('wire', help='Versioned transport for supported rig CLI operations')
+    s.add_argument('--request', required=True)
+    s.set_defaults(fn=lambda args: __import__('wire').command(args.request, HW_STATE_ROOT / 'wire'))
+    s = sub.add_parser('api', help='Versioned standalone lifecycle request; local profiles need no registry')
+    s.add_argument('--request', required=True, help='rig-lifecycle/1 JSON request')
+    s.set_defaults(fn=lambda args: __import__('lifecycle_api').command(sys.modules[__name__], args.request))
     s = sub.add_parser("inspect", help="read-only versioned inspection; never repairs or loads")
     inspect_sub = s.add_subparsers(dest="action", required=True)
     power = inspect_sub.add_parser("power", help="verify selected cards against the configured power plan")
@@ -1683,7 +1689,7 @@ def main() -> int:
     s.set_defaults(fn=cmd_stop)
     sub.add_parser("boot").set_defaults(fn=cmd_boot)
     args = ap.parse_args()
-    if args.cmd != "inspect":
+    if args.cmd not in ("inspect", "api", "wire"):
         STATE_PATH.parent.mkdir(exist_ok=True)
     try:
         return args.fn(args)

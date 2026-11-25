@@ -1,0 +1,8 @@
+{
+  "schema": "rig-cli/1",
+  "request_id": "fixture-observe-1",
+  "arguments": [
+    "status",
+    "--json"
+  ]
+}
