@@ -1,5 +1,14 @@
 # Qwen3-Coder-Next expert placement experiment
 
+## Ownership and migration (2026-11-24)
+
+These are historical research launchers awaiting relocation under the
+[cleanup plan](https://github.com/bigbertharig/benchmarking/blob/master/REPOSITORY_CLEANUP_PLAN.md). Benchmarking owns their experiment definitions, comparison logic
+and evidence. Orchestration retains runtime launch, admission, power and observation
+operations plus their correctness tests. Preserve old receipts and measured conditions.
+The commands below describe the existing experiment path, not a portable standalone
+product workflow; their resource prerequisites remain mandatory during migration.
+
 Run this wrapper on the rig after the gateway has unloaded other models and the six GPUs have been reserved for the experiment. It uses the existing run_runtime.sh lifecycle and the installed Q4_K_S GGUF from the rig hotset.
 
     bash shared/scripts/rig/experiments/qwen3_coder_next_expert_split.sh 32k 11514

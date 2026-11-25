@@ -3,7 +3,8 @@
 Orchestration is the authority for physical resources regardless of accelerator vendor. Gateway may
 request a capability, profile, context, or scheduling outcome, but Orchestration discovers the actual
 machine, admits or refuses the request, starts the runtime, and reports observed state. Benchmarking
-supplies measured evidence; Harness consumes only a Gateway-ready route.
+supplies optional measured evidence; Harness uses a configured inference provider. The active
+Harness loop currently requires a Gateway-ready route; direct-provider execution is Planned.
 
 ## Current backend
 
@@ -19,7 +20,7 @@ Keep one repository and split the code into a backend-neutral control plane plus
 and runtime adapters:
 
 ```text
-Gateway request
+Authorized controller or local client request
     -> Orchestration control plane
        inventory / capabilities / admission / reservations / lifecycle / receipts
            -> accelerator backend: nvidia | amd | apple
@@ -39,7 +40,10 @@ constraints, and feature flags. Discrete VRAM, ROCm-visible devices, and Apple u
 different resource models; an absent capability is reported as unsupported, not guessed or filled with
 a CUDA default.
 
-Site configuration selects installed backends and runtime adapters. Model recipes declare required
+Site configuration selects installed backends, runtime adapters and executable local profiles.
+Benchmarking evidence is an optional input, kept separate from explicit local configuration.
+A standalone user can register an unbenchmarked model through the Planned local workflow.
+Model recipes declare required
 capabilities and retain the Benchmarking evidence environment. The control plane asks an adapter for a
 preview and then rechecks admission under its own lock before allocation. Receipts record adapter name
 and version, inventory identity, recipe/evidence identity, requested resources, observed placement, and
@@ -70,7 +74,7 @@ Supply site-private hosts, service identities, model paths, mounts, credentials,
 Run inventory and synthetic hardware surveys, then remeasure every offered model/runtime recipe. Do not
 copy Big Bertha's CUDA margins, power rules, topology choices, or successful placements as facts about
 another machine. The cross-repository ownership and artifact contract is maintained in Benchmarking's
-[`CROSS_REPO_CONTRACT.md`](https://github.com/bigbertharig/benchmarking/blob/main/CROSS_REPO_CONTRACT.md).
+[`CROSS_REPO_CONTRACT.md`](https://github.com/bigbertharig/benchmarking/blob/master/CROSS_REPO_CONTRACT.md).
 
 ## Standalone status (2026-11-24)
 

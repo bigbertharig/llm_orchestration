@@ -1,22 +1,28 @@
 # LLM Orchestration Engine
 
-Orchestration is the GPU host's hardware and runtime layer. It discovers cards, checks physical admission, owns leases and context reservations, starts model services, and reports their observed state. Gateway is the controller and user-facing entry point. Benchmarking publishes model evidence and load recipes; Harness supplies model-facing tools and agent behavior.
+Orchestration is the GPU host's hardware and runtime layer. It discovers cards, checks physical admission, owns leases and context reservations, starts model services, and reports their observed state. Gateway is the controller in the active deployment. A complete standalone local-model workflow is Planned. Benchmarking publishes optional model evidence and measured recipes; Harness supplies model-facing tools and agent behavior.
 
 ## Project map
 
+The [cross-repo contract](https://github.com/bigbertharig/benchmarking/blob/master/CROSS_REPO_CONTRACT.md) owns the product division. These are accepted
+responsibilities; the [cleanup plan](https://github.com/bigbertharig/benchmarking/blob/master/REPOSITORY_CLEANUP_PLAN.md) separates active code from pending migration.
+Each product must support a useful standalone workflow with optional integrations.
+
 | Repository | Responsibility |
 |---|---|
-| [llm-gateway](https://github.com/bigbertharig/llm-gateway) | Dashboard, conversations, model API, tool policy, work coordination, and controller requests. |
-| [llm_orchestration](https://github.com/bigbertharig/llm_orchestration) | Rig hardware observation, admission, leases, context reservations, and model runtimes. |
-| [benchmarking](https://github.com/bigbertharig/benchmarking) | Model and hardware measurements, canonical model library, recipes, evaluation suites, and results. |
-| [llm-harness](https://github.com/bigbertharig/llm-harness) | Shared tools, agent loops, context, sessions, delegation, and recovery. |
+| [llm-gateway](https://github.com/bigbertharig/llm-gateway) | Dashboard, conversations, remote access, cloud accounts/connectors, connection configuration, operator approvals and work coordination. |
+| [llm-harness](https://github.com/bigbertharig/llm-harness) | Agent loop, model-facing tools, bounded execution, context, delegation, execution journals and receipts. |
+| [llm_orchestration](https://github.com/bigbertharig/llm_orchestration) | Local executable model profiles, hardware discovery, physical admission, reservations, runtime lifecycle and observation. |
+| [benchmarking](https://github.com/bigbertharig/benchmarking) | Evaluation tasks, comparative experiments, measurements, scores, result history and published model evidence. |
 
-The four repositories communicate through reviewed requests, receipts, and versioned model-library exports. Benchmarking owns the source model registry. Each runtime keeps a local projection; it is not a second authority. A model can be a candidate for testing without being offered in the main dashboard. Gateway requests a load; Orchestration admits it against live hardware or returns a reason for refusal.
+Gateway coordinates the connected deployment. Direct clients and standalone callers are
+part of the accepted design. Product state stays with its owner; versioned requests,
+events, receipts and optional artifact imports connect the products. Private site
+configuration supplies addresses, credentials, model files and mounts. The current
+checkout dependencies are tracked in the cleanup plan, not a supported installation contract.
 
-This repository is NVIDIA/CUDA-focused today, with hardware discovery, telemetry, power controls, fit,
-log parsing, containers, and runtime launch. AMD/ROCm and Apple Silicon/Metal integrations are planned
-through versioned backends in the same Orchestration control plane. See
-[Portability and accelerator backends](docs/PORTABILITY.md) for the contract and acceptance gates.
+Orchestration is NVIDIA/CUDA-focused today. AMD/ROCm and Apple Silicon/Metal backends
+are Planned. See [portability](docs/PORTABILITY.md) for backend acceptance.
 
 ## Start here
 
