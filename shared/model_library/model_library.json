@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "dbc79c8f53639b61140df4c46f84a282c3665732bfde2ca61b93d5663b3b2599",
+  "source_sha256": "2ee8308ce3f544b008814180144fda5b01a2478df4dc4554c16964b1cd5d170f",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -1996,9 +1996,29 @@
             },
             "extra_args": [
               "--reasoning",
-              "off"
+              "off",
+              "--temp",
+              "0.7",
+              "--top-p",
+              "0.8",
+              "--top-k",
+              "20",
+              "--min-p",
+              "0",
+              "--presence-penalty",
+              "1.5",
+              "--repeat-penalty",
+              "1"
             ],
-            "notes": "Validated 65K Harness/subagent route on GPU0 with reasoning off for bounded, visible tool-task finalization. Two reasoning-on supervised runs consumed the 1536-token terminal budget without visible answer text; the Harness correctly failed closed after its one repair. The benchmark default keeps reasoning on for maximum quality scores. The measured ordinary single-GPU capacity ceiling is 226048 positions; shared-weight multi-chat placement remains a separate experimental recipe."
+            "notes": "Validated 65K Harness/subagent route on GPU0 with reasoning off for bounded, visible tool-task finalization. Two reasoning-on supervised runs consumed the 1536-token terminal budget without visible answer text; the Harness correctly failed closed after its one repair. The benchmark default keeps reasoning on for maximum quality scores. The measured ordinary single-GPU capacity ceiling is 226048 positions; shared-weight multi-chat placement remains a separate experimental recipe. Sampling defaults are owned by this Benchmarking profile and passed as llama-server startup arguments: temperature 0.7, top-p 0.8, top-k 20, min-p 0, presence penalty 1.5, repeat penalty 1. Evidence: llm-harness/docs/research/qwen38_sampler_and_tool_contract_2026-11-24.md; a bounded interactive trial, not a universal quality claim. Harness requests inherit runtime defaults.",
+            "inference": {
+              "temperature": 0.7,
+              "top_p": 0.8,
+              "top_k": 20,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "repeat_penalty": 1.0
+            }
           }
         },
         "model_size_bytes": 16464440224,
@@ -4839,5 +4859,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-24T22:42:10+00:00"
+  "imported_at": "2026-11-25T00:48:46+00:00"
 }
