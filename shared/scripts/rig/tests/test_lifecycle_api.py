@@ -76,3 +76,18 @@ def test_power_bounds_and_restore_preserve_other_cards(tmp_path,monkeypatch):
     power_session.apply(0,100,override=path,restart=lambda:None)
     power_session.apply(0,None,override=path,restart=lambda:None)
     assert __import__('json').loads(path.read_text())=={'by_index':{'1':80}}
+
+
+def test_live_power_session_uses_installed_helper_and_restores_base_plan(monkeypatch):
+    import power_session
+    from types import SimpleNamespace
+    monkeypatch.setattr(power_session.hw_power, 'cards', lambda: [
+        {'index': 0, 'min_w': 100, 'max_w': 480, 'default_w': 450, 'name': 'NVIDIA GeForce RTX 3090 Ti'}])
+    monkeypatch.setattr(power_session.hw_power, 'load_rules', lambda **kw: {'by_index': {}, 'by_model': {'RTX 3090 Ti':350}})
+    calls=[]
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout='{"gpu_id":0,"previous_override_w":300,"override_w":null,"applied_w":350}', stderr='')
+    monkeypatch.setattr(power_session.subprocess, 'run', run)
+    assert power_session.apply(0,None)['applied_w']==350
+    assert calls[0]==['sudo','-n','/usr/local/libexec/rig-power-override','0','restore','350.0']

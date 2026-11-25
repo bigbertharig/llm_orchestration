@@ -97,3 +97,23 @@ The rig returned to idle with no leases; observed GPU power limits matched prefl
 This verifies the controller handoff and ordinary load/unload path; shared-KV and
 power-changing benchmark session recovery retain their separate acceptance gates.
 Keep site units, connection secrets, rollback copies and live receipts outside Git.
+
+
+For live `rig-lifecycle/1` power sessions, install the reviewed
+`shared/scripts/rig/power_override_helper.py` as root-owned
+`/usr/local/libexec/rig-power-override` with mode 755. The helper accepts only a
+GPU index and bounded watt values; it writes the fixed `/run/rig/power_override.json`
+path and invokes `nvidia-smi` directly. It imports no checkout code and cannot accept
+paths or commands. Configure passwordless execution of this installed helper for the
+trusted rig service user. The lifecycle API checks the active controller and owned
+lease before invoking it. Keep the installed copy and checkout source hash matched.
+
+
+November 25 completion: live shared-KV loaded the reviewed Qwen 35B service, assigned
+a main context on GPU 0 and an attached context on GPU 1, served Gateway turns on
+both routes, and released all claims. A real benchmark power session applied 300 W
+on GPU 0 and restored the baseline 350 W on success, endpoint failure, and after a
+controlled runner interruption. The interrupted run recovered from its durable
+`power.set` request ID and stopped its model. Final hardware state was idle with no
+leases, claims or containers. The root-owned helper's installed hash and service
+receipt are kept outside Git in the live handoff evidence directory.

@@ -18,8 +18,22 @@ def apply(gpu, watts, *, override=None, restart=None):
         raise ValueError('watts outside hardware bounds')
     path = Path(override or hw_power.OVERRIDE_PATH)
     doc = json.loads(path.read_text()) if path.is_file() else {}
+    previous = doc.get('by_index', {}).get(str(gpu))
+    if override is None and restart is None:
+        # The root-owned helper is installed separately from this mutable checkout.
+        # It accepts only a GPU index and bounded watt values; no paths or commands.
+        target = watts if watts is not None else hw_power.planned(
+            card, hw_power.load_rules(override=Path('/dev/null')))
+        result = subprocess.run(['sudo', '-n', '/usr/local/libexec/rig-power-override',
+                                 str(gpu), 'restore' if watts is None else str(watts), str(target)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise RuntimeError('power override helper failed: ' + (result.stderr or result.stdout)[-500:])
+        try:
+            return json.loads(result.stdout)
+        except ValueError as exc:
+            raise RuntimeError('power override helper returned invalid JSON') from exc
     values = doc.setdefault('by_index', {})
-    previous = values.get(str(gpu))
     if watts is None:
         values.pop(str(gpu), None)
     else:
