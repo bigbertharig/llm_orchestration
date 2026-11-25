@@ -86,3 +86,14 @@ November 25 source validation: 149 control-plane tests and 118 hardware tests pa
 (267 total). The final eight HTTP/shared-context checks were rerun after boundary fixes.
 Separate installed environments passed CLI independence and the real HTTP Gateway connection;
 the combined installed shared-chat scenario passed. These tests use fake hardware.
+
+
+November 25 live acceptance: controller ownership moved from the deployed Gateway
+Manager to the independent Orchestration service. The GPU producer was upgraded to
+`rig-cli/1` after preserving its local edits and checking the merge. A real Ministral
+3B load acquired an `orchestration` lease, served inference through the request client,
+survived a Gateway restart with the same controller process, then unloaded cleanly.
+The rig returned to idle with no leases; observed GPU power limits matched preflight.
+This verifies the controller handoff and ordinary load/unload path; shared-KV and
+power-changing benchmark session recovery retain their separate acceptance gates.
+Keep site units, connection secrets, rollback copies and live receipts outside Git.
