@@ -1,13 +1,23 @@
 # LLM Orchestration Engine
 
-Orchestration is the GPU host's hardware and runtime layer. It discovers cards, checks physical admission, owns leases and context reservations, starts model services, and reports their observed state. Gateway is the controller in the active deployment. A complete standalone local-model workflow is Planned. Benchmarking publishes optional model evidence and measured recipes; Harness supplies model-facing tools and agent behavior.
+Orchestration owns local-model decisions and execution: model profiles and offers, fit,
+placement, admission, scheduling, leases, context reservations, loading, recovery and observed
+runtime state. It works through its CLI/API without Gateway. Gateway is an optional dashboard
+that makes requests. Benchmarking evidence is optional; Harness owns agent/tool execution.
 
 ## Product boundary
 
-Orchestration owns executable local profiles, hardware discovery, physical admission,
-reservations, model runtime lifecycle and observation. Gateway is an optional controller;
-Benchmarking artifacts are optional evidence inputs. Local configuration retains separate
-provenance. Orchestration is NVIDIA/CUDA-focused; other backends remain Planned.
+When a local-runtime decision is ambiguous, Orchestration owns it. Its control service and
+hardware executor are two layers of this product. Orchestration is NVIDIA/CUDA-focused;
+other accelerator backends remain Planned. Local models can be registered without an
+imported Benchmarking record. See [standalone operations](docs/STANDALONE.md).
+
+## Control service and CLI
+
+[Control-plane setup](docs/CONTROL_PLANE.md) describes the independently installed
+`rig-control serve` service and `rig-control request` CLI. `orchestration-control/1` provides
+versioned requests with authentication, durable request identity and explicit refusal/recovery
+semantics. The service owns reconciliation and heartbeat; it continues without a dashboard.
 
 ## Start here
 
@@ -19,7 +29,7 @@ provenance. Orchestration is NVIDIA/CUDA-focused; other backends remain Planned.
 
 On the GPU host, `rig scan` writes the versioned inventory in the rig's hardware state directory. `rig observe` is the live report consumed by a controller. `rig lease preview --spec JSON` checks fit without allocating; acquisition checks again under the rig lock. The controller may run on the same machine or a separate host. A shared drive is optional for control; it can hold model archives and benchmark results.
 
-A chat reserves its admitted context and KV capacity until release. Unused tokens inside that reservation remain allocated for capacity accounting; no billing is implied. The rig controls the physical resources and reports observed placement. Gateway still contains some fit logic; moving those remaining calculations behind rig admission is tracked in the Gateway Manager guide.
+A chat reserves its admitted context and KV capacity until release. Unused tokens inside that reservation remain allocated for capacity accounting; no billing is implied. The rig controls the physical resources and reports observed placement. The local control service owns fit and placement policy; the hardware executor rechecks live admission.
 
 ## Code and deployment
 
@@ -33,8 +43,8 @@ Use this repository's own virtual environment rather than another project's inte
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q shared/scripts/rig/tests
+.venv/bin/python -m pip install -e . -r requirements-dev.txt
+.venv/bin/python -m pytest -q tests/control shared/scripts/rig/tests
 ```
 
 ## Managed Strata runtime

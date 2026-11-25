@@ -46,3 +46,10 @@ registration/load/stop with fake hardware and real lease/controller stores, admi
 failure cleanup, uncertain replay, power restoration, wire versions and inspection isolation.
 Real NVIDIA loading and power experiments are separate site acceptance, not implied by fake tests.
 Measurement drivers moved to Benchmarking; runtime readiness/admission tests remain here.
+
+## Local decision service
+
+The [control service and CLI](CONTROL_PLANE.md) own the Manager extracted from Gateway,
+including offers, fit, placement, admission, leases, shared-chat allocation and recovery.
+Gateway is optional presentation and request transport. Its connection is never required
+for Orchestration CLI use. See the guide for authentication and controller migration.

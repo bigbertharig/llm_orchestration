@@ -2,7 +2,7 @@
 
 How fast the rig runs models on which cards (card vs bus, splits, PCIe links, context capacity) and the tools that measure it: benchmarking `RIG_PERFORMANCE.md`.
 
-Rig-side code for the GPU rig. It carries out commands from a controller (llm-gateway's rig
+Rig-side code for the GPU rig. It carries out commands from a controller (Orchestration's local
 manager on the Pi, `docs/MANAGER.md` there) and enforces the physical rules itself, close to the
 hardware. It keeps working when the controller or the network is gone.
 
@@ -10,7 +10,7 @@ hardware. It keeps working when the controller or the network is gone.
 |---|---|
 | `rig.py` (`/usr/local/bin/rig`) | command layer: modes, manager-spec remote loads, `observe`, `lease`, `claim` (add with `--ttl`/`--owner`, `renew`, `remove`), `kill --gpus` (operator override: stop runtimes, release leases, drop claims on cards), `start`, `stop`, `why` (why a runtime is down: exit, OOM, guard action, earlyoom) |
 | `hw_jobs.py` | detached jobs: a load runs as its own systemd unit (`rig-load-<id>`), never on an ssh session |
-| `hw_state.py` | the GPU lease and claim record (rig-local `shared/brain/hw/gpus/`), A claim may cover busy cards (a split reserving its cards while it waits). Every claim has a TTL (default 10 minutes, maximum 1 hour) and belongs to the current rig boot. Long-running owners renew claims; expired or previous-boot claims are dropped and logged in `gpus/claims_expired.log` (llm-gateway MANAGER.md, "Reservations") |
+| `hw_state.py` | the GPU lease and claim record (rig-local `shared/brain/hw/gpus/`), A claim may cover busy cards (a split reserving its cards while it waits). Every claim has a TTL (default 10 minutes, maximum 1 hour) and belongs to the current rig boot. Long-running owners renew claims; expired or previous-boot claims are dropped and logged in `gpus/claims_expired.log` (Orchestration CONTROL_PLANE.md, "Reservations") |
 | `hw_guard.py` | always-on power, thermal and memory guard (`rig-guard.service`) and load admission |
 | `hw_loadlog.py` | what a load actually got, from llama-server's startup log: llama.cpp's fit projection per card, layers offloaded, context, buffers per card |
 | `hw_power.py` | GPU power limits: set at boot by `rig-power.service` (GTX 1060s 100 W, the overclocked 156 W boards 120 W, others their default; rig-local `brain/hw/power.json` overrides), and re-checked by `run_runtime.sh` for the cards of every load |
@@ -115,7 +115,7 @@ was not shown to be the cause.
 ## Model loads from the manager (2026-10-18)
 
 `rig start remote <id> --spec JSON --gpus G --port P --lease L` loads any registry model the rig manager
-planned (llm-gateway `docs/MANAGER.md`, "Model loads"): the spec carries the model, GGUF, context,
+planned (Orchestration `docs/CONTROL_PLANE.md`, "Model loads"): the spec carries the model, GGUF, context,
 tensor split and extra args; the manager queues it as a plan `load` item with `spec` in its args. After
 the runtime serves, the rig reads its log (`hw_loadlog.py`): a load that is not fully on the GPUs is
 refused and unloaded; a ready one records `fit` (layers, context, MiB per card, llama.cpp's projection)
@@ -148,7 +148,7 @@ executor's start, whichever runs first in the new boot): the item that was runni
 `interrupted`, and nothing queued runs until the active controller has reviewed the report and
 resumed it (`rig plan resume --controller ID`). The controller keeps a copy of the report; if the
 rig's plan is behind it (lost file), the controller writes it back (`rig plan restore`). Details:
-llm-gateway `docs/MANAGER.md` rule 1c.
+Orchestration `docs/CONTROL_PLANE.md` rule 1c.
 
 ## The cards are whatever the scan finds
 

@@ -56,3 +56,7 @@ shared/scripts/*ed25519.pub
 !shared/workspace/
 shared/workspace/google.md
 shared/workspace/local/
+
+# Installed control-plane packaging outputs
+/build/
+*.egg-info/

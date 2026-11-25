@@ -1,6 +1,6 @@
 # Orchestration context
 
-This repository owns rig-side hardware discovery, physical admission, leases and claims, context reservations, runtime execution, and the imported model-library projection. Gateway owns dashboard/user work, conversations, remote access, cloud accounts, connections, approvals, model assignment and controller requests in the connected deployment. Benchmarking owns its published model-evidence library and comparative evaluations. Orchestration owns executable local profiles; standalone registration/loading remains Planned. Harness owns model-facing tools, bounded agent execution, context and execution journals/receipts.
+This repository owns rig-side hardware discovery, physical admission, leases and claims, context reservations, runtime execution, and the imported model-library projection. Gateway owns dashboard/user work, conversations, remote access, cloud accounts, connections, approvals and requests. Orchestration owns local model selection and the active controller. Benchmarking owns its published model-evidence library and comparative evaluations. Orchestration owns executable local profiles; standalone registration/loading and the independent control service are implemented in source. Harness owns model-facing tools, bounded agent execution, context and execution journals/receipts.
 
 ## Current entry points
 
@@ -12,10 +12,13 @@ This repository owns rig-side hardware discovery, physical admission, leases and
 
 The controller can run on the GPU host or another local machine. The GPU host keeps authoritative hardware state in its own checkout under `shared/brain/hw/`. Code-running hosts keep separate checkouts. A mounted shared drive is optional for hardware control; Big Bertha uses one for model files and benchmark artifacts. Control requests do not travel through task files on that drive.
 
-Benchmarking exports a versioned evidence/model library. Its identity is authoritative for that artifact; the Planned standalone workflow also accepts explicit local models and configuration with separate provenance. `python3 shared/scripts/sync_model_library.py what-new|sync|check` imports the reviewed snapshot into `shared/model_library/`. Runtime code reads that local projection. Candidate and active models share the same source registry; active status governs normal dashboard offers, while candidate status remains available to tests.
+Benchmarking exports a versioned evidence/model library. Its identity is authoritative for that artifact; the standalone workflow also accepts explicit local models and configuration with separate provenance. `python3 shared/scripts/sync_model_library.py what-new|sync|check` imports the reviewed snapshot into `shared/model_library/`. Runtime code reads that local projection. Candidate and active models share the same source registry; active status governs normal dashboard offers, while candidate status remains available to tests.
 
 The old brain/worker engine, Markdown work plans, NFS task queues, Pi submit wrappers, and private batch API have been removed. The rig's current `plan` queue is limited to hardware actions. Dashboard chat and Gateway-managed agent sessions replace interactive work orchestration.
 
 Protected site instructions and private configuration are not published. See the [product boundary](../../README.md#product-boundary) for request and ownership boundaries.
 
 The [implementation status](../../README.md#implementation-status) defines standalone acceptance and the migration sequence. Each repo keeps its own correctness tests; comparative measurements belong to Benchmarking.
+
+The Manager now lives in `src/rig_control/manager/`; `rig-control serve` owns reconciliation
+and local decisions. See `docs/CONTROL_PLANE.md` for deployment migration and CLI use.

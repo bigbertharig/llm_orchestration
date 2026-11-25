@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-orchestration-control"
+version = "0.1.0"
+description = "Local model decisions and runtime control, independent of Gateway"
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.142,<1", "httpx>=0.28,<1", "uvicorn>=0.54,<1"]
+
+[project.scripts]
+rig-control = "rig_control.service:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests/control"]

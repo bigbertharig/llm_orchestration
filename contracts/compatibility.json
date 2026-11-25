@@ -5,9 +5,12 @@
     "rig-cli/1",
     "rig-lifecycle/1",
     "rig-power-check/1",
-    "rig-model-path/1"
+    "rig-model-path/1",
+    "orchestration-control/1"
   ],
   "optional_consumes": [
     "Benchmarking model-library artifacts"
-  ]
+  ],
+  "local_runtime_control": "orchestration-control/1",
+  "runtime_decision_owner": "llm_orchestration"
 }

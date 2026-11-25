@@ -1,0 +1,24 @@
+{
+  "schema": "orchestration-control/1",
+  "transport": "authenticated HTTP POST /v1/control",
+  "request_fields": [
+    "schema",
+    "request_id",
+    "operation",
+    "arguments"
+  ],
+  "success_fields": [
+    "schema",
+    "request_id",
+    "ok",
+    "result"
+  ],
+  "failure_fields": [
+    "schema",
+    "request_id",
+    "ok",
+    "error"
+  ],
+  "write_semantics": "durable-before-dispatch; identical completed ID returns receipt; changed payload refused; interrupted dispatch requires reconciliation",
+  "authority": "Orchestration owns local model decisions; Gateway requests and presents"
+}
