@@ -13,6 +13,16 @@ import rig  # noqa: E402
 
 
 class ModeTests(unittest.TestCase):
+    def test_boot_stops_managed_runtimes_before_recording_idle(self):
+        scan = {"ok": True, "visible": [], "ids": [], "errors": [], "changes": []}
+        with patch.object(rig, "Lock", return_value=nullcontext()), \
+             patch.object(rig, "stop_everything") as stop, \
+             patch.object(rig, "gpu_check", return_value=scan), \
+             patch.object(rig, "write_state"), \
+             patch.object(rig, "hold_plan_for_boot"):
+            self.assertEqual(rig.cmd_boot(None), 0)
+        stop.assert_called_once_with()
+
     def test_lease_preview_uses_live_admission_without_writing_a_lease(self):
         cards = [{"index": 1, "total_mb": 6144, "used_mb": 0},
                  {"index": 2, "total_mb": 8192, "used_mb": 0}]

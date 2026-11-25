@@ -312,7 +312,7 @@ def live_ports() -> dict[int, str]:
 def running_model_containers() -> list[str]:
     proc = run(["docker", "ps", "--format", "{{.Names}}"], check=False)
     return [n for n in proc.stdout.split()
-            if n.startswith("llama-") or n.startswith(REMOTE_CONTAINER_PREFIX)]
+            if n == "qwen35-kv-chat-service" or n.startswith("llama-") or n.startswith(REMOTE_CONTAINER_PREFIX)]
 
 
 def gpu_telemetry() -> list[dict]:
@@ -1489,10 +1489,13 @@ def hold_plan_for_boot() -> None:
 
 
 def cmd_boot(_args) -> int:
-    """Called by rig-boot.service at power-on: record idle + GPU health, hold the plan for the controller.
+    """Called by rig-boot.service at power-on: stop managed runtimes, record idle + GPU health, and hold
+    the plan for the controller. Boot cleanup is deliberate even though managed containers currently use
+    no Docker restart policy: an old mode/state must not survive a future runtime-policy change.
     The cards seen now become the layout later scans compare against; what changed from the previous boot's
     layout is kept with it as a note (a card may have dropped out, or been moved on purpose)."""
     with Lock():
+        stop_everything()
         g = gpu_check()
         err = None if g["ok"] else f"boot GPU fault: {g['errors']}"
         write_state(mode="idle", status="idle", **({"error": err} if err else {}), **{"from": "boot"})

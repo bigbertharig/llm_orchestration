@@ -2,8 +2,8 @@
 # Modes are started on demand with `rig start <mode>` (see ../rig.py).
 [Unit]
 Description=Rig boot to idle (record state + GPU check)
-After=network-online.target remote-fs.target nvidia-persistenced.service
-Wants=network-online.target remote-fs.target
+After=network-online.target remote-fs.target nvidia-persistenced.service docker.service
+Wants=network-online.target remote-fs.target docker.service
 
 [Service]
 Type=oneshot

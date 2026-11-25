@@ -167,3 +167,10 @@ card that is no longer visible while a runtime, lease or claim still holds it. G
 ## Hardware changes and shared chats
 
 `rig status --json` scans the live PCI/NVIDIA inventory and records GPU UUID, name, VRAM and link state. Power limits are matched by model/default board limit; a new card with no rule keeps its default. The 35B shared-chat worker controller now scans free cards with at least 6,000 MiB VRAM and prefers the smaller suitable card, so the GTX 1070 can be used when appropriate. The `gpu1060-chat-q4` mode name is retained for compatibility; its candidate list is discovered at request time. Named expert-placement recipes still prescribe specific card groups and must be reviewed after a topology change.
+
+### Empty boot recovery
+
+`rig boot` stops managed llama runtimes and the shared Qwen chat service before recording idle GPU
+state. Its systemd unit waits for Docker. Gateway cancels queued pre-boot model load/unload requests
+before resuming the plan; durable jobs keep their explicit recovery path. Deterministic checks cover
+both runtime cleanup and Gateway's stale-request cancellation.
