@@ -31,6 +31,20 @@ setting without overwriting another card's override. The process needs permissio
 `RIG_POWER_OVERRIDE` and restart the configured rig power service; missing permission fails.
 Retain restoration records after interrupted power operations and reconcile before further changes.
 
+## Hardware telemetry
+
+The rig-local guard runs independently of Gateway and owns power, thermal, memory and
+load-admission policy. `rig observe` publishes `guard` with schema
+`rig-hardware-telemetry/1`, `owner: orchestration`, `level` (`ok`, `warn`,
+`critical`, or `unknown`), `loads_admitted`, `why`, `sampled_at`, `fresh`,
+and current power/temperature/memory readings. `sampled_at` is the guard's own
+sample time, not the time a controller forwarded the response. A stopped or stale
+guard reports `unknown`, `fresh: false`, and no sample time. The standalone
+`rig observe` CLI and read-only `observe` API let local clients ask directly;
+Gateway may relay this same owner decision to remote consumers. Consumers must
+treat cached responses and old samples as unavailable and must not recalculate
+the owner's thresholds.
+
 ## Versioned CLI transport
 
 `rig wire --request JSON` accepts `rig-cli/1`, a `request_id` and an `arguments` array for

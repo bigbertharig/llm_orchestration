@@ -891,6 +891,7 @@ def status_payload() -> dict:
         "mode": st["mode"], "status": st["status"], "since": st.get("since"), "from": st.get("from"),
         "last_error": st.get("error"), "profiles": profiles, "detail": st.get("detail"),
         "shared_kv_service": kv,
+        "guard": guard_summary(),
         "gpus": {"visible": len(g["visible"]), "ids": g["ids"], "ok": g["ok"], "errors": g["errors"],
                  "notes": gpu_notes(g)},
     }
@@ -928,7 +929,10 @@ def guard_summary() -> dict:
     admitted, level, why = hw_guard.admission()
     st = hw_guard.read_state() or {}
     smp = st.get("sample", {})
-    return {"level": level, "loads_admitted": admitted, "why": why, "since": st.get("since"),
+    return {"schema": "rig-hardware-telemetry/1", "owner": "orchestration",
+            "level": level, "loads_admitted": admitted, "why": why, "since": st.get("since"),
+            "sampled_at": st.get("updated_at") if level != "unknown" else None,
+            "fresh": level != "unknown",
             "gpu_power_total_w": smp.get("gpu_power_total_w"), "gpu_temp_max_c": smp.get("gpu_temp_max_c"),
             "cpu_package_c": smp.get("cpu_package_c"), "mem_available_mb": smp.get("mem_available_mb")}
 
