@@ -37,7 +37,7 @@ The rig-local guard runs independently of Gateway and owns power, thermal, memor
 load-admission policy. `rig observe` publishes `guard` with schema
 `rig-hardware-telemetry/1`, `owner: orchestration`, `level` (`ok`, `warn`,
 `critical`, or `unknown`), `loads_admitted`, `why`, `sampled_at`, `fresh`,
-and current power/temperature/memory readings. `sampled_at` is the guard's own
+and current aggregate power, temperature, available memory, and per-GPU readings. `sampled_at` is the guard's own
 sample time, not the time a controller forwarded the response. A stopped or stale
 guard reports `unknown`, `fresh: false`, and no sample time. The standalone
 `rig observe` CLI and read-only `observe` API let local clients ask directly;
