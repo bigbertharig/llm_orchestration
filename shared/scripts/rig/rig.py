@@ -931,8 +931,9 @@ def guard_summary() -> dict:
     smp = st.get("sample", {})
     return {"schema": "rig-hardware-telemetry/1", "owner": "orchestration",
             "level": level, "loads_admitted": admitted, "why": why, "since": st.get("since"),
-            "sampled_at": st.get("updated_at") if level != "unknown" else None,
-            "fresh": level != "unknown",
+            "sampled_at": (datetime.fromtimestamp(float(st["updated_ts"]), timezone.utc).isoformat()
+                           if level != "unknown" and st.get("updated_ts") else None),
+            "fresh": level != "unknown" and bool(st.get("updated_ts")),
             "gpu_power_total_w": smp.get("gpu_power_total_w"), "gpu_temp_max_c": smp.get("gpu_temp_max_c"),
             "cpu_package_c": smp.get("cpu_package_c"), "mem_available_mb": smp.get("mem_available_mb")}
 

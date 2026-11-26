@@ -167,6 +167,16 @@ class ModeTests(unittest.TestCase):
         self.assertIsNone(summary["sampled_at"])
         self.assertEqual(summary["level"], "unknown")
 
+    def test_guard_sample_time_is_utc_from_epoch(self):
+        with patch.object(rig.hw_guard, "admission", return_value=(True, "ok", "ok")), \
+             patch.object(rig.hw_guard, "read_state", return_value={
+                 "updated_at": "2026-11-25T17:30:00",
+                 "updated_ts": 1795653000,
+                 "sample": {"gpu_temp_max_c": 53}}):
+            summary = rig.guard_summary()
+        self.assertTrue(summary["fresh"])
+        self.assertEqual(summary["sampled_at"], "2026-11-26T00:30:00+00:00")
+
     def test_standalone_status_exposes_owner_guard(self):
         state = {"mode": "idle", "status": "idle", "profiles": {}}
         guard = {"schema": "rig-hardware-telemetry/1", "level": "ok", "fresh": True}
