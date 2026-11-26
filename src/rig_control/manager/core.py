@@ -241,11 +241,11 @@ class Manager:
     async def plan(self) -> dict:
         return (await self.observe(fresh=True)).get("plan") or {}
 
-    async def status(self) -> dict:
+    async def status(self, fresh: bool = False) -> dict:
         """The single report: what the rig is doing now (GPUs, profiles, guard) and next (plan). With the
         rig unreachable, the last copy this controller kept, marked as such."""
         try:
-            obs = await self.observe()
+            obs = await self.observe(fresh=fresh)
         except RigUnavailable:
             if not self.mirror:
                 raise

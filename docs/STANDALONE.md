@@ -41,7 +41,9 @@ and current power/temperature/memory readings. `sampled_at` is the guard's own
 sample time, not the time a controller forwarded the response. A stopped or stale
 guard reports `unknown`, `fresh: false`, and no sample time. The standalone
 `rig observe` CLI and read-only `observe` API let local clients ask directly;
-Gateway may relay this same owner decision to remote consumers. Consumers must
+Gateway may relay this same owner decision to remote consumers. The manager
+`GET /v1/manager/status?fresh=true` bypasses its short observation cache for
+policy consumers; ordinary dashboard status retains the cache. Consumers must
 treat cached responses and old samples as unavailable and must not recalculate
 the owner's thresholds.
 

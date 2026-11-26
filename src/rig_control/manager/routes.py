@@ -95,8 +95,8 @@ def router(manager: Manager, profiles: Callable[[], dict[str, dict]], model_pref
     r = APIRouter(prefix="/v1/manager")
 
     @r.get("/status")
-    async def status():
-        return await manager.status()
+    async def status(fresh: bool = False):
+        return await manager.status(fresh=fresh)
 
     @r.get("/model-offers")
     async def model_offers():
