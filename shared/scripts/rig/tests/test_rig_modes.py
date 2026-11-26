@@ -156,5 +156,29 @@ class ModeTests(unittest.TestCase):
             rig.cmd_start_remote(SimpleNamespace(spec=None, profiles=["chat"]))
 
 
+    def test_guard_summary_marks_stale_owner_state_unknown(self):
+        with patch.object(rig.hw_guard, "admission", return_value=(False, "unknown", "stale")), \
+             patch.object(rig.hw_guard, "read_state", return_value={
+                 "updated_at": "2026-11-25T00:00:00Z",
+                 "sample": {"gpu_temp_max_c": 90}}):
+            summary = rig.guard_summary()
+        self.assertEqual(summary["schema"], "rig-hardware-telemetry/1")
+        self.assertFalse(summary["fresh"])
+        self.assertIsNone(summary["sampled_at"])
+        self.assertEqual(summary["level"], "unknown")
+
+    def test_standalone_status_exposes_owner_guard(self):
+        state = {"mode": "idle", "status": "idle", "profiles": {}}
+        guard = {"schema": "rig-hardware-telemetry/1", "level": "ok", "fresh": True}
+        scan = {"visible": [], "ids": [], "ok": True, "errors": []}
+        with patch.object(rig, "read_state", return_value=state), \
+             patch.object(rig, "gpu_check", return_value=scan), \
+             patch.object(rig, "gpu_notes", return_value=[]), \
+             patch.object(rig, "guard_summary", return_value=guard), \
+             patch.object(Path, "exists", return_value=False):
+            status = rig.status_payload()
+        self.assertEqual(status["guard"], guard)
+
+
 if __name__ == "__main__":
     unittest.main()
