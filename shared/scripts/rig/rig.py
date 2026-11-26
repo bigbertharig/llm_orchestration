@@ -935,7 +935,8 @@ def guard_summary() -> dict:
                            if level != "unknown" and st.get("updated_ts") else None),
             "fresh": level != "unknown" and bool(st.get("updated_ts")),
             "gpu_power_total_w": smp.get("gpu_power_total_w"), "gpu_temp_max_c": smp.get("gpu_temp_max_c"),
-            "cpu_package_c": smp.get("cpu_package_c"), "mem_available_mb": smp.get("mem_available_mb")}
+            "cpu_package_c": smp.get("cpu_package_c"), "mem_available_mb": smp.get("mem_available_mb"),
+            "gpus": smp.get("gpus", [])}
 
 
 def open_hw_state() -> hw_state.HardwareState:

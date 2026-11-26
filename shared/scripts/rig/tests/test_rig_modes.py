@@ -172,10 +172,11 @@ class ModeTests(unittest.TestCase):
              patch.object(rig.hw_guard, "read_state", return_value={
                  "updated_at": "2026-11-25T17:30:00",
                  "updated_ts": 1795653000,
-                 "sample": {"gpu_temp_max_c": 53}}):
+                 "sample": {"gpu_temp_max_c": 53, "gpus": [{"index": 0, "temp_c": 53}]}}):
             summary = rig.guard_summary()
         self.assertTrue(summary["fresh"])
         self.assertEqual(summary["sampled_at"], "2026-11-26T00:30:00+00:00")
+        self.assertEqual(summary["gpus"][0]["temp_c"], 53)
 
     def test_standalone_status_exposes_owner_guard(self):
         state = {"mode": "idle", "status": "idle", "profiles": {}}
