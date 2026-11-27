@@ -865,16 +865,18 @@ def test_reconcile_leaves_a_lease_alone_while_its_unload_runs(menv, monkeypatch)
 # ------------------------------------------------------------------ shared report (rule 1c)
 
 def test_status_fresh_query_bypasses_cached_guard(menv, monkeypatch):
-    monkeypatch.setattr(core, "OBSERVE_CACHE_S", 60)
-    c = menv["client"]
-    assert c.get("/v1/manager/status").json()["guard"]["level"] == "ok"
-    state = menv["rig"]()
-    state["guard"] = {"schema": "rig-hardware-telemetry/1", "level": "critical"}
-    menv["write"](state)
-    assert c.get("/v1/manager/status").json()["guard"]["level"] == "ok"
-    fresh = c.get("/v1/manager/status?fresh=true")
-    assert fresh.status_code == 200
-    assert fresh.json()["guard"]["level"] == "critical"
+    # The fixture disables caching; restore that value before later tests run.
+    with monkeypatch.context() as patch:
+        patch.setattr(core, "OBSERVE_CACHE_S", 60)
+        c = menv["client"]
+        assert c.get("/v1/manager/status").json()["guard"]["level"] == "ok"
+        state = menv["rig"]()
+        state["guard"] = {"schema": "rig-hardware-telemetry/1", "level": "critical"}
+        menv["write"](state)
+        assert c.get("/v1/manager/status").json()["guard"]["level"] == "ok"
+        fresh = c.get("/v1/manager/status?fresh=true")
+        assert fresh.status_code == 200
+        assert fresh.json()["guard"]["level"] == "critical"
 
 
 def test_the_controller_keeps_a_copy_and_answers_from_it_when_the_rig_is_gone(menv):
@@ -883,7 +885,7 @@ def test_the_controller_keeps_a_copy_and_answers_from_it_when_the_rig_is_gone(me
     copy = json.loads(menv["copy"].read_text())
     assert copy["plan"]["version"] == 1 and copy["gpus"]
     menv["rig_py"].write_text("import sys; print('ssh: connect to host 10.0.0.3: No route to host'); sys.exit(255)")
-    r = c.get("/v1/manager/status")
+    r = c.get("/v1/manager/status?fresh=true")
     assert r.status_code == 200 and r.json()["from_copy"] and not r.json()["rig"]["reachable"]
     assert "rig unreachable" in r.json()["rig"]["events"][-1]["event"]
 
