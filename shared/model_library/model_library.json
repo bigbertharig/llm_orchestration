@@ -1,6 +1,6 @@
 {
   "schema": "orchestration-model-library/1",
-  "source_sha256": "b314d9d0cc7fe7616b852c09e2854b7c4bbf825dad28e29b8b6c21835718ab8a",
+  "source_sha256": "6a195b6bc7f6f0249ae8a4cc5dff91f000b4ff9eeb511c30b9c54c12a16ad077",
   "registry": {
     "schema": "model-registry/1",
     "updated": "2026-11-06",
@@ -441,6 +441,15 @@
         "ngram_size_bytes": 0
       },
       "gemma-4:e2b-q8": {
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "managed llama.cpp server (exact build not captured)",
+          "recipe": "Q8 on GPU 1, full GPU offload, one 4096-token slot",
+          "default_context": 4096,
+          "context_limit": 4096,
+          "context_basis": "2026-11-26 managed load and short answer passed; 10%/90% final-answer recall passed at 116/3412 prompt tokens. Receipt: results/runtime_experiments/gemma_4_e2b_q8_onboarding_depth_g1_4k_20261126.json.",
+          "limits": "One 4K chat on GPU 1 is checked; concurrent-chat capacity is unmeasured."
+        },
         "gguf": "gemma-4-e2b/gemma-4-e2b-it-Q8_0.gguf",
         "source_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q8_0.gguf",
         "status": "active",
@@ -825,6 +834,15 @@
         "ngram_size_bytes": 0
       },
       "ministral-3:14b": {
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "managed llama.cpp server (exact build not captured)",
+          "recipe": "Q4_K_M split across GPUs 1 and 3, full GPU offload, one 8192-token slot",
+          "default_context": 8192,
+          "context_limit": 8192,
+          "context_basis": "2026-11-26 managed live load and code/arithmetic litmus passed; 10%/90% final-answer recall passed at 1035/7742 prompt tokens. Receipt: results/runtime_experiments/ministral_3_14b_onboarding_depth_g1-3_8k_20261126.json.",
+          "limits": "One 8K chat across GPUs 1 and 3 is checked; more chats and longer contexts are unmeasured. Default raw JSON is fenced; per-task JSON grammar scored 4/13."
+        },
         "gguf": "ministral-3-14b-instruct-2512/Ministral-3-14B-Instruct-2512-Q4_K_M.gguf",
         "source_url": "https://huggingface.co/unsloth/Ministral-3-14B-Instruct-2512-GGUF/resolve/main/Ministral-3-14B-Instruct-2512-Q4_K_M.gguf",
         "status": "active",
@@ -874,7 +892,7 @@
               "last_tuned_at": "2026-08-14T00:00:00+00:00",
               "benchmark_suite": "import_prep"
             },
-            "notes": "Modern 14B split-worker candidate; initial compatibility smoke runs on the 3090.",
+            "notes": "Split-worker candidate. Current 8K loading and pipeline/reasoning smoke pass. Raw strict JSON is fenced; per-task JSON grammar scored 4/13 on v2.",
             "context_bounds": {
               "min": 8192,
               "max": 262144,
@@ -896,6 +914,15 @@
         "ngram_size_bytes": 0
       },
       "ministral-3:3b": {
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "managed llama.cpp server (exact build not captured)",
+          "recipe": "Q4_K_M on GPU 1, full GPU offload, one 16384-token slot",
+          "default_context": 16384,
+          "context_limit": 16384,
+          "context_basis": "2026-11-26 managed load and short answer passed; 10%/90% final-answer recall passed at 1898/15399 prompt tokens. Receipt: results/runtime_experiments/ministral_3_3b_onboarding_depth_g1_16k_20261126.json.",
+          "limits": "One 16K chat on GPU 1 is checked; concurrent-chat capacity is unmeasured."
+        },
         "gguf": "ministral-3-3b-instruct-2512/Ministral-3-3B-Instruct-2512-Q4_K_M.gguf",
         "source_url": "https://huggingface.co/unsloth/Ministral-3-3B-Instruct-2512-GGUF/resolve/main/Ministral-3-3B-Instruct-2512-Q4_K_M.gguf",
         "status": "active",
@@ -927,7 +954,7 @@
               "last_tuned_at": "2026-08-14T00:00:00+00:00",
               "benchmark_suite": "import_prep"
             },
-            "notes": "Single-1060 qualification candidate. Broad smoke tasks eventually completed, but the full EvalPlus code block timed out and the first campaign left stale failure rows. Keep out of production routing until the focused code/runtime rerun completes.",
+            "notes": "Single-1060 qualification candidate. Current 16K loading and pipeline/reasoning smoke pass. For strict JSON, run the task with --inference-config-json {\"json_grammar\":true} (4/13 on v2); full code and runtime validation remain open.",
             "context_bounds": {
               "min": 8192,
               "max": 262144,
@@ -949,6 +976,15 @@
         "ngram_size_bytes": 0
       },
       "ministral-3:8b": {
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "managed llama.cpp server (exact build not captured)",
+          "recipe": "Q4_K_M split across GPUs 1 and 3, full GPU offload, one 16384-token slot",
+          "default_context": 16384,
+          "context_limit": 16384,
+          "context_basis": "2026-11-26 managed live load and code/arithmetic litmus passed; 10%/90% final-answer recall passed at 1897/15400 prompt tokens. Receipt: results/runtime_experiments/ministral_3_8b_onboarding_depth_g1-3_16k_20261126.json.",
+          "limits": "One 16K chat across GPUs 1 and 3 is checked; more chats and alternate placement are unmeasured. Default raw JSON is fenced; per-task JSON grammar scored 3/13."
+        },
         "gguf": "ministral-3-8b-instruct-2512/Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
         "source_url": "https://huggingface.co/unsloth/Ministral-3-8B-Instruct-2512-GGUF/resolve/main/Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
         "status": "active",
@@ -980,7 +1016,7 @@
               "last_tuned_at": "2026-08-14T00:00:00+00:00",
               "benchmark_suite": "import_prep"
             },
-            "notes": "Modern single-worker candidate; initial compatibility smoke runs on the 3090.",
+            "notes": "Split-worker candidate. Current 16K loading and pipeline/reasoning smoke pass. Raw strict JSON is fenced; per-task JSON grammar scored 3/13 on v2.",
             "context_bounds": {
               "min": 8192,
               "max": 262144,
@@ -1162,6 +1198,15 @@
         "ngram_size_bytes": 0
       },
       "ornith-1.5:9b": {
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "managed llama.cpp server (exact build not captured)",
+          "recipe": "One 8192-token slot on GPU 1, full GPU offload",
+          "default_context": 8192,
+          "context_limit": 8192,
+          "context_basis": "2026-11-26 live load and reasoning/JSON/code litmus passed; final-answer recall passed at 10%/90% (559/7204 prompt tokens). Receipt: results/runtime_experiments/ornith_1_5_9b_onboarding_depth_g1_8k_20261126.json.",
+          "limits": "This pass establishes the single-card 8K recipe only; longer contexts and concurrent chats are not claimed."
+        },
         "gguf": "ornith-1.5-9b/Ornith-1.5-9B-Q4_K_M.gguf",
         "source_url": "https://huggingface.co/ornith-ai/Ornith-1.5-9B-GGUF/resolve/main/Ornith-1.5-9B-Q4_K_M.gguf",
         "status": "active",
@@ -1303,6 +1348,15 @@
         "ngram_size_bytes": 0
       },
       "phi-4:14b": {
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "managed llama.cpp server (exact build not captured)",
+          "recipe": "Q4_K_M split across GPUs 1 and 3, full GPU offload, one 8192-token slot",
+          "default_context": 8192,
+          "context_limit": 8192,
+          "context_basis": "2026-11-26 managed load and short answer passed; 10%/90% final-answer recall passed at 527/7007 prompt tokens. Receipt: results/runtime_experiments/phi_4_14b_onboarding_depth_g1-3_8k_20261126.json.",
+          "limits": "One 8K chat across GPUs 1 and 3 is checked; concurrent-chat capacity is unmeasured."
+        },
         "gguf": "phi-4-14b/phi-4-Q4_K_M.gguf",
         "source_url": "https://huggingface.co/unsloth/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf",
         "status": "active",
@@ -1352,7 +1406,7 @@
               "last_tuned_at": "2026-03-16T00:00:00+00:00",
               "benchmark_suite": "agent_reliability"
             },
-            "notes": "Split-load (2x 1060). Prompt reverted to baseline+JSON (2026-03-16): 5 tuning iterations showed diminishing returns on reasoning. Baseline l50 scores (GSM8K 0.70, BBH 0.283, DROP 0.070) remain best overall. Model excels on pipeline (100% safety/sequence/extract) and code (78.7% humaneval).",
+            "notes": "Split-worker candidate. The default JSON-focused prompt distorts DROP. For DROP, use --system-prompt-override \"Answer with only the exact name, number, date, or phrase requested. Do not repeat the question or write a sentence.\" The current 10-case smoke scored EM 0.2, F1 0.63, flexible 1.0; retain the default prompt for other tasks until compared.",
             "context_bounds": {
               "min": 8192,
               "max": 16384,
@@ -1472,6 +1526,15 @@
         "ngram_size_bytes": 0
       },
       "qwen2.5-coder:7b": {
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "managed llama.cpp server (exact build not captured)",
+          "recipe": "Q4_K_M on GPU 1, full GPU offload, one 16384-token slot",
+          "default_context": 16384,
+          "context_limit": 16384,
+          "context_basis": "2026-11-26 managed load and short answer passed; 10%/90% final-answer recall passed at 1351/14926 prompt tokens. Receipt: results/runtime_experiments/qwen2_5_coder_7b_onboarding_depth_g1_16k_20261126.json.",
+          "limits": "One 16K chat on GPU 1 is checked; concurrent-chat capacity is unmeasured."
+        },
         "gguf": "qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
         "source_url": "https://huggingface.co/unsloth/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
         "status": "active",
@@ -1538,6 +1601,15 @@
         "ngram_size_bytes": 0
       },
       "qwen3-coder:30b-a3b": {
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "managed llama.cpp server (exact build not captured)",
+          "recipe": "Q4_K_M on GPU 0, full GPU offload, one 16384-token slot",
+          "default_context": 16384,
+          "context_limit": 16384,
+          "context_basis": "Live managed load and three-part litmus passed 2026-11-26; 10%/90% final-answer recall passed at 1330/14904 prompt tokens. Receipt: results/runtime_experiments/qwen3_coder_30b_onboarding_depth_g0_16k_20261126.json.",
+          "limits": "Only this GPU 0 single-chat recipe is promoted; larger context and concurrent-chat recipes remain separate experiments."
+        },
         "gguf": "qwen3-coder-30b-a3b/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
         "source_url": "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/resolve/main/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
         "status": "active",
@@ -1801,6 +1873,15 @@
         "ngram_size_bytes": 0
       },
       "qwen3.6:27b": {
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "managed llama.cpp server (exact build not captured)",
+          "recipe": "Q4_K_M on GPU 0, full GPU offload, one 16384-token slot",
+          "default_context": 16384,
+          "context_limit": 16384,
+          "context_basis": "2026-11-26 live reasoning/JSON/code litmus passed; managed depth run offloaded 65/65 layers and passed 10%/90% final-answer recall at 1334/14909 prompt tokens. Receipt: results/runtime_experiments/qwen3_6_27b_onboarding_depth_g0_16k_20261126.json.",
+          "limits": "This pass establishes the default single-chat 16K recipe. Larger context and concurrent-chat capacity are not claimed."
+        },
         "gguf": "qwen3.6-27b/Qwen3.6-27B-Q4_K_M.gguf",
         "source_url": "https://huggingface.co/ggml-org/Qwen3.6-27B-GGUF/resolve/main/Qwen3.6-27B-Q4_K_M.gguf",
         "status": "active",
@@ -2200,6 +2281,12 @@
         "ngram_size_bytes": 0
       },
       "qwen3-coder-next:80b-a3b": {
+        "loading_stage": {
+          "state": "blocked",
+          "runtime": "managed llama.cpp/b11669",
+          "recipe": "Q4_K_S, proposed GPUs 0-5, 16384 context, manager split 22,5,7,5,5,5",
+          "limits": "2026-11-26 benchmark fit passed but the live managed load failed after about 7 minutes: llama.cpp could not allocate a 6516457216-byte CUDA2 buffer. Run depth-coder-next80-all-v2-20261126; no depth or suite result was produced. A revised per-card placement or fit calibration must pass a real load before a full campaign."
+        },
         "gguf": "qwen3-coder-next/Qwen3-Coder-Next-Q4_K_S.gguf",
         "source_url": "https://huggingface.co/unsloth/Qwen3-Coder-Next-GGUF/resolve/main/Qwen3-Coder-Next-Q4_K_S.gguf",
         "status": "candidate",
@@ -2324,6 +2411,15 @@
         "ngram_size_bytes": 0
       },
       "nemotron-3.5-bolt:74b-a9b": {
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "managed llama.cpp server (exact build not captured)",
+          "recipe": "Q4_K_M across GPUs 0, 1, 3, and 4, full GPU offload, one 16384-token slot",
+          "default_context": 16384,
+          "context_limit": 16384,
+          "context_basis": "2026-11-26 managed load of 89/89 layers and 10%/90% final-answer recall passed at 1379/14881 prompt tokens. Receipt: results/runtime_experiments/nemotron_3_5_bolt_74b_a9b_onboarding_depth_g0-1-3-4_16k_20261126.json.",
+          "limits": "Load took 207 seconds. This is a single-chat 16K recipe; an older 32K short probe lacked depth recall. Concurrent-chat capacity is unmeasured."
+        },
         "gguf": "nemotron-3.5-bolt-74b-a9b/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-Q3_K_XL.gguf",
         "source_url": "https://huggingface.co/unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF/resolve/main/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-Q3_K_XL.gguf",
         "status": "active",
@@ -2387,6 +2483,15 @@
         "ngram_size_bytes": 0
       },
       "qwen3.6:35b-a3b-xl": {
+        "loading_stage": {
+          "state": "ready_for_benchmark",
+          "runtime": "managed llama.cpp server (exact build not captured)",
+          "recipe": "Q4_K_M on GPU 0, full GPU offload, default one 16384-token slot; prior 262144-token depth route used GPUs 0 and 1",
+          "default_context": 16384,
+          "context_limit": 262144,
+          "context_basis": "2026-11-26 current GPU 0 load and 10%/90% final recall passed at 1334/14910 prompt tokens (results/runtime_experiments/qwen3_6_35b_a3b_xl_onboarding_depth_g0_16k_20261126.json). Exact-model 2026-11-04 GPU 0+1 262144-token run also passed 10%/90% final recall (results/runtime_experiments/qwen3_6_35b_a3b_xl_capacity_g0-1_ctx262144_depth_20261104.json).",
+          "limits": "The default 16K one-chat recipe was refreshed; the 262K two-card limit is older evidence and was not reloaded in this pass. Concurrent-chat capacity is unmeasured."
+        },
         "gguf": "qwen3.6-35b-a3b-strata-xl/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
         "source_url": "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
         "status": "active",
@@ -2463,7 +2568,7 @@
         "source_url": "https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/tree/ed59f92082b1e93c0e96d60a8b11aab089b52f09/Q2_0",
         "status": "candidate",
         "in_testing": true,
-        "status_note": "Loading stage complete for the tested Strata Q2_0 recipe; gateway route, 256K recall, and short concurrent chats passed. Capability and application quality remain untested for this quant, so it stays a candidate.",
+        "status_note": "Q2_0 loading, 256K single-chat recall and short concurrent chats passed. Current full-suite receipts are complete across the quality/runtime campaign and corrected code-only campaign: strict JSON 12/13, BBH flexible 84.3% (1350), MMLU-Pro flexible 78.9% (280), strict IFEval 84% (50), HumanEval+ 64.0% (164), MBPP+ 63.2% (378), geoimport 2/5, runtime throughput 81.1 tok/s. Code uses EvalPlus methodology 2.0.1 with null content counted as empty. Candidate pending role review.",
         "loading_stage": {
           "state": "ready_for_benchmark",
           "runtime": "strata/0.2.10",
@@ -2524,7 +2629,7 @@
   },
   "roles": {
     "schema": "model-roles/1",
-    "updated": "2026-10-15",
+    "updated": "2026-11-27",
     "about": "Quick reference: the model and profile to use for each rig lane and job. Other repos read this (through model_library.py) instead of choosing models themselves. Change a role only after a benchmark review; 'evidence' names the campaign behind it.",
     "roles": {
       "brain": {
@@ -2555,25 +2660,25 @@
         "model": "ministral-3:14b",
         "profile": "default",
         "lane": "2x1060",
-        "why": "Data prep and split-worker code; HumanEval+ base 87.2%.",
+        "why": "Split-worker quality and code; current full HumanEval+ base 87.8%, plus 82.3%, and BBH flexible 37.2%.",
         "good_for": [
           "data_preparation",
           "coding",
           "split_worker"
         ],
-        "evidence": "20260820_modern_validation_l50_retry3"
+        "evidence": "ministral14b-full-gap-20261127; exact commands and scores in results/model_benchmark_records.jsonl"
       },
       "split_speed": {
         "model": "ministral-3:8b",
         "profile": "default",
         "lane": "2x1060",
-        "why": "Faster split lane for parallel import prep and cheaper code work.",
+        "why": "Faster split lane for parallel import prep and code work; 20.39 generation tok/s versus 14B at 13.60 on the measured runtime task.",
         "good_for": [
           "data_preparation",
           "small_coding",
           "split_worker"
         ],
-        "evidence": "20260820_modern_validation_l50_retry3"
+        "evidence": "role-bbh-ministral8b-20261127; role-runtime-full-gap-20261127; full code 2026-10-18; exact commands in results/model_benchmark_records.jsonl"
       },
       "single_1060": {
         "model": "ornith-1.5:9b",
@@ -2591,36 +2696,36 @@
         "model": "qwen2.5-coder:7b",
         "profile": "default",
         "lane": "1x1060",
-        "why": "Code on one 1060: still leads ornith-1.5:9b on HumanEval+ (84.1 vs 73.8). The single_1060 default until 2026-10-20.",
+        "why": "Code on one 1060: HumanEval+ base 88.4%, plus 84.1%; current BBH flexible 69.3% and runtime 22.57 generation tok/s.",
         "good_for": [
           "coding",
           "small_coding",
           "single_gpu_worker"
         ],
-        "evidence": "complete l100 suites; full code 2026-10-18"
+        "evidence": "role-bbh-qwen7b-retry-20261127; role-runtime-full-gap-20261127; full code 2026-10-18; exact commands in results/model_benchmark_records.jsonl"
       },
       "single_1060_compact": {
         "model": "ministral-3:3b",
         "profile": "default",
         "lane": "1x1060",
-        "why": "Tested smaller alternative; weaker than the 7B default.",
+        "why": "Compact speed option at 38.62 generation tok/s; BBH flexible 10.5% limits it to small tasks.",
         "good_for": [
           "compact_worker",
           "small_tasks"
         ],
-        "evidence": "20260820_modern_validation_l50_retry3 full code/runtime"
+        "evidence": "role-bbh-ministral3b-20261127; role-runtime-full-gap-20261127; full code 2026-10-18; exact commands in results/model_benchmark_records.jsonl"
       },
       "text_extraction": {
         "model": "gemma-4:e2b-q8",
         "profile": "default",
         "lane": "1x1060",
-        "why": "Document QA and reading comprehension (high DROP, low code).",
+        "why": "Text extraction and reading comprehension; current BBH flexible 76.0% and runtime 31.58 generation tok/s; code remains secondary.",
         "good_for": [
           "document_qa",
           "reading_comprehension",
           "text_extraction"
         ],
-        "evidence": "model_task_library 2026-04-28"
+        "evidence": "role-bbh-gemmae2b-retry-20261127; role-runtime-full-gap-20261127; full code 2026-10-18; exact commands in results/model_benchmark_records.jsonl"
       },
       "safe_tool_use": {
         "model": "phi-4:14b",
@@ -3651,7 +3756,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Modern 14B split-worker candidate; initial compatibility smoke runs on the 3090."
+      "notes": "Split-worker candidate. Current 8K loading and pipeline/reasoning smoke pass. Raw strict JSON is fenced; per-task JSON grammar scored 4/13 on v2."
     },
     "ministral-3:14b": {
       "status": "smoke_complete",
@@ -3669,7 +3774,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Modern 14B split-worker candidate; initial compatibility smoke runs on the 3090.",
+      "notes": "Split-worker candidate. Current 8K loading and pipeline/reasoning smoke pass. Raw strict JSON is fenced; per-task JSON grammar scored 4/13 on v2.",
       "_resolved_from": "Ministral-3-14B-Instruct-2512-Q4_K_M.gguf"
     },
     "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf": {
@@ -3688,7 +3793,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Single-1060 qualification candidate. Broad smoke tasks eventually completed, but the full EvalPlus code block timed out and the first campaign left stale failure rows. Keep out of production routing until the focused code/runtime rerun completes."
+      "notes": "Single-1060 qualification candidate. Current 16K loading and pipeline/reasoning smoke pass. For strict JSON, run the task with --inference-config-json {\"json_grammar\":true} (4/13 on v2); full code and runtime validation remain open."
     },
     "ministral-3:3b": {
       "status": "tuning",
@@ -3706,7 +3811,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Single-1060 qualification candidate. Broad smoke tasks eventually completed, but the full EvalPlus code block timed out and the first campaign left stale failure rows. Keep out of production routing until the focused code/runtime rerun completes.",
+      "notes": "Single-1060 qualification candidate. Current 16K loading and pipeline/reasoning smoke pass. For strict JSON, run the task with --inference-config-json {\"json_grammar\":true} (4/13 on v2); full code and runtime validation remain open.",
       "_resolved_from": "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf"
     },
     "Ministral-3-8B-Instruct-2512-Q4_K_M.gguf": {
@@ -3725,7 +3830,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Modern single-worker candidate; initial compatibility smoke runs on the 3090."
+      "notes": "Split-worker candidate. Current 16K loading and pipeline/reasoning smoke pass. Raw strict JSON is fenced; per-task JSON grammar scored 3/13 on v2."
     },
     "ministral-3:8b": {
       "status": "smoke_complete",
@@ -3743,7 +3848,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Modern single-worker candidate; initial compatibility smoke runs on the 3090.",
+      "notes": "Split-worker candidate. Current 16K loading and pipeline/reasoning smoke pass. Raw strict JSON is fenced; per-task JSON grammar scored 3/13 on v2.",
       "_resolved_from": "Ministral-3-8B-Instruct-2512-Q4_K_M.gguf"
     },
     "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf": {
@@ -4008,7 +4113,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Split-load (2x 1060). Prompt reverted to baseline+JSON (2026-03-16): 5 tuning iterations showed diminishing returns on reasoning. Baseline l50 scores (GSM8K 0.70, BBH 0.283, DROP 0.070) remain best overall. Model excels on pipeline (100% safety/sequence/extract) and code (78.7% humaneval)."
+      "notes": "Split-worker candidate. The default JSON-focused prompt distorts DROP. For DROP, use --system-prompt-override \"Answer with only the exact name, number, date, or phrase requested. Do not repeat the question or write a sentence.\" The current 10-case smoke scored EM 0.2, F1 0.63, flexible 1.0; retain the default prompt for other tasks until compared."
     },
     "phi-4:14b": {
       "status": "tuning",
@@ -4026,7 +4131,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Split-load (2x 1060). Prompt reverted to baseline+JSON (2026-03-16): 5 tuning iterations showed diminishing returns on reasoning. Baseline l50 scores (GSM8K 0.70, BBH 0.283, DROP 0.070) remain best overall. Model excels on pipeline (100% safety/sequence/extract) and code (78.7% humaneval).",
+      "notes": "Split-worker candidate. The default JSON-focused prompt distorts DROP. For DROP, use --system-prompt-override \"Answer with only the exact name, number, date, or phrase requested. Do not repeat the question or write a sentence.\" The current 10-case smoke scored EM 0.2, F1 0.63, flexible 1.0; retain the default prompt for other tasks until compared.",
       "_resolved_from": "phi-4-Q4_K_M.gguf"
     },
     "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf": {
@@ -4859,5 +4964,5 @@
       "_resolved_from": "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
     }
   },
-  "imported_at": "2026-11-25T23:29:55+00:00"
+  "imported_at": "2026-11-27T20:24:01+00:00"
 }

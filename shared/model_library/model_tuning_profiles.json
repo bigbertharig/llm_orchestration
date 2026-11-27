@@ -390,7 +390,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Modern 14B split-worker candidate; initial compatibility smoke runs on the 3090."
+      "notes": "Split-worker candidate. Current 8K loading and pipeline/reasoning smoke pass. Raw strict JSON is fenced; per-task JSON grammar scored 4/13 on v2."
     },
     "ministral-3:14b": {
       "_alias_of": "Ministral-3-14B-Instruct-2512-Q4_K_M.gguf"
@@ -411,7 +411,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Single-1060 qualification candidate. Broad smoke tasks eventually completed, but the full EvalPlus code block timed out and the first campaign left stale failure rows. Keep out of production routing until the focused code/runtime rerun completes."
+      "notes": "Single-1060 qualification candidate. Current 16K loading and pipeline/reasoning smoke pass. For strict JSON, run the task with --inference-config-json {\"json_grammar\":true} (4/13 on v2); full code and runtime validation remain open."
     },
     "ministral-3:3b": {
       "_alias_of": "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf"
@@ -432,7 +432,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Modern single-worker candidate; initial compatibility smoke runs on the 3090."
+      "notes": "Split-worker candidate. Current 16K loading and pipeline/reasoning smoke pass. Raw strict JSON is fenced; per-task JSON grammar scored 3/13 on v2."
     },
     "ministral-3:8b": {
       "_alias_of": "Ministral-3-8B-Instruct-2512-Q4_K_M.gguf"
@@ -591,7 +591,7 @@
         "parallel": 1,
         "n_gpu_layers": 999
       },
-      "notes": "Split-load (2x 1060). Prompt reverted to baseline+JSON (2026-03-16): 5 tuning iterations showed diminishing returns on reasoning. Baseline l50 scores (GSM8K 0.70, BBH 0.283, DROP 0.070) remain best overall. Model excels on pipeline (100% safety/sequence/extract) and code (78.7% humaneval)."
+      "notes": "Split-worker candidate. The default JSON-focused prompt distorts DROP. For DROP, use --system-prompt-override \"Answer with only the exact name, number, date, or phrase requested. Do not repeat the question or write a sentence.\" The current 10-case smoke scored EM 0.2, F1 0.63, flexible 1.0; retain the default prompt for other tasks until compared."
     },
     "phi-4:14b": {
       "_alias_of": "phi-4-Q4_K_M.gguf"
