@@ -117,3 +117,21 @@ controlled runner interruption. The interrupted run recovered from its durable
 `power.set` request ID and stopped its model. Final hardware state was idle with no
 leases, claims or containers. The root-owned helper's installed hash and service
 receipt are kept outside Git in the live handoff evidence directory.
+
+Shared-KV in-place compaction: Gateway owns the saved transcript and durable
+summary; Orchestration owns the chat binding and the decision to reset a live
+context. The `chat.compact` request requires the current owner, service
+instance, chat ID, and optionally its measured token count. Orchestration
+checks the binding and current service, then sends `rig shared-kv reset` with
+an exact token-count precondition. The rig clears only that chat's KV memory
+and sampler, preserving its placement and reservation. This works for both
+pinned main and attached chats without reserving an extra worker slot.
+A stale instance, changed binding, or changed token count is refused.
+
+November 28 live checks: Qwen 35B's 16K main chat compacted and continued
+with the correct owner/codeword; an attached GPU 1 chat reset in place with
+the same reservation ID and recalled its saved codeword. Pi receipts:
+`/home/bryan/.local/state/llm-gateway/shared_compaction_live_20261128.json`,
+`shared_attached_reset_live_20261128.json`, and
+`shared_compaction_repeat_live_20261128.json`. A second main-chat checkpoint
+also kept the corrected owner and codeword.

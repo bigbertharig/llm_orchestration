@@ -417,13 +417,14 @@ def capacity_report(model_id: str, default_context: int, chats: list[dict],
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("start", "attach", "detach", "turn", "status", "stop", "renew-loop"))
+    p.add_argument("action", choices=("start", "attach", "detach", "reset", "turn", "status", "stop", "renew-loop"))
     p.add_argument("--port", type=int, default=11524)
     p.add_argument("--model", choices=tuple(MODELS))
     p.add_argument("--chat-id")
     p.add_argument("--gpu", type=int)
     p.add_argument("--message")
     p.add_argument("--max-tokens", type=int, default=128)
+    p.add_argument("--expected-used-tokens", type=int)
     p.add_argument("--context-cap", type=int,
                    help="context tokens reserved when attaching a new chat (16K..262K)")
     p.add_argument("--main-context-cap", type=int,
@@ -446,6 +447,23 @@ def main():
                     stop_unrenewable_service(args.instance_id)
                     return
         return
+    if args.action == "reset":
+        with locked():
+            st = state()
+            if not st or st["model"] != selected_model or not healthy(st["port"]):
+                p.error("shared-weight service is not ready for requested model")
+            if not args.chat_id or args.chat_id not in st.get("reservations", {}):
+                p.error("reset needs a known --chat-id")
+            if args.expected_used_tokens is None or args.expected_used_tokens < 0:
+                p.error("reset needs --expected-used-tokens")
+            code, value = request(st["port"], f"/chats/{args.chat_id}/reset", "POST",
+                                  {"expected_used_tokens": args.expected_used_tokens}, timeout=120)
+            if code == 200:
+                reservation = st["reservations"][args.chat_id]
+                reservation["occupied_tokens"] = 0
+                save(st)
+            print(json.dumps({**value, "service_instance_id": st["instance_id"]}))
+            raise SystemExit(0 if code == 200 else 1)
     if args.action == "turn":
         st = state()
         if not st or st["model"] != selected_model or not healthy(st["port"]):

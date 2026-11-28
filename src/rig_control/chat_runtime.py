@@ -103,6 +103,40 @@ class ChatRuntime:
                     'instance_id': instance, 'used_tokens': row.get('used_tokens', 0),
                     'reservation': row.get('reservation')}
 
+    async def compact(self, owner, expected_instance, expected_chat,
+                      expected_used_tokens=None):
+        """Clear one owner's KV context without releasing its GPU placement."""
+        if (not isinstance(owner, str) or not owner or
+                not isinstance(expected_instance, str) or not expected_instance or
+                not isinstance(expected_chat, str) or not expected_chat or
+                (expected_used_tokens is not None and
+                 (type(expected_used_tokens) is not int or expected_used_tokens < 0))):
+            raise ManagerError(400, 'Provide owner and exact shared context identity')
+        async with self.lock:
+            with self.db() as con:
+                binding = con.execute(
+                    'SELECT model, instance, chat FROM chat_bindings WHERE owner=?',
+                    (owner,)).fetchone()
+            if not binding or binding[1:] != (expected_instance, expected_chat):
+                raise ManagerError(409, 'Chat placement changed; refresh before compaction')
+            model = binding[0]
+            service = (await self.manager.rig.status()).get('shared_kv_service') or {}
+            if (service.get('status') != 'ready' or
+                    service.get('instance_id') != expected_instance or
+                    service.get('model') != model):
+                raise ManagerError(409, 'Shared service changed before compaction')
+            row = next((item for item in service.get('chats', [])
+                        if item.get('chat_id') == expected_chat), None)
+            if not row or type(row.get('used_tokens')) is not int:
+                raise ManagerError(409, 'Shared chat context is missing')
+            used = row['used_tokens']
+            if expected_used_tokens is not None and used != expected_used_tokens:
+                raise ManagerError(409, 'Shared chat changed before compaction')
+            await self.manager._require_control()
+            return await self.manager.rig.shared_kv(
+                'reset', model=model, chat_id=expected_chat,
+                expected_used_tokens=used)
+
     async def release(self, owner, expected_instance=None, expected_chat=None, park=False):
         if park and (not isinstance(expected_instance, str) or not expected_instance or
                      not isinstance(expected_chat, str) or not expected_chat):

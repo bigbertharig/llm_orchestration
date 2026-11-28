@@ -202,6 +202,29 @@ int main(int argc, char **argv) {
         if (!sessions.erase(id)) { reply(res,404,{{"error","unknown chat"}}); return; }
         reply(res,200,{{"detached",id}});
     });
+    server.Post(R"(/chats/([A-Za-z0-9_-]+)/reset)", [&](const httplib::Request &req, httplib::Response &res) {
+        std::shared_lock life(lifecycle);
+        const std::string id = req.matches[1];
+        auto found = sessions.find(id);
+        if (found == sessions.end()) { reply(res,404,{{"error","unknown chat"}}); return; }
+        auto item = found->second;
+        std::lock_guard turn(item->mutex);
+        json body;
+        try { body = json::parse(req.body); } catch (...) { reply(res,400,{{"error","invalid JSON"}}); return; }
+        if (!body.contains("expected_used_tokens") || !body["expected_used_tokens"].is_number_integer()) {
+            reply(res,400,{{"error","expected_used_tokens integer required"}}); return;
+        }
+        const int previous = item->used.load();
+        if (previous != body["expected_used_tokens"].get<int>()) {
+            reply(res,409,{{"error","chat context changed"},{"used_tokens",previous}}); return;
+        }
+        llama_kv_chat_select(item->gpu,-1);
+        llama_memory_clear(llama_get_memory(item->ctx), true);
+        llama_sampler_reset(item->sampler);
+        item->used.store(0);
+        reply(res,200,{{"chat_id",id},{"gpu",item->gpu},{"context_cap",item->cap},
+                       {"previous_used_tokens",previous},{"used_tokens",0}});
+    });
     server.Post(R"(/chats/([A-Za-z0-9_-]+)/turns)", [&](const httplib::Request &req, httplib::Response &res) {
         json body;
         try { body = json::parse(req.body); } catch (...) { reply(res,400,{{"error","invalid JSON"}}); return; }

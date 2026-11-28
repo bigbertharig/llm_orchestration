@@ -1527,6 +1527,7 @@ def cmd_shared_kv(args) -> int:
     if args.chat_id: command += ["--chat-id", args.chat_id]
     if args.message is not None: command += ["--message", args.message]
     if args.max_tokens is not None: command += ["--max-tokens", str(args.max_tokens)]
+    if args.expected_used_tokens is not None: command += ["--expected-used-tokens", str(args.expected_used_tokens)]
     if args.gpu is not None: command += ["--gpu", str(args.gpu)]
     if args.context_cap is not None: command += ["--context-cap", str(args.context_cap)]
     if args.main_context_cap is not None: command += ["--main-context-cap", str(args.main_context_cap)]
@@ -1575,11 +1576,12 @@ def main() -> int:
     s.add_argument("--spec", help="remote, one profile: required manager load spec (JSON: model, gguf_path, ctx_size, tensor_split, ...)")
     s.set_defaults(fn=cmd_start)
     s = sub.add_parser("shared-kv", help="control the loaded shared-weight chat service")
-    s.add_argument("action", choices=("status", "start", "attach", "detach", "turn", "stop"))
+    s.add_argument("action", choices=("status", "start", "attach", "detach", "reset", "turn", "stop"))
     s.add_argument("--model", choices=("qwen3.6:35b-a3b-xl", "nemotron-3.5-bolt:74b-a9b"))
     s.add_argument("--chat-id")
     s.add_argument("--message")
     s.add_argument("--max-tokens", type=int)
+    s.add_argument("--expected-used-tokens", type=int)
     s.add_argument("--gpu", type=int)
     s.add_argument("--context-cap", type=int)
     s.add_argument("--main-context-cap", type=int)

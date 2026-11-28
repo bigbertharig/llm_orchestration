@@ -23,6 +23,13 @@ class Rig:
             self.chats.append({'chat_id': args['chat_id'], 'gpu': 1, 'context_cap': 4096, 'used_tokens': 0})
         elif action == 'detach':
             self.chats = [r for r in self.chats if r['chat_id'] != args['chat_id']]
+        elif action == 'reset':
+            row = next(r for r in self.chats if r['chat_id'] == args['chat_id'])
+            assert row['used_tokens'] == args['expected_used_tokens']
+            previous = row['used_tokens']
+            row['used_tokens'] = 0
+            return {'chat_id': args['chat_id'], 'used_tokens': 0,
+                    'previous_used_tokens': previous, 'service_instance_id': self.instance}
         elif action == 'stop':
             self.chats = []
 
@@ -76,3 +83,27 @@ def test_stale_offer_cannot_select_unapproved_runtime(runtime):
     with pytest.raises(ManagerError, match='Unknown local chat offer'):
         asyncio.run(chat.switch('unreviewed', 'a'))
     assert manager.rig.calls == []
+
+
+def test_compact_resets_only_owned_context_without_releasing_placement(runtime):
+    chat, manager, _ = runtime
+    async def run():
+        main = await chat.prepare('shared-35b', 'a')
+        child = await chat.prepare('shared-35b', 'b')
+        rows = {r['chat_id']: r for r in manager.rig.chats}
+        rows['main']['used_tokens'] = 7000
+        rows[child['chat_id']]['used_tokens'] = 3000
+        with pytest.raises(ManagerError, match='placement changed'):
+            await chat.compact('a', 'old', 'main', 7000)
+        with pytest.raises(ManagerError, match='changed before compaction'):
+            await chat.compact('a', 'one', 'main', 6999)
+        cleared = await chat.compact('a', 'one', 'main', 7000)
+        assert cleared['previous_used_tokens'] == 7000
+        assert rows['main']['used_tokens'] == 0
+        assert rows[child['chat_id']]['used_tokens'] == 3000
+        assert (await chat.prepare('shared-35b', 'a'))['chat_id'] == main['chat_id']
+        cleared_child = await chat.compact('b', 'one', child['chat_id'], 3000)
+        assert cleared_child['used_tokens'] == 0
+        assert len(manager.rig.chats) == 2
+        assert [action for action, _ in manager.rig.calls].count('reset') == 2
+    asyncio.run(run())

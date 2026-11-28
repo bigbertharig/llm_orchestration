@@ -114,6 +114,8 @@ def create_app(*, token, state_root, rig=None, profiles_path=None, controller_id
             return await chat.prepare(**args)
         if op == 'chat.release':
             return await chat.release(**args)
+        if op == 'chat.compact':
+            return await chat.compact(**args)
         if op == 'chat.switch':
             return await chat.switch(**args)
         if op == 'chat.reset':
