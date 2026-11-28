@@ -134,4 +134,9 @@ the same reservation ID and recalled its saved codeword. Pi receipts:
 `/home/bryan/.local/state/llm-gateway/shared_compaction_live_20261128.json`,
 `shared_attached_reset_live_20261128.json`, and
 `shared_compaction_repeat_live_20261128.json`. A second main-chat checkpoint
-also kept the corrected owner and codeword.
+also kept the corrected owner and codeword. A direct rig-service race test
+then verified both orderings: an external turn first made the expected-token
+reset return 409 without losing its cache, while reset first let the turn
+continue on the same reservation. A fresh reset and follow-up turn succeeded.
+Receipt:
+`/home/bryan/.local/state/llm-gateway/shared_reset_race_live_20261128.json`.
